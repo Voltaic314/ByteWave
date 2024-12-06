@@ -1,10 +1,13 @@
 from boxsdk import OAuth2, Client
 from Services._api_base import APIBase
+from Helpers.file import FileSubItem
+from Helpers.folder import FolderSubItem
+
 
 class Box(APIBase):
-
+    
     def __init__(self, request: dict):
-        super().__init__(request)  # Initialize base class properties
+        super().__init__(request)
         self.initialize_box_client()
 
     def initialize_box_client(self):
@@ -18,8 +21,7 @@ class Box(APIBase):
         self.auth = OAuth2(access_token=self.access_token)
         self.client = Client(self.auth)
         self.set_token_expiration(expires_in=3600)
-        self.limit = 1000  # Default limit for API calls
-
+        self.limit = 1000
 
     async def refresh_token(self):
         """Refresh the API token specific to Box."""
@@ -27,108 +29,132 @@ class Box(APIBase):
         self.set_token_expiration(expires_in=3600)
         return new_access_token
 
-    def to_metadata(self, item_name, item_id, item_type) -> dict:
-        """
-        Convert item details into a standardized metadata dictionary.
-
-        Args:
-            item_name (str): Name of the item (file or folder).
-            item_id (str): ID of the item.
-            item_type (str): Type of the item, either "file" or "folder".
-
-        Returns:
-            dict: Metadata for the item.
-        """
-        return {
-            "type": item_type,
-            "name": item_name,
-            "identifier": item_id,
-            "path": None  # Traverser/Uploader will populate this
-        }
-
     def set_root_directory_first_folder_identifier(self):
         """Set the root folder identifier for Box."""
         return "0"  # Box uses "0" as the root folder ID
 
-    def get_folder_info(self, item) -> tuple:
-        """Return the name and ID of the folder, as expected by the base class."""
-        return item.name, item.id
+    async def is_directory(self, identifier: str) -> bool:
+        """
+        Determine if the item is a directory based on its metadata.
 
-    async def get_all_items(self, folder_id, **kwargs):
+        Args:
+            identifier (str): The item's identifier.
+
+        Returns:
+            bool: True if the item is a directory, False otherwise.
+        """
+        try:
+            item = await self.try_sdk_request(self.client.item, identifier)
+            return item.type == "folder"
+        except Exception as e:
+            print(f"Exception while checking if item is directory for ID {identifier}: {str(e)}")
+            return False
+
+    async def get_all_items(self, folder: FolderSubItem, **kwargs) -> list:
         """
         Retrieve all items in a Box folder using Box's API and handle pagination.
 
         Args:
-            folder_id (str): Identifier of the folder to retrieve items from.
-            **kwargs: Additional arguments for SDK calls.
+            folder (FolderSubItem): The folder to retrieve items from.
 
         Returns:
-            list: A list of item metadata dictionaries.
+            list: A list of FileSubItem or FolderSubItem objects.
         """
-        items_metadata = []
+        items = []
         try:
-            folder = self.client.folder(folder_id)
-            items = await self.try_sdk_request(folder.get_items, limit=self.limit, **kwargs)
-            api_calls_for_this_folder = (len(items) // self.limit) + 1
+            box_folder = self.client.folder(folder.identifier)
+            box_items = await self.try_sdk_request(box_folder.get_items, limit=self.limit, **kwargs)
+            api_calls_for_this_folder = (len(box_items) // self.limit) + 1
             self.api_calls_made += api_calls_for_this_folder
 
-            for item in items:
-                item_name, item_id = self.get_folder_info(item)
-                item_type = "folder" if item.type == "folder" else "file"
-                items_metadata.append(self.to_metadata(item_name, item_id, item_type))
+            for item in box_items:
+                if item.type == "folder":
+                    items.append(
+                        FolderSubItem(
+                            name=item.name,
+                            path=f"{folder.path}/{item.name}".strip("/"),
+                            identifier=item.id,
+                            parent_id=folder.identifier,
+                        )
+                    )
+                else:
+                    items.append(
+                        FileSubItem(
+                            name=item.name,
+                            path=f"{folder.path}/{item.name}".strip("/"),
+                            identifier=item.id,
+                            parent_id=folder.identifier,
+                            size=item.size,
+                        )
+                    )
 
         except Exception as e:
-            print(f"Exception while retrieving items for folder {folder_id}: {str(e)}")
+            print(f"Exception while retrieving items for folder {folder.identifier}: {str(e)}")
 
-        return items_metadata
+        return items
 
-    async def get_file_contents(self, file_id: str) -> bytes:
-        """Retrieve the contents of a file from Box as binary data."""
-        try:
-            return await self.try_sdk_request(self.client.file(file_id).content)
-        except Exception as e:
-            print(f"Exception while getting file contents for file ID {file_id}: {str(e)}")
-            return b''
-
-    async def create_folder(self, parent_id: str, folder_name: str) -> dict:
+    async def get_file_contents(self, file: FileSubItem) -> bytes:
         """
-        Create a folder in Box under the specified parent ID.
+        Retrieve the contents of a file from Box as binary data.
 
         Args:
-            parent_id (str): The ID of the parent folder.
-            folder_name (str): The name of the new folder.
+            file (FileSubItem): The file to retrieve contents from.
 
         Returns:
-            dict: Metadata of the created folder.
+            bytes: The file's binary content.
         """
         try:
-            parent_folder = self.client.folder(parent_id)
-            folder = await self.try_sdk_request(parent_folder.create_subfolder, folder_name)
-            return self.to_metadata(folder.name, folder.id, "folder")
+            return await self.try_sdk_request(self.client.file(file.identifier).content)
         except Exception as e:
-            print(f"Exception while creating folder {folder_name} in parent {parent_id}: {str(e)}")
-            return {}
+            print(f"Exception while getting file contents for file ID {file.identifier}: {str(e)}")
+            return b""
 
-    async def upload_file(self, parent_id: str, file_name: str, file_content: bytes) -> dict:
+    async def create_folder(self, parent_folder: FolderSubItem, folder_name: str) -> FolderSubItem:
+        """
+        Create a folder in Box under the specified parent folder.
+
+        Args:
+            parent_folder (FolderSubItem): The parent folder where the new folder will be created.
+            folder_name (str): The name of the folder to create.
+
+        Returns:
+            FolderSubItem: Metadata of the created folder.
+        """
+        try:
+            box_parent_folder = self.client.folder(parent_folder.identifier)
+            new_folder = await self.try_sdk_request(box_parent_folder.create_subfolder, folder_name)
+            return FolderSubItem(
+                name=new_folder.name,
+                path=f"{parent_folder.path}/{new_folder.name}".strip("/"),
+                identifier=new_folder.id,
+                parent_id=parent_folder.identifier,
+            )
+        except Exception as e:
+            print(f"Exception while creating folder {folder_name} in parent {parent_folder.identifier}: {str(e)}")
+            return None
+
+    async def upload_file(self, parent_folder: FolderSubItem, file: FileSubItem, file_content: bytes) -> FileSubItem:
         """
         Upload a file to Box under the specified parent folder.
 
         Args:
-            parent_id (str): The ID of the parent folder.
-            file_name (str): The name of the file to upload.
+            parent_folder (FolderSubItem): The parent folder where the file will be uploaded.
+            file (FileSubItem): Metadata of the file to upload.
             file_content (bytes): Binary content of the file.
 
         Returns:
-            dict: Metadata of the uploaded file.
+            FileSubItem: Metadata of the uploaded file.
         """
         try:
-            parent_folder = self.client.folder(parent_id)
-            file = await self.try_sdk_request(parent_folder.upload_stream, file_content, file_name)
-            return self.to_metadata(file.name, file.id, "file")
+            box_parent_folder = self.client.folder(parent_folder.identifier)
+            uploaded_file = await self.try_sdk_request(box_parent_folder.upload_stream, file_content, file.name)
+            return FileSubItem(
+                name=uploaded_file.name,
+                path=f"{parent_folder.path}/{uploaded_file.name}".strip("/"),
+                identifier=uploaded_file.id,
+                parent_id=parent_folder.identifier,
+                size=uploaded_file.size,
+            )
         except Exception as e:
-            print(f"Exception while uploading file {file_name} to parent {parent_id}: {str(e)}")
-            return {}
-
-    def is_directory(self, item_metadata: dict) -> bool:
-        """Determine if the item is a directory based on Box metadata."""
-        return item_metadata.get("type", "").lower() == "folder"
+            print(f"Exception while uploading file {file.name} to parent {parent_folder.identifier}: {str(e)}")
+            return None
