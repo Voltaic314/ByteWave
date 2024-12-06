@@ -23,7 +23,7 @@ class OS_Class:
             list: A list of metadata dictionaries for the items in the folder.
         """
         folder_path = self.normalize_path(folder_metadata["path"])
-        self.total_disk_reads += 1  # Increment disk reads for accessing the directory
+        self.total_disk_reads += 1  # Increment for accessing the directory contents
         items_metadata = []
 
         try:
@@ -31,8 +31,27 @@ class OS_Class:
             items = await asyncio.to_thread(os.listdir, folder_path)
             for item_name in items:
                 item_path = self.normalize_path(os.path.join(folder_path, item_name))
-                item_type = "folder" if os.path.isdir(item_path) else "file"
-                items_metadata.append(self.to_metadata(item_name, item_path, item_type))
+
+                # Check if the item is a folder
+                is_dir = await asyncio.to_thread(os.path.isdir, item_path)
+                self.total_disk_reads += 1  # Increment for the isdir check
+                item_type = "folder" if is_dir else "file"
+
+                # Create metadata dictionary
+                item_metadata = {
+                    "name": item_name,
+                    "identifier": item_path,
+                    "type": item_type,
+                    "parent_id": folder_metadata["identifier"],
+                }
+
+                # Add size if it's a file
+                if item_type == "file":
+                    item_metadata["size"] = await asyncio.to_thread(os.path.getsize, item_path)
+                    self.total_disk_reads += 1  # Increment for the getsize call
+
+                items_metadata.append(item_metadata)
+
         except Exception as e:
             print(f"Error reading folder {folder_path}: {str(e)}")
 
@@ -91,25 +110,6 @@ class OS_Class:
                 self.total_disk_writes += 1  # Increment disk writes for file creation
         except Exception as e:
             print(f"Error writing file {file_path}: {str(e)}")
-
-    def to_metadata(self, name: str, path: str, item_type: str) -> dict:
-        """
-        Convert file/folder attributes to a consistent metadata structure.
-
-        Args:
-            name (str): Name of the file or folder.
-            path (str): Absolute path of the file or folder.
-            item_type (str): Type of the item ("folder" or "file").
-
-        Returns:
-            dict: Metadata dictionary.
-        """
-        return {
-            "type": item_type,
-            "name": name,
-            "path": path,
-            "identifier": path,  # For OS, path is the identifier
-        }
 
     @staticmethod
     def normalize_path(path: str) -> str:
