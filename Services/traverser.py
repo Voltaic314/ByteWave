@@ -1,6 +1,7 @@
 import asyncio
 from Helpers.path_verifier import PathVerifier
-from Helpers.path_helper import PathHelper
+from Helpers.file_system_trie import FileSystemTrie
+
 
 class Traverser:
     """
@@ -8,7 +9,7 @@ class Traverser:
     and logs the resulting structure to a file system trie.
     """
 
-    def __init__(self, request: dict, service, file_tree):
+    def __init__(self, request: dict, service, file_tree: FileSystemTrie):
         """
         Initialize the Traverser class.
 
@@ -20,7 +21,6 @@ class Traverser:
         self.file_tree = file_tree  # FileSystemTrie instance for managing paths
         self.verifier = PathVerifier(request)  # Path verifier for filtering logic
         self.service = service  # Service class for API/OS operations
-        self.path_helper = PathHelper()  # Path helper for building paths
 
         # Directories to traverse, cleaned for redundancy
         self.directories = self.filter_redundant_paths(
@@ -45,29 +45,21 @@ class Traverser:
 
     async def traverse(self):
         """
-        Start traversal for all configured directories.
-        Builds intermediate paths and initiates traversal for each directory.
+        Start traversal for all configured directories or resume from failed nodes.
         """
         self.state = "running"
         try:
-            for directory in self.directories:
-                # Wait for the run_event before processing
-                await self.run_event.wait()
+            # Resume from failed nodes, if any
+            failed_nodes = self.file_tree.get_failed_nodes()
+            if failed_nodes:
+                print(f"Resuming from failed nodes: {len(failed_nodes)} found.")
+                for node in failed_nodes:
+                    await self.traverse_folder(node.item.to_dict())
+                return
 
-                # Build intermediate paths
-                parts = directory.split("/")
-                path_so_far = ""
-                for index, part in enumerate(parts):
-                    path_so_far = f"{path_so_far}/{part}".strip("/")
-                    intermediate_metadata = {
-                        "path": path_so_far,
-                        "name": part,
-                        "type": "folder",
-                    }
-                    if not self.verifier.is_valid_item(intermediate_metadata):
-                        print(f"Skipping invalid intermediate path: {path_so_far}")
-                        break
-                    await self.file_tree.insert_path(intermediate_metadata)
+            # Traverse from configured directories if no failed nodes
+            for directory in self.directories:
+                await self.run_event.wait()  # Wait for the run_event before processing
 
                 # Start traversal at the target directory
                 root_metadata = {
@@ -99,20 +91,16 @@ class Traverser:
             # Add the folder to the trie
             await self.file_tree.insert_path(folder_metadata)
 
-            # Push folder metadata to path helper
-            self.path_helper.add(folder_metadata)
-
             # Retrieve items within the folder using the service
             items = await self.service.get_all_items(folder_metadata)
             if not items:
                 print(f"Unable to retrieve items for: {folder_metadata['path']}")
-                self.path_helper.remove()  # Remove folder from path helper
+                await self.file_tree.update_node_status(folder_metadata["identifier"], "failed")
                 return
 
             # Process each item
             for item_metadata in items:
                 await self.run_event.wait()  # Wait for the run_event before processing
-                item_metadata["path"] = f"{self.path_helper.get_current_path()}/{item_metadata['name']}"
                 if not self.verifier.is_valid_item(item_metadata):
                     print(f"Skipping invalid item: {item_metadata['path']}")
                     continue
@@ -123,15 +111,15 @@ class Traverser:
                 if item_metadata["type"] == "folder":
                     await self.traverse_folder(item_metadata)
 
-            # Pop folder metadata from path helper when done
-            self.path_helper.remove()
+            # Mark folder as successfully processed
+            await self.file_tree.update_node_status(folder_metadata["identifier"], "successful")
 
         except asyncio.CancelledError:
             print(f"Traversal of folder {folder_metadata['path']} cancelled.")
-            self.path_helper.remove()
+            await self.file_tree.update_node_status(folder_metadata["identifier"], "failed")
         except Exception as e:
             print(f"Error while traversing folder {folder_metadata['path']}: {e}")
-            self.path_helper.remove()
+            await self.file_tree.update_node_status(folder_metadata["identifier"], "failed")
 
     async def pause(self):
         """Pause the traversal."""
