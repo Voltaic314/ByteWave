@@ -1,6 +1,8 @@
 import asyncio
 from Helpers.path_verifier import PathVerifier
 from Helpers.file_system_trie import FileSystemTrie
+from Helpers.folder import Folder
+from Helpers.file import File
 
 
 class Traverser:
@@ -50,76 +52,81 @@ class Traverser:
         self.state = "running"
         try:
             # Resume from failed nodes, if any
-            failed_nodes = self.file_tree.get_failed_nodes()
+            failed_nodes = self.file_tree.get_failed_traversal_nodes()
             if failed_nodes:
                 print(f"Resuming from failed nodes: {len(failed_nodes)} found.")
                 for node in failed_nodes:
-                    await self.traverse_folder(node.item.to_dict())
+                    await self.traverse_folder(node.item)
                 return
 
             # Traverse from configured directories if no failed nodes
             for directory in self.directories:
                 await self.run_event.wait()  # Wait for the run_event before processing
 
-                # Start traversal at the target directory
-                root_metadata = {
-                    "path": directory,
-                    "name": directory.split("/")[-1],
-                    "type": "folder",
-                }
-                if not self.verifier.is_valid_item(root_metadata):
-                    print(f"Skipping directory due to invalid path: {directory}")
+                # Get the root folder object from the service
+                root_folder_sub_item = self.service.get_root_directory_sub_item(directory)
+                root_folder = Folder(source=root_folder_sub_item)
+
+                if not self.verifier.is_valid_item(root_folder.source):
+                    print(f"Skipping invalid directory: {directory}")
                     continue
 
-                await self.traverse_folder(root_metadata)
+                await self.traverse_folder(root_folder)
 
         except asyncio.CancelledError:
             print("Traversal cancelled.")
         finally:
             self.state = "idle"
 
-    async def traverse_folder(self, folder_metadata: dict):
+    async def traverse_folder(self, folder: Folder):
         """
         Recursively traverse a folder and log its structure.
 
         Args:
-            folder_metadata (dict): Metadata of the folder to traverse.
+            folder (Folder): The Folder object to traverse.
         """
         try:
             await self.run_event.wait()  # Wait for the run_event before proceeding
 
             # Add the folder to the trie
-            await self.file_tree.insert_path(folder_metadata)
+            self.file_tree.add_item(folder)
 
             # Retrieve items within the folder using the service
-            items = await self.service.get_all_items(folder_metadata)
+            items = await self.service.get_all_items(folder.source)
             if not items:
-                print(f"Unable to retrieve items for: {folder_metadata['path']}")
-                await self.file_tree.update_node_status(folder_metadata["identifier"], "failed")
+                print(f"Unable to retrieve items for: {folder.source.path}")
+                await self.file_tree.update_node_traversal_status(folder.source.identifier, "failed")
                 return
 
             # Process each item
-            for item_metadata in items:
+            for item_sub_item in items:
                 await self.run_event.wait()  # Wait for the run_event before processing
-                if not self.verifier.is_valid_item(item_metadata):
-                    print(f"Skipping invalid item: {item_metadata['path']}")
+
+                # Create File or Folder object from the item's sub-item
+                if isinstance(item_sub_item, FolderSubItem):
+                    item = Folder(source=item_sub_item)
+                else:
+                    item = File(source=item_sub_item)
+
+                if not self.verifier.is_valid_item(item.source):
+                    print(f"Skipping invalid item: {item.source.path}")
                     continue
 
-                await self.file_tree.insert_path(item_metadata)
+                self.file_tree.add_item(item)
 
                 # Recurse into folders
-                if item_metadata["type"] == "folder":
-                    await self.traverse_folder(item_metadata)
+                if isinstance(item, Folder):
+                    await self.traverse_folder(item)
 
             # Mark folder as successfully processed
-            await self.file_tree.update_node_status(folder_metadata["identifier"], "successful")
+            await self.file_tree.update_node_traversal_status(folder.source.identifier, "successful")
 
         except asyncio.CancelledError:
-            print(f"Traversal of folder {folder_metadata['path']} cancelled.")
-            await self.file_tree.update_node_status(folder_metadata["identifier"], "failed")
+            print(f"Traversal of folder {folder.source.path} cancelled.")
+            await self.file_tree.update_node_traversal_status(folder.source.identifier, "failed")
         except Exception as e:
-            print(f"Error while traversing folder {folder_metadata['path']}: {e}")
-            await self.file_tree.update_node_status(folder_metadata["identifier"], "failed")
+            print(f"Error while traversing folder {folder.source.path}: {e}")
+            await self.file_tree.update_node_traversal_status(folder.source.identifier, "failed")
 
     async def pause(self):
         """Pause the traversal."""

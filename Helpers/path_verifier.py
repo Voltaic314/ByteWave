@@ -1,4 +1,4 @@
-import re 
+import re
 
 
 class PathVerifier:
@@ -18,6 +18,29 @@ class PathVerifier:
         self.bad_keywords = [keyword.lower() for keyword in request.get("bad_keywords", [])]
         self.regex_patterns = [re.compile(pattern) for pattern in request.get("regex_patterns", [])]
 
+    def _validate_path(self, file_path: str, is_file: bool) -> bool:
+        """
+        Centralized validation logic for file or folder paths.
+
+        Args:
+            file_path (str): The path to validate.
+            is_file (bool): Whether the path belongs to a file.
+
+        Returns:
+            bool: True if the path is valid, False otherwise.
+        """
+        # Check bad keywords for all items
+        if not self.path_does_not_match_bad_keywords(file_path):
+            return False
+
+        # Additional checks for files
+        if is_file:
+            return (
+                self.is_valid_file_extension(file_path)
+                and self.path_matches_keywords(file_path)
+            )
+        return True
+
     def is_valid_file_extension(self, file_path: str) -> bool:
         """Check if the file has a valid extension."""
         file_ext = file_path.split('.')[-1]
@@ -31,26 +54,21 @@ class PathVerifier:
         """Check if the file path does not contain any bad keywords."""
         return not any(keyword in file_path.lower() for keyword in self.bad_keywords) if self.bad_keywords else True
 
-    def is_valid_item(self, item_metadata: dict) -> bool:
+    def is_valid_item(self, item) -> bool:
         """
         Validate an item based on its metadata.
 
         Args:
-            item_metadata (dict): Metadata of the item (e.g., path, type).
+            item (FileSubItem | FolderSubItem): Item object to validate.
 
         Returns:
             bool: True if the item is valid, False otherwise.
         """
-        file_path = item_metadata.get("path", "")
-        item_type = item_metadata.get("type", "")
+        # Determine if the item is a file or folder
+        is_file = hasattr(item, "size")
 
-        # Skip validation for folders (only check bad keywords)
-        if item_type == "folder":
-            return self.path_does_not_match_bad_keywords(file_path)
+        # Validate source path
+        if item.path:
+            return self._validate_path(item.path, is_file)
 
-        # Full validation for files
-        return (
-            self.is_valid_file_extension(file_path)
-            and self.path_matches_keywords(file_path)
-            and self.path_does_not_match_bad_keywords(file_path)
-        )
+        return False
