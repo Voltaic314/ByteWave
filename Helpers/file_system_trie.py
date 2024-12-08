@@ -47,6 +47,20 @@ class TrieNode:
     def increment_upload_attempts(self):
         self.upload_attempts += 1
 
+    def to_dict(self):
+        """
+        Serialize the node to a dictionary for database storage.
+        """
+        return {
+            "identifier": self.item.source.identifier if self.item.source else None,
+            "parent_id": self.parent.item.source.identifier if self.parent and self.parent.item.source else None,
+            "children": [child.item.source.identifier for child in self.children.values()],
+            "traversal_status": self.traversal_status,
+            "upload_status": self.upload_status,
+            "traversal_attempts": self.traversal_attempts,
+            "upload_attempts": self.upload_attempts,
+        }
+
 
 class FileSystemTrie:
     """
@@ -58,6 +72,7 @@ class FileSystemTrie:
         self.node_map = {"root": self.root}
         self.status_updates = []  # Batch of updates for MongoDB
         self.child_updates = []  # Batch updates for parent-child relationships
+        self.node_updates = []  # Updates for serializing entire nodes
         self.flush_threshold = 50
         self.max_traversal_retries = max_traversal_retries
         self.max_upload_retries = max_upload_retries
@@ -100,9 +115,12 @@ class FileSystemTrie:
                 "upsert": True
             })
 
+        # Queue node serialization update
+        self.node_updates.append(new_node.to_dict())
+
     async def flush_updates(self):
         """
-        Flush batched status and child updates to the database.
+        Flush batched status, child updates, and node serializations to the database.
         """
         try:
             if self.status_updates:
@@ -114,6 +132,11 @@ class FileSystemTrie:
                 await self.db.update_entries("nodes", updates=self.child_updates)
                 print(f"Flushed {len(self.child_updates)} parent-child updates to the database.")
                 self.child_updates.clear()
+
+            if self.node_updates:
+                await self.db.insert_entries("nodes", self.node_updates)
+                print(f"Serialized {len(self.node_updates)} nodes to the database.")
+                self.node_updates.clear()
         except Exception as e:
             print(f"Error flushing updates: {e}")
 
@@ -193,4 +216,5 @@ class FileSystemTrie:
         self.node_map = {"root": self.root}
         self.status_updates.clear()
         self.child_updates.clear()
+        self.node_updates.clear()
         print("FileSystemTrie cleared.")

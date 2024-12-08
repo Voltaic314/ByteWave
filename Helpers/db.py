@@ -1,6 +1,7 @@
 from motor.motor_asyncio import AsyncIOMotorClient
 from datetime import datetime
 
+
 class DB:
     def __init__(self, db_name="migration_db"):
         # Connect to MongoDB asynchronously
@@ -9,6 +10,7 @@ class DB:
         self.collections = {
             "files": self.db.files,
             "folders": self.db.folders,
+            "nodes": self.db.nodes,  # Added nodes collection
             "resource_monitoring": self.db.resource_monitoring,
         }
 
@@ -76,6 +78,35 @@ class DB:
     async def delete_entries(self, collection_name, filter_):
         """Delete entries from the specified collection."""
         return await self.execute_db_operation("delete", collection_name, filter=filter_)
+
+    # Specialized methods for nodes
+    async def serialize_node(self, node_data: dict):
+        """
+        Serialize a node into the 'nodes' collection.
+
+        Args:
+            node_data (dict): The node data to store.
+        """
+        return await self.insert_entries("nodes", data=node_data)
+
+    async def fetch_nodes(self, query=None, projection=None):
+        """
+        Fetch nodes from the 'nodes' collection.
+
+        Args:
+            query (dict): Query parameters for fetching nodes.
+            projection (dict): Projection parameters for limiting fields.
+
+        Returns:
+            list: A list of node documents.
+        """
+        return await self.fetch_entries("nodes", query=query, projection=projection)
+
+    async def clear_nodes(self):
+        """
+        Clear all nodes from the 'nodes' collection.
+        """
+        return await self.delete_entries("nodes", filter_={})
 
     # Specialized methods for resource monitoring
     async def log_resource_data(self, resource_type: str, resource_data: list):
