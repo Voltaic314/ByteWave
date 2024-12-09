@@ -1,8 +1,8 @@
 import asyncio
 from Helpers.path_verifier import PathVerifier
 from Helpers.file_system_trie import FileSystemTrie
-from Helpers.folder import Folder
-from Helpers.file import File
+from Helpers.folder import Folder, FolderSubItem
+from Helpers.file import File, FileSubItem
 
 
 class Traverser:
