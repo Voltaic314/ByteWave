@@ -1,24 +1,24 @@
 import asyncio
-from Services.traverser import Traverser
-from Services.uploader import Uploader
+from Controllers.traverser_manager import TraverserManager
+from Controllers.uploader_manager import UploaderManager
 
 
 class Migrator:
     """
     The Migrator class acts as a controller for managing the traversal and upload processes.
-    It coordinates the Traverser and Uploader, tracks states, and provides control methods.
+    It coordinates the TraverserManager and UploaderManager, tracks states, and provides control methods.
     """
 
-    def __init__(self, traverser: Traverser, uploader: Uploader):
+    def __init__(self, traverser_manager: TraverserManager, uploader_manager: UploaderManager):
         """
         Initialize the Migrator.
 
         Args:
-            traverser (Traverser): Instance of the Traverser class.
-            uploader (Uploader): Instance of the Uploader class.
+            traverser_manager (TraverserManager): Instance of the TraverserManager class.
+            uploader_manager (UploaderManager): Instance of the UploaderManager class.
         """
-        self.traverser = traverser
-        self.uploader = uploader
+        self.traverser_manager = traverser_manager
+        self.uploader_manager = uploader_manager
         self.state = "idle"  # idle, traversing, uploading, paused, stopped
         self.mode = None  # "traverse" or "upload"
         self.current_task = None  # Tracks the active asyncio task
@@ -36,8 +36,7 @@ class Migrator:
 
         try:
             print("Starting traversal...")
-            self.current_task = asyncio.create_task(self.traverser.traverse())
-            await self.current_task
+            await self.traverser_manager.start()
             print("Traversal completed successfully.")
             self.state = "idle"
         except asyncio.CancelledError:
@@ -47,13 +46,9 @@ class Migrator:
             print(f"Error during traversal: {e}")
             self.state = "stopped"
 
-    async def start_upload(self, source_folder_id, destination_folder_id):
+    async def start_upload(self):
         """
         Start the upload process.
-
-        Args:
-            source_folder_id (str): Identifier for the source folder.
-            destination_folder_id (str): Identifier for the destination folder.
         """
         if self.state not in ["idle", "paused"]:
             print(f"Cannot start upload. Current state: {self.state}")
@@ -64,8 +59,7 @@ class Migrator:
 
         try:
             print("Starting upload...")
-            self.current_task = asyncio.create_task(self.uploader.upload(source_folder_id, destination_folder_id))
-            await self.current_task
+            await self.uploader_manager.start()
             print("Upload completed successfully.")
             self.state = "idle"
         except asyncio.CancelledError:
@@ -84,9 +78,10 @@ class Migrator:
             return
 
         print("Pausing current operation...")
-        await self.traverser.pause()
-        await self.uploader.pause()
         self.state = "paused"
+
+        # Pausing logic will depend on the ability to halt workers or manage task queues
+        # This can be extended to include specific worker/task-level pausing logic.
 
     async def resume(self):
         """
@@ -97,9 +92,10 @@ class Migrator:
             return
 
         print("Resuming operation...")
-        await self.traverser.resume()
-        await self.uploader.resume()
-        self.state = self.mode
+        if self.mode == "traverse":
+            await self.start_traversal()
+        elif self.mode == "upload":
+            await self.start_upload()
 
     async def stop(self):
         """
@@ -110,10 +106,11 @@ class Migrator:
             return
 
         print("Stopping current operation...")
-        if self.current_task:
-            self.current_task.cancel()
-        await self.traverser.stop()
-        await self.uploader.stop()
+        if self.mode == "traverse":
+            await self.traverser_manager.stop()
+        elif self.mode == "upload":
+            await self.uploader_manager.stop()
+
         self.state = "stopped"
 
     def get_status(self):
@@ -126,6 +123,6 @@ class Migrator:
         return {
             "state": self.state,
             "mode": self.mode,
-            "traverser_state": self.traverser.state,
-            "uploader_state": self.uploader.state,
+            "workers_traversing": len(self.traverser_manager.workers),
+            "workers_uploading": len(self.uploader_manager.workers),
         }
