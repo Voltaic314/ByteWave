@@ -181,4 +181,3 @@ class UploaderWorker(Worker):
         except Exception as e:
             print(f"Error uploading file {file.item.source.name}: {e}")
             await trie.update_node_status(file.item.source.identifier, "upload", "failed")
-
