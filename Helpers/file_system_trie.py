@@ -2,6 +2,7 @@ from Helpers.db import DB
 from typing import Union
 from Helpers.file import File
 from Helpers.folder import Folder
+import uuid
 
 
 class TrieNode:
@@ -47,166 +48,152 @@ class TrieNode:
     def increment_upload_attempts(self):
         self.upload_attempts += 1
 
-    def to_dict(self):
-        """
-        Serialize the node to a dictionary for database storage.
-        """
-        return {
-            "identifier": self.item.source.identifier if self.item.source else None,
-            "parent_id": self.parent.item.source.identifier if self.parent and self.parent.item.source else None,
-            "children": [child.item.source.identifier for child in self.children.values()],
-            "traversal_status": self.traversal_status,
-            "upload_status": self.upload_status,
-            "traversal_attempts": self.traversal_attempts,
-            "upload_attempts": self.upload_attempts,
-        }
-
 
 class FileSystemTrie:
     """
     A Trie data structure for managing hierarchical paths for file and folder creation.
     """
-    def __init__(self, db: DB, max_traversal_retries: int = 0, max_upload_retries: int = 0):
+
+    def __init__(self, db: DB, max_traversal_retries: int = 0, max_upload_retries: int = 0, flush_threshold: int = 50):
         self.db = db
         self.root = TrieNode(Folder(name="root", identifier="root", path="/", parent_id=None))  # Root node
-        self.node_map = {"root": self.root}
-        self.status_updates = []  # Batch of updates for MongoDB
-        self.child_updates = []  # Batch updates for parent-child relationships
-        self.node_updates = []  # Updates for serializing entire nodes
-        self.flush_threshold = 50
+        self.node_map = {"root": self.root}  # In-memory cache for fast lookups
         self.max_traversal_retries = max_traversal_retries
         self.max_upload_retries = max_upload_retries
 
-    def find_node(self, identifier: str):
-        return self.node_map.get(identifier)
-
-    def add_item(self, item: Union[File, Folder]):
-        """
-        Add an item to the Trie, ensuring parent-child relationships are updated.
-
-        Args:
-            item (File | Folder): The item to add to the Trie.
-        """
-        if item.source and item.source.identifier in self.node_map:
-            return  # Skip if the identifier already exists
-
-        current = self.root
-        parts = item.source.path.strip("/").split("/")
-        for part in parts[:-1]:
-            if part not in current.children:
-                new_folder = Folder(
-                    name=part, path="/".join(parts[:parts.index(part) + 1]),
-                    identifier=None, parent_id=current.item.source.identifier
-                )
-                current = current.add_child(new_folder)
-            else:
-                current = current.children[part]
-
-        # Add the final item
-        new_node = current.add_child(item)
-        self.node_map[item.source.identifier] = new_node
-
-        # Queue parent-child update for the database
-        if new_node.parent and new_node.parent.item.source:
-            parent_identifier = new_node.parent.item.source.identifier
-            self.child_updates.append({
-                "filter": {"identifier": parent_identifier},
-                "update": {"$addToSet": {"children": item.source.identifier}},
-                "upsert": True
-            })
-
-        # Queue node serialization update
-        self.node_updates.append(new_node.to_dict())
+        # Flush logic
+        self.flush_threshold = flush_threshold
+        self.status_updates = []  # Cache for status updates
+        self.node_inserts = []  # Cache for new node inserts
+        self.node_updates = []  # Cache for general node updates
 
     async def flush_updates(self):
         """
-        Flush batched status, child updates, and node serializations to the database.
+        Flush all cached updates to the database in batch operations.
         """
         try:
+            if self.node_inserts:
+                await self.db.insert_nodes(self.node_inserts)
+                print(f"Flushed {len(self.node_inserts)} node inserts to the database.")
+                self.node_inserts.clear()
+
             if self.status_updates:
-                await self.db.update_entries("nodes", updates=self.status_updates)
+                await self.db.update_nodes_status(self.status_updates)
                 print(f"Flushed {len(self.status_updates)} status updates to the database.")
                 self.status_updates.clear()
 
-            if self.child_updates:
-                await self.db.update_entries("nodes", updates=self.child_updates)
-                print(f"Flushed {len(self.child_updates)} parent-child updates to the database.")
-                self.child_updates.clear()
-
             if self.node_updates:
-                await self.db.insert_entries("nodes", self.node_updates)
-                print(f"Serialized {len(self.node_updates)} nodes to the database.")
+                await self.db.update_nodes_attempts(self.node_updates)
+                print(f"Flushed {len(self.node_updates)} node updates to the database.")
                 self.node_updates.clear()
         except Exception as e:
             print(f"Error flushing updates: {e}")
 
-    async def update_node_traversal_status(self, identifier: str, new_status: str):
+    async def add_item(self, item: Union[File, Folder], parent_id=None):
         """
-        Update the traversal status of a node and queue the change for database flushing.
+        Add an item to the Trie and cache the insertion for batch writing.
 
         Args:
-            identifier (str): The identifier of the node to update.
-            new_status (str): The new status to set ("successful", "failed").
+            item (File | Folder): The item to add to the Trie.
+            parent_id (str): The UUID of the parent node in the database.
         """
-        node = self.find_node(identifier)
-        if not node:
-            print(f"Node with identifier {identifier} not found.")
-            return
+        # Generate a compact UUID for the new node
+        node_id = uuid.uuid4().hex
 
-        if new_status == "failed" and self.max_traversal_retries > 0:
-            if node.traversal_attempts < self.max_traversal_retries:
+        node_data = {
+            "id": node_id,  # Use compact UUID as the unique ID
+            "parent_id": parent_id,
+            "name": item.source.name,
+            "type": "folder" if isinstance(item, Folder) else "file",
+            "source_identifier": item.source.identifier,
+            "destination_identifier": None,
+            "traversal_status": "pending",
+            "upload_status": "pending",
+            "traversal_attempts": 0,
+            "upload_attempts": 0,
+        }
+
+        # Cache the node for batch insertion
+        self.node_inserts.append(node_data)
+        if len(self.node_inserts) >= self.flush_threshold:
+            await self.flush_updates()
+
+        # Add to in-memory cache with the new UUID
+        new_node = TrieNode(item=item, parent=self.node_map.get(parent_id))
+        self.node_map[node_id] = new_node
+
+        return node_id  # Return the newly generated node ID
+
+    async def update_node_status(self, node_id: str, status_type: str, new_status: str):
+        """
+        Cache node status updates for batch writing.
+
+        Args:
+            node_id (str): The UUID of the node to update.
+            status_type (str): The type of status to update ("traversal" or "upload").
+            new_status (str): The new status to set.
+        """
+        if status_type not in {"traversal", "upload"}:
+            raise ValueError(f"Invalid status_type: {status_type}. Must be 'traversal' or 'upload'.")
+
+        # Cache the update
+        self.status_updates.append({
+            "node_id": node_id,
+            f"{status_type}_status": new_status
+        })
+
+        if len(self.status_updates) >= self.flush_threshold:
+            await self.flush_updates()
+
+        # Update in-memory cache
+        if node_id in self.node_map:
+            node = self.node_map[node_id]
+            if status_type == "traversal":
+                node.update_traversal_status(new_status)
+            else:
+                node.update_upload_status(new_status)
+
+    async def update_node_attempts(self, node_id: str, status_type: str):
+        """
+        Increment the retry attempts for a node.
+
+        Args:
+            node_id (str): The UUID of the node to update.
+            status_type (str): The type of attempts to increment ("traversal" or "upload").
+        """
+        if status_type not in {"traversal", "upload"}:
+            raise ValueError(f"Invalid status_type: {status_type}. Must be 'traversal' or 'upload'.")
+
+        # Update in-memory attempts count
+        if node_id in self.node_map:
+            node = self.node_map[node_id]
+            if status_type == "traversal":
                 node.increment_traversal_attempts()
-                print(f"Retrying traversal for node {identifier}. Attempt {node.traversal_attempts}/{self.max_traversal_retries}.")
-                return
             else:
-                print(f"Max traversal retries reached for node {identifier}.")
+                node.increment_upload_attempts()
 
-        node.update_traversal_status(new_status)
-        self.status_updates.append({
-            "filter": {"identifier": identifier},
-            "update": {"$set": {
-                "traversal_status": new_status,
-                "traversal_attempts": node.traversal_attempts
-            }},
-            "upsert": True
+        # Cache the update for batch writing
+        self.node_updates.append({
+            "node_id": node_id,
+            f"{status_type}_attempts": getattr(node, f"{status_type}_attempts")
         })
 
-        if len(self.status_updates) >= self.flush_threshold:
+        if len(self.node_updates) >= self.flush_threshold:
             await self.flush_updates()
 
-    async def update_node_upload_status(self, identifier: str, new_status: str):
+
+    async def get_nodes_by_status(self, status: str, status_type: str = "traversal"):
         """
-        Update the upload status of a node and queue the change for database flushing.
+        Retrieve all nodes with a specific status from the database.
 
         Args:
-            identifier (str): The identifier of the node to update.
-            new_status (str): The new status to set ("successful", "failed").
+            status (str): The desired status ('pending', 'successful', 'failed').
+            status_type (str): The type of status ('traversal' or 'upload').
+
+        Returns:
+            list: List of nodes with the specified status.
         """
-        node = self.find_node(identifier)
-        if not node:
-            print(f"Node with identifier {identifier} not found.")
-            return
-
-        if new_status == "failed" and self.max_upload_retries > 0:
-            if node.upload_attempts < self.max_upload_retries:
-                node.increment_upload_attempts()
-                print(f"Retrying upload for node {identifier}. Attempt {node.upload_attempts}/{self.max_upload_retries}.")
-                return
-            else:
-                print(f"Max upload retries reached for node {identifier}.")
-
-        node.update_upload_status(new_status)
-        self.status_updates.append({
-            "filter": {"identifier": identifier},
-            "update": {"$set": {
-                "upload_status": new_status,
-                "upload_attempts": node.upload_attempts
-            }},
-            "upsert": True
-        })
-
-        if len(self.status_updates) >= self.flush_threshold:
-            await self.flush_updates()
+        return await self.db.fetch_nodes_by_status(status, status_type)
 
     async def clear(self):
         """
@@ -215,6 +202,5 @@ class FileSystemTrie:
         self.root = TrieNode(Folder(name="root", identifier="root", path="/", parent_id=None))
         self.node_map = {"root": self.root}
         self.status_updates.clear()
-        self.child_updates.clear()
         self.node_updates.clear()
         print("FileSystemTrie cleared.")

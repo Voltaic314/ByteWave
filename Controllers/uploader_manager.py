@@ -1,9 +1,6 @@
 from Controllers.Queue.task_queue import TaskQueue
 from Controllers.Queue.worker import UploaderWorker
-from Helpers.path_verifier import PathVerifier
 from Helpers.file_system_trie import FileSystemTrie
-from Helpers.folder import Folder, FolderSubItem
-from Helpers.file import File, FileSubItem
 import asyncio
 
 
@@ -28,14 +25,12 @@ class UploaderManager:
         """
         Start the upload process by initializing the queue and spawning workers.
         """
-        # Add all `pending upload` nodes to the queue
+        # Fetch all `pending upload` nodes from cache or database
         pending_nodes = self.file_tree.get_nodes_by_status("pending", status_type="upload")
+
+        # Add these tasks to the queue
         for node in pending_nodes:
-            task = {
-                "trie": self.file_tree,
-                "service": self.service,
-                "node": node,
-            }
+            task = {"trie": self.file_tree, "service": self.service, "node": node}
             await self.queue.add_task(task)
 
         # Spawn workers

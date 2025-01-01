@@ -2,8 +2,6 @@ from Controllers.Queue.task_queue import TaskQueue
 from Controllers.Queue.worker import TraverserWorker
 from Helpers.path_verifier import PathVerifier
 from Helpers.file_system_trie import FileSystemTrie
-from Helpers.folder import Folder, FolderSubItem
-from Helpers.file import File, FileSubItem
 import asyncio
 
 
@@ -32,19 +30,19 @@ class TraverserManager:
         """
         Start the traversal process by initializing the queue and spawning workers.
         """
-        # Add root directories to the queue
-        for directory in self.directories:
-            root_folder_sub_item = self.service.get_root_directory_sub_item(directory)
-            root_folder = Folder(source=root_folder_sub_item)
-            if self.verifier.is_valid_item(root_folder.source):
-                task = {
-                    "identifier": root_folder.source.identifier,
-                    "folder": root_folder,
-                    "trie": self.file_tree,
-                    "verifier": self.verifier,
-                    "service": self.service,
-                }
-                await self.queue.add_task(task)
+        # Fetch all `pending traversal` nodes from cache or database
+        pending_nodes = self.file_tree.get_nodes_by_status("pending", status_type="traversal")
+
+        # Add these tasks to the queue
+        for node in pending_nodes:
+            task = {
+                "identifier": node.item.source.identifier,
+                "folder": node.item,
+                "trie": self.file_tree,
+                "verifier": self.verifier,
+                "service": self.service,
+            }
+            await self.queue.add_task(task)
 
         # Spawn workers
         for i in range(self.max_workers):

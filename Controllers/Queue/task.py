@@ -7,6 +7,19 @@ class Task:
             id (str): Unique identifier for the task.
             type (str): Type of task ('traverse' or 'upload').
             payload (dict): Task-specific data.
+            Expected structure for each type:
+            - 'traverse':
+                {
+                    "node_id": str,  # UUID of the node to traverse
+                    "trie": FileSystemTrie,  # Trie instance
+                    "service": Service,  # Service class for accessing the source
+                }
+            - 'upload':
+                {
+                    "node_id": str,  # UUID of the node to upload
+                    "trie": FileSystemTrie,  # Trie instance
+                    "service": Service,  # Service class for interacting with the destination
+                }
             retries (int): Number of retries allowed.
         """
         self.id = id

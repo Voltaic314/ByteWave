@@ -1,10 +1,12 @@
 import asyncio
+from uuid import uuid4
 from abc import ABC, abstractmethod
 from Controllers.Queue.task_queue import TaskQueue
 from Helpers.folder import Folder, FolderSubItem
-from Helpers.file import File, FileSubItem
-from Helpers.file_system_trie import FileSystemTrie
+from Helpers.file import File
+from Helpers.file_system_trie import FileSystemTrie, TrieNode
 from Helpers.path_verifier import PathVerifier
+from Controllers.Queue.task import Task 
 
 
 class Worker(ABC):
@@ -26,7 +28,7 @@ class Worker(ABC):
         """
         while self.running:
             try:
-                task = await self.queue.get_task()
+                task = await self.queue.get_next_task()
                 await self.process_task(task)
             except asyncio.CancelledError:
                 break
@@ -51,135 +53,132 @@ class Worker(ABC):
 
 
 class TraverserWorker(Worker):
-    async def process_task(self, task: dict):
+    async def process_task(self, task: Task):
         """
         Process a traversal task.
 
         Args:
-            task (dict): The task containing folder information.
+            task (Task): The task containing folder information.
         """
-        identifier = task.get("identifier")
-        folder: Folder = task.get("folder")  # Folder object for this task
-        trie: FileSystemTrie = task.get("trie")  # FileSystemTrie instance
-        verifier: PathVerifier = task.get("verifier")  # PathVerifier instance
-        service = task.get("service")  # Service class for API/OS operations
+        node_id = task.payload.get("node_id")
+        trie: FileSystemTrie = task.payload.get("trie")
+        service = task.payload.get("service")
 
-        if not folder or not trie or not verifier or not service:
-            print(f"Invalid task: {task}")
+        if not node_id or not trie or not service:
+            print(f"Invalid task payload: {task.payload}")
+            task.mark_failed()
             return
 
-        try:
-            # Add the folder to the trie
-            trie.add_item(folder)
+        # Initialize PathVerifier once
+        verifier = PathVerifier()
 
-            # Retrieve items within the folder using the service
-            items = await service.get_all_items(folder.source)
-            if not items:
-                print(f"Unable to retrieve items for: {folder.source.path}")
-                await trie.update_node_traversal_status(folder.source.identifier, "failed")
+        try:
+            # Retrieve the node from the trie
+            node = trie.node_map.get(node_id)
+            if not node:
+                print(f"Node {node_id} not found in trie.")
+                task.mark_failed()
                 return
 
-            # Process each item
-            for item_sub_item in items:
-                # Create File or Folder object from the item's sub-item
-                if isinstance(item_sub_item, FolderSubItem):
-                    item = Folder(source=item_sub_item)
-                else:
-                    item = File(source=item_sub_item)
+            # Retrieve items within the folder
+            items = await service.get_all_items(node.item.source)
+            if not items:
+                print(f"No items found in folder: {node.item.source.path}")
+                await trie.update_node_status(node_id, "traversal", "failed")
+                task.mark_failed()
+                return
 
-                # Skip invalid items
+            # Process items
+            for item_sub_item in items:
+                item = (
+                    Folder(source=item_sub_item)
+                    if isinstance(item_sub_item, FolderSubItem)
+                    else File(source=item_sub_item)
+                )
+
+                # Skip invalid items using the verifier
                 if not verifier.is_valid_item(item.source):
                     print(f"Skipping invalid item: {item.source.path}")
                     continue
 
-                # Add the item to the trie
-                trie.add_item(item)
+                # Add the item to the trie and generate a new node ID
+                child_node_id = await trie.add_item(item, parent_id=node_id)
 
-                # Add subfolders as new tasks
+                # Enqueue new tasks for subfolders
                 if isinstance(item, Folder):
-                    new_task = {
-                        "identifier": item.source.identifier,
-                        "folder": item,
-                        "trie": trie,
-                        "verifier": verifier,
-                        "service": service,
-                    }
+                    new_task = Task(
+                        id=uuid4().hex,
+                        type="traverse",
+                        payload={
+                            "node_id": child_node_id,
+                            "trie": trie,
+                            "service": service,
+                        },
+                    )
                     await self.queue.add_task(new_task)
 
-            # Mark folder as successfully processed
-            await trie.update_node_traversal_status(folder.source.identifier, "successful")
+            # Mark traversal as successful
+            await trie.update_node_status(node_id, "traversal", "successful")
+            task.mark_completed()
 
-        except asyncio.CancelledError:
-            print(f"Traversal of folder {folder.source.path} cancelled.")
-            await trie.update_node_traversal_status(folder.source.identifier, "failed")
         except Exception as e:
-            print(f"Error while traversing folder {folder.source.path}: {e}")
-            await trie.update_node_traversal_status(folder.source.identifier, "failed")
+            print(f"Error traversing folder {node_id}: {e}")
+            await trie.update_node_status(node_id, "traversal", "failed")
+            task.mark_failed()
 
-
+            
 class UploaderWorker(Worker):
-    async def process_task(self, task: dict):
+    async def process_task(self, task: Task):
         """
         Process an upload task.
 
         Args:
-            task (dict): The task containing file or folder information.
+            task (Task): The task containing file or folder information.
         """
-        trie: FileSystemTrie = task.get("trie")  # FileSystemTrie instance
-        service = task.get("service")  # Service instance
-        node = task.get("node")  # File or Folder node from the trie
+        node_id = task.payload.get("node_id")
+        trie: FileSystemTrie = task.payload.get("trie")
+        service = task.payload.get("service")
 
-        if not trie or not service or not node:
-            print(f"Invalid task: {task}")
+        if not node_id or not trie or not service:
+            print(f"Invalid task payload: {task.payload}")
+            task.mark_failed()
             return
 
         try:
-            if isinstance(node, Folder):
+            node = trie.node_map.get(node_id)
+            if not node:
+                print(f"Node {node_id} not found in trie.")
+                task.mark_failed()
+                return
+
+            if node.item.type == "folder":
                 await self._upload_folder(node, trie, service)
-            elif isinstance(node, File):
+            elif node.item.type == "file":
                 await self._upload_file(node, trie, service)
-        except asyncio.CancelledError:
-            print(f"Task cancelled for {node.source.identifier}.")
-            trie.update_node_upload_status(node.source.identifier, "failed")
         except Exception as e:
-            print(f"Error during task for {node.source.identifier}: {e}")
-            trie.update_node_upload_status(node.source.identifier, "failed")
+            print(f"Error processing task for node {node_id}: {e}")
+            await trie.update_node_status(node_id, "upload", "failed")
+            task.mark_failed()
 
-    async def _upload_folder(self, folder: Folder, trie: FileSystemTrie, service):
-        """
-        Upload a folder by creating it in the destination service.
-
-        Args:
-            folder (Folder): The folder to upload.
-            trie (FileSystemTrie): Trie instance for status updates.
-            service: Service instance for folder creation.
-        """
+    async def _upload_folder(self, folder: TrieNode, trie: FileSystemTrie, service):
         try:
-            folder_name = folder.source.name
-            destination_id = folder.parent.destination.identifier
+            folder_name = folder.item.source.name
+            destination_id = folder.parent.item.destination.identifier
             new_folder_id = await service.create_folder(folder_name, destination_id)
-            folder.destination = service.get_folder_sub_item(new_folder_id)
-            trie.update_node_upload_status(folder.source.identifier, "successful")
+            folder.item.destination = service.get_folder_sub_item(new_folder_id)
+            await trie.update_node_status(folder.item.source.identifier, "upload", "successful")
         except Exception as e:
-            print(f"Error creating folder '{folder.source.name}': {e}")
-            trie.update_node_upload_status(folder.source.identifier, "failed")
+            print(f"Error creating folder {folder.item.source.name}: {e}")
+            await trie.update_node_status(folder.item.source.identifier, "upload", "failed")
 
-    async def _upload_file(self, file: File, trie: FileSystemTrie, service):
-        """
-        Upload a file to the destination service.
-
-        Args:
-            file (File): The file to upload.
-            trie (FileSystemTrie): Trie instance for status updates.
-            service: Service instance for file uploads.
-        """
+    async def _upload_file(self, file: TrieNode, trie: FileSystemTrie, service):
         try:
-            file_name = file.source.name
-            file_contents = await service.get_file_contents(file.source.identifier)
-            destination_id = file.parent.destination.identifier
+            file_name = file.item.source.name
+            file_contents = await service.get_file_contents(file.item.source.identifier)
+            destination_id = file.parent.item.destination.identifier
             await service.upload_file(file_name, file_contents, destination_id)
-            trie.update_node_upload_status(file.source.identifier, "successful")
+            await trie.update_node_status(file.item.source.identifier, "upload", "successful")
         except Exception as e:
-            print(f"Error uploading file '{file.source.name}': {e}")
-            trie.update_node_upload_status(file.source.identifier, "failed")
+            print(f"Error uploading file {file.item.source.name}: {e}")
+            await trie.update_node_status(file.item.source.identifier, "upload", "failed")
 
