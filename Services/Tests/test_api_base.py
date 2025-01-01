@@ -71,7 +71,7 @@ async def test_handle_response_success(mock_api, mock_response):
 async def test_handle_response_unauthorized(mock_api, mock_response):
     # Simulate an unauthorized (401) response
     mock_response.status = 401
-    await mock_api.refresh_token = AsyncMock()
+    mock_api.refresh_token = AsyncMock()
 
     result = await mock_api.handle_response(mock_response)
     assert result is None

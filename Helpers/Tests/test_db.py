@@ -2,7 +2,7 @@ import pytest
 import aiosqlite
 import asyncio
 from datetime import datetime
-from db import DB
+from Helpers.db import DB
 
 @pytest.fixture
 async def db():
