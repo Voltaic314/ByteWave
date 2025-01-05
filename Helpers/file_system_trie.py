@@ -1,18 +1,19 @@
 from Helpers.db import DB
 from typing import Union
-from Helpers.file import File
-from Helpers.folder import Folder
+from Helpers.file import File, FileSubItem
+from Helpers.folder import Folder, FolderSubItem
 import uuid
 
 
 class TrieNode:
     """
-    Represents a node in the Trie structure. Can reference either a File or a Folder.
+    Represents a node in the Trie structure. Can reference both source and destination items.
     """
-    def __init__(self, item: Union[File, Folder], parent=None):
-        self.item = item  # Either a File or Folder instance
-        self.parent = parent
-        self.children = {}  # Child nodes keyed by their names
+    def __init__(self, source: Union[File, Folder] = None, destination: Union[File, Folder] = None, parent=None):
+        self.source = source  # Source File or Folder
+        self.destination = destination  # Destination File or Folder
+        self.parent = parent  # Parent TrieNode
+        self.children = {}  # Child nodes keyed by source item's name (if available)
 
         # Separate statuses for traversal and upload
         self.traversal_status = "pending"  # "pending", "successful", "failed"
@@ -20,21 +21,23 @@ class TrieNode:
         self.traversal_attempts = 0
         self.upload_attempts = 0
 
-    def add_child(self, child_item):
+    def add_child(self, child_source: Union[File, Folder], child_destination: Union[File, Folder] = None):
         """
         Add a child node to this node and update the parent-child relationship.
 
         Args:
-            child_item (File | Folder): The file or folder object for the child.
+            child_source (File | Folder): The source file or folder object for the child.
+            child_destination (File | Folder): The destination file or folder object for the child.
 
         Returns:
             TrieNode: The newly created or existing child node.
         """
-        if child_item.name not in self.children:
-            child_node = TrieNode(item=child_item, parent=self)
-            self.children[child_item.name] = child_node
+        child_name = child_source.source.name if child_source and child_source.source else None
+        if child_name not in self.children:
+            child_node = TrieNode(source=child_source, destination=child_destination, parent=self)
+            self.children[child_name] = child_node
             return child_node
-        return self.children[child_item.name]
+        return self.children[child_name]
 
     def update_traversal_status(self, new_status: str):
         self.traversal_status = new_status
@@ -56,7 +59,7 @@ class FileSystemTrie:
 
     def __init__(self, db: DB, max_traversal_retries: int = 0, max_upload_retries: int = 0, flush_threshold: int = 50):
         self.db = db
-        self.root = TrieNode(Folder(name="root", identifier="root", path="/", parent_id=None))  # Root node
+        self.root = TrieNode(Folder(source=FolderSubItem(name="root", identifier="root", path="/", parent_id=None)))  # Root node
         self.node_map = {"root": self.root}  # In-memory cache for fast lookups
         self.max_traversal_retries = max_traversal_retries
         self.max_upload_retries = max_upload_retries
@@ -89,19 +92,31 @@ class FileSystemTrie:
         except Exception as e:
             print(f"Error flushing updates: {e}")
 
-    async def add_item(self, item: Union[File, Folder], parent_id=None):
+    async def add_item(self, item: Union[File, Folder], parent_id=None, is_destination=False):
         """
         Add an item to the Trie and cache the insertion for batch writing.
 
         Args:
             item (File | Folder): The item to add to the Trie.
             parent_id (str): The UUID of the parent node in the database.
+            is_destination (bool): If True, update the destination sub-item instead of adding a new node.
         """
+        if not parent_id:
+            parent_id = "root"
+
+        parent_node = self.node_map.get(parent_id)
+
+        # Update an existing node if it's a destination item
+        if is_destination and item.source.identifier in parent_node.children:
+            child_node = parent_node.children[item.source.name]
+            child_node.destination = item
+            return child_node
+
         # Generate a compact UUID for the new node
         node_id = uuid.uuid4().hex
 
         node_data = {
-            "id": node_id,  # Use compact UUID as the unique ID
+            "id": node_id,
             "parent_id": parent_id,
             "name": item.source.name,
             "type": "folder" if isinstance(item, Folder) else "file",
@@ -118,11 +133,11 @@ class FileSystemTrie:
         if len(self.node_inserts) >= self.flush_threshold:
             await self.flush_updates()
 
-        # Add to in-memory cache with the new UUID
-        new_node = TrieNode(item=item, parent=self.node_map.get(parent_id))
+        # Add to in-memory cache
+        new_node = parent_node.add_child(child_source=item)
         self.node_map[node_id] = new_node
 
-        return node_id  # Return the newly generated node ID
+        return node_id
 
     async def update_node_status(self, node_id: str, status_type: str, new_status: str):
         """

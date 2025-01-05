@@ -1,5 +1,4 @@
 import pytest
-import os
 from unittest.mock import AsyncMock, MagicMock, patch
 from Helpers.file import FileSubItem
 from Helpers.folder import FolderSubItem
