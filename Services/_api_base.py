@@ -1,34 +1,41 @@
 import asyncio
 from aiohttp import ClientSession
-from datetime import datetime, timedelta
-
+from Helpers.db import DB
+from Helpers.token_manager import TokenManager  
 
 class APIBase:
-    def __init__(self, request: dict):
-        # Initialize session and token attributes
-        self.session = ClientSession()
-        self.access_token = request.get("access_token")
-        self.refresh_token = request.get("refresh_token")
-        self.token_expiration_time = datetime.now() + timedelta(seconds=request.get("expires_in", 3600))
-        self.service_name = request.get("service_name", "Unknown Service")
-        self.total_api_calls_made = 1 # we're assuming initial oauth will just be 1 here.
+    def __init__(self, request: dict, db: DB, roles: list = []):
+        """
+        Initialize the APIBase with token management and session setup.
 
-    async def is_token_expired(self) -> bool:
-        """Check if the token is expired."""
-        return datetime.now() >= self.token_expiration_time
+        Args:
+            request (dict): Initial request dictionary containing token info and service name.
+            db (DB): Database instance for storing and managing tokens.
+            roles (list): List of roles (e.g., ["source", "destination"]).
+        """
+        self.service_name = request.get("service_name", "Unknown Service")
+        self.session = ClientSession()
+        self.db = db
+        self.roles = roles
+
+        # Initialize TokenManager
+        self.token_manager = TokenManager(
+            db=db,
+            service_name=self.service_name,
+            refresh_token_url=request.get("refresh_token_url"),
+            roles=self.roles,
+            client_id=request.get("client_id"),
+            client_secret=request.get("client_secret"),
+            scope=request.get("scope", "default_scope"),
+            redirect_uri=request.get("redirect_uri"),
+        )
+
+        # Set the initial token info
+        self.access_token = None
 
     async def refresh_token(self):
-        """Refresh the API token."""
-        if await self.is_token_expired():
-            print(f"Token expired for {self.service_name}. Refreshing...")
-            new_token_data = await self._refresh_token_from_service()
-            self.access_token = new_token_data["access_token"]
-            self.refresh_token = new_token_data["refresh_token"]
-            self.token_expiration_time = datetime.now() + timedelta(seconds=new_token_data["expires_in"])
-
-    async def _refresh_token_from_service(self) -> dict:
-        """Subclasses must implement this method to handle their specific token refresh logic."""
-        raise NotImplementedError("Subclasses must implement this method.")
+        """Use the TokenManager to refresh and update the token."""
+        self.access_token = await self.token_manager.get_token()
 
     async def handle_response(self, response):
         """
@@ -52,6 +59,9 @@ class APIBase:
         """
         Central method for making network requests and processing responses.
         """
+        if self.access_token is None:
+            await self.refresh_token()
+
         headers = headers or {}
         headers["Authorization"] = f"Bearer {self.access_token}"
 
@@ -64,21 +74,20 @@ class APIBase:
                 headers["Authorization"] = f"Bearer {self.access_token}"
                 async with self.session.request(method, url, headers=headers, **kwargs) as retry_response:
                     result = await self.handle_response(retry_response)
-                    self.total_api_calls_made += 1
-            
-            self.total_api_calls_made += 1
+                    return result
+
             return result
 
     async def try_sdk_request(self, method, *args, **kwargs):
         """
         Attempt to make an asynchronous request using an SDK.
         If the request fails, handle errors (e.g., token expiration) and retry.
-        
+
         Args:
             method (callable): The SDK method to invoke.
             *args: Positional arguments for the SDK method.
             **kwargs: Keyword arguments for the SDK method.
-        
+
         Returns:
             The response from the SDK method, or an error dictionary if retries fail.
         """
@@ -95,12 +104,11 @@ class APIBase:
                     await self.refresh_token()
 
                 print(f"Exception while making SDK request: {str(e)}")
-                
+
                 # If max attempts are reached, return an error dictionary
                 if attempts == max_attempts - 1:
                     print(f"Failed to make SDK request after {max_attempts} attempts.")
                     return {"error": str(e)}
-            
+
             attempts += 1
-            self.total_api_calls_made += 1
             await asyncio.sleep(1)  # Optional backoff between retries

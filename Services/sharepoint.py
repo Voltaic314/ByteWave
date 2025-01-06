@@ -4,21 +4,53 @@ from Helpers.folder import FolderSubItem
 
 
 class SharePoint(APIBase):
+    def __init__(self, request: dict, db, client_id: str, client_secret: str, tenant_id: str, roles: list = []):
+        """
+        Initialize the SharePoint service integration.
 
-    def __init__(self, request: dict):
-        super().__init__(request)
-        self.connection = self.stax_api.get_connection().get("data", {})
-        self.api_url = self.connection.get("api_url", "https://graph.microsoft.com/v1.0")
-        self.site_id = self.connection.get("site", {}).get("id", "")
-        self.set_token_expiration(expires_in=3600)
+        Args:
+            request (dict): Dictionary containing token and other initialization data.
+            db (DB): Database instance for token storage and updates.
+            client_id (str): Client ID for OAuth.
+            client_secret (str): Client secret for OAuth.
+            tenant_id (str): Tenant ID for the SharePoint organization.
+            roles (list): List of roles for this instance (e.g., ["source", "destination"]).
+        """
+        # Construct the token manager through APIBase
+        request.update({
+            "refresh_token_url": f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token",
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "scope": "https://graph.microsoft.com/.default",
+        })
+        super().__init__(request, db, roles)
+
+        # SharePoint-specific attributes
+        self.api_url = "https://graph.microsoft.com/v1.0"
+        self.site_id = request.get("site_id", "")
         self.cursor_keyword = "@odata.nextLink"
         self.limit = 1000
 
-    def refresh_token(self):
-        """Refresh the API token specific to SharePoint."""
-        new_access_token = self.stax_api.refresh_token()
-        self.set_token_expiration(expires_in=3600)
-        return new_access_token
+    async def _refresh_token_from_service(self) -> dict:
+        """
+        Refresh the token by calling SharePoint's token refresh endpoint.
+
+        Returns:
+            dict: A dictionary containing the refreshed token data.
+        """
+        payload = {
+            "grant_type": "refresh_token",
+            "refresh_token": self.token_manager.token_cache["refresh_token"],
+            "client_id": self.token_manager.client_id,
+            "client_secret": self.token_manager.client_secret,
+            "scope": self.token_manager.scope,
+        }
+
+        async with self.session.post(self.token_manager.refresh_token_url, data=payload) as response:
+            if response.status != 200:
+                error_message = await response.text()
+                raise Exception(f"Failed to refresh token for SharePoint: {response.status} - {error_message}")
+            return await response.json()
 
     def set_root_directory_first_folder_identifier(self):
         """Set the root folder identifier for SharePoint."""
