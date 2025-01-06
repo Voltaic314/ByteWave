@@ -1,3 +1,4 @@
+import json
 import aiosqlite
 from datetime import datetime
 
@@ -5,82 +6,172 @@ class DB:
     def __init__(self, db_name="migration_db.sqlite"):
         """
         Initialize the SQLite database connection.
-        
+
         Args:
             db_name (str): Name of the SQLite database file.
         """
         self.db_name = db_name
+        self.connection = None  # Store the persistent database connection
+
+    async def initialize_db(self):
+        """
+        Initialize the database by setting up required tables.
+        """
+        self.connection = await aiosqlite.connect(self.db_name)
+        await self.setup_nodes_table()
+        await self.setup_resource_monitoring_table()
+        await self.setup_errors_table()
+        await self.setup_auth_info_table()
+
+    async def close(self):
+        """
+        Close the database connection.
+        """
+        if self.connection:
+            await self.connection.close()
+            self.connection = None
 
     async def setup_nodes_table(self):
         """
         Create the 'nodes' table if it doesn't exist.
         """
-        async with aiosqlite.connect(self.db_name) as db:
-            await db.execute("""
-            CREATE TABLE IF NOT EXISTS nodes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                parent_id INTEGER,
-                name TEXT NOT NULL,
-                type TEXT NOT NULL,
-                source_identifier TEXT,
-                destination_identifier TEXT,
-                traversal_status TEXT NOT NULL,
-                upload_status TEXT NOT NULL,
-                traversal_attempts INTEGER DEFAULT 0,
-                upload_attempts INTEGER DEFAULT 0,
-                FOREIGN KEY (parent_id) REFERENCES nodes (id)
-            )
-            """)
-            await db.commit()
+        await self.connection.execute("""
+        CREATE TABLE IF NOT EXISTS nodes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            parent_id INTEGER,
+            name TEXT NOT NULL,
+            type TEXT NOT NULL,
+            source_identifier TEXT,
+            destination_identifier TEXT,
+            traversal_status TEXT NOT NULL,
+            upload_status TEXT NOT NULL,
+            traversal_attempts INTEGER DEFAULT 0,
+            upload_attempts INTEGER DEFAULT 0,
+            FOREIGN KEY (parent_id) REFERENCES nodes (id)
+        )
+        """)
+        await self.connection.commit()
 
     async def setup_resource_monitoring_table(self):
         """
         Create the 'resource_monitoring' table if it doesn't exist.
         """
-        async with aiosqlite.connect(self.db_name) as db:
-            await db.execute("""
-            CREATE TABLE IF NOT EXISTS resource_monitoring (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                resource_type TEXT NOT NULL,
-                usage REAL NOT NULL,
-                timestamp TEXT NOT NULL
-            )
-            """)
-            await db.commit()
+        await self.connection.execute("""
+        CREATE TABLE IF NOT EXISTS resource_monitoring (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            resource_type TEXT NOT NULL,
+            usage REAL NOT NULL,
+            timestamp TEXT NOT NULL
+        )
+        """)
+        await self.connection.commit()
 
     async def setup_errors_table(self):
         """
         Create the 'errors' table if it doesn't exist.
         """
-        async with aiosqlite.connect(self.db_name) as db:
-            await db.execute("""
-            CREATE TABLE IF NOT EXISTS errors (
-                error_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                node_id INTEGER,
-                error_type TEXT NOT NULL,
-                error_message TEXT NOT NULL,
-                error_details TEXT,
-                timestamp TEXT NOT NULL,
-                retry_count INTEGER DEFAULT 0,
-                FOREIGN KEY (node_id) REFERENCES nodes (id)
-            )
-            """)
-            await db.commit()
+        await self.connection.execute("""
+        CREATE TABLE IF NOT EXISTS errors (
+            error_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            node_id INTEGER,
+            error_type TEXT NOT NULL,
+            error_message TEXT NOT NULL,
+            error_details TEXT,
+            timestamp TEXT NOT NULL,
+            retry_count INTEGER DEFAULT 0,
+            FOREIGN KEY (node_id) REFERENCES nodes (id)
+        )
+        """)
+        await self.connection.commit()
 
-    async def initialize_db(self):
-        await self.setup_nodes_table()
-        await self.setup_resource_monitoring_table()
-        await self.setup_errors_table()
+    async def setup_auth_info_table(self):
+        """
+        Create the 'auth_info' table if it doesn't exist.
+        """
+        await self.connection.execute("""
+        CREATE TABLE IF NOT EXISTS auth_info (
+            service TEXT PRIMARY KEY,              -- Unique identifier for the service
+            access_token TEXT NOT NULL,            -- Access token
+            refresh_token TEXT,                    -- Refresh token
+            token_expiry INTEGER,                  -- Expiration time of the token (UNIX timestamp)
+            roles TEXT NOT NULL,                   -- JSON-encoded list of roles (e.g., ["source", "destination"])
+            last_updated TEXT NOT NULL             -- Timestamp of the last update
+        )
+        """)
+        # token expiry code could look like this: 
+        # token_expiry = int(time.mktime(datetime.now().timetuple())) 
+        # then we can convert it back to a datetime object using datetime.fromtimestamp(token_expiry)
+        # from there we could do our comparisons to see if it's expired or not. :) 
+        await self.connection.commit()
+
+    async def upsert_auth_info(self, service, access_token, roles, refresh_token=None, token_expiry=None):
+        """
+        Insert or update authentication info for a service.
+
+        Args:
+            service (str): The name of the service.
+            access_token (str): The access token.
+            roles (list): List of roles (e.g., ["source"], ["destination"], ["source", "destination"]).
+            refresh_token (str): The refresh token (optional).
+            token_expiry (str): The token's expiration time (ISO format, optional).
+        """
+        roles_json = json.dumps(roles)  # Serialize roles as JSON
+        query = """
+        INSERT INTO auth_info (service, access_token, refresh_token, token_expiry, roles, last_updated)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(service) DO UPDATE SET
+            access_token = excluded.access_token,
+            refresh_token = excluded.refresh_token,
+            token_expiry = excluded.token_expiry,
+            roles = excluded.roles,
+            last_updated = excluded.last_updated
+        """
+        params = (
+            service,
+            access_token,
+            refresh_token,
+            token_expiry,
+            roles_json,
+            datetime.now().isoformat()
+        )
+        await self.execute_query(query, params)
+
+    async def fetch_auth_info(self, service):
+        """
+        Fetch authentication info for a specific service.
+
+        Args:
+            service (str): The name of the service.
+
+        Returns:
+            dict: A dictionary containing the authentication info, including roles as a list.
+        """
+        query = "SELECT * FROM auth_info WHERE service = ?"
+        result = await self.execute_query(query, (service,), fetch=True)
+        if result:
+            result_dict = dict(result)
+            result_dict["roles"] = json.loads(result_dict["roles"])  # Deserialize roles
+            return result_dict
+        return None
+
+    async def delete_auth_info(self, service):
+        """
+        Delete authentication info for a specific service.
+
+        Args:
+            service (str): The name of the service.
+        """
+        query = "DELETE FROM auth_info WHERE service = ?"
+        await self.execute_query(query, (service,))
 
     # General-purpose query execution
     async def execute_query(self, query, params=None, fetch=False, fetchall=False):
-        async with aiosqlite.connect(self.db_name) as db:
-            async with db.execute(query, params or ()) as cursor:
-                if fetch:
-                    return await cursor.fetchone()
-                if fetchall:
-                    return await cursor.fetchall()
-            await db.commit()
+        async with self.connection.execute(query, params or ()) as cursor:
+            if fetch:
+                return await cursor.fetchone()
+            if fetchall:
+                return await cursor.fetchall()
+        await self.connection.commit()
 
     # Errors table methods
     async def log_error(self, error_data: dict):
@@ -128,7 +219,6 @@ class DB:
         await self.execute_query(query)
 
     # Convenience methods for nodes
-
     async def insert_node(self, node_data: dict):
         query = """
         INSERT INTO nodes (parent_id, name, type, source_identifier, destination_identifier, 
@@ -190,28 +280,6 @@ class DB:
         query = f"SELECT * FROM nodes WHERE {column} = ?"
         return await self.execute_query(query, (status,), fetchall=True)
 
-    async def update_node_status(self, node_id: int, traversal_status=None, upload_status=None):
-        """
-        Update the status of a node in the 'nodes' table.
-
-        Args:
-            node_id (int): The ID of the node to update.
-            traversal_status (str): New traversal status, if applicable.
-            upload_status (str): New upload status, if applicable.
-        """
-        updates = []
-        params = []
-        if traversal_status:
-            updates.append("traversal_status = ?")
-            params.append(traversal_status)
-        if upload_status:
-            updates.append("upload_status = ?")
-            params.append(upload_status)
-        params.append(node_id)
-
-        query = f"UPDATE nodes SET {', '.join(updates)} WHERE id = ?"
-        await self.execute_query(query, params)
-
     # Resource monitoring methods
     async def log_resource_data(self, resource_type: str, resource_data: list):
         """
@@ -229,9 +297,8 @@ class DB:
         params = [
             (resource_type, usage, timestamp) for usage in resource_data
         ]
-        async with aiosqlite.connect(self.db_name) as db:
-            await db.executemany(query, params)
-            await db.commit()
+        await self.connection.executemany(query, params)
+        await self.connection.commit()
 
     async def fetch_resource_data(self, resource_type: str, since=None):
         """
