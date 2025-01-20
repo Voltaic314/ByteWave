@@ -65,3 +65,20 @@ output_folder/
 *.zip
 *.exe
 *.pdf
+
+# ignore pycache
+__pycache__/
+*.pyc
+
+# ignore any db files from sqlite or .sqlite files
+*.sqlite
+*.db
+
+# ignore pytest ini and other pytest files
+pytest.ini
+pytest_cache/
+__pycache__/
+.pytest_cache/
+
+# ignore the .vscode folder
+.vscode/

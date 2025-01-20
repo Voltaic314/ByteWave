@@ -6,14 +6,12 @@ class Error:
     def __init__(self, error_type: str, message: str, code: int = None, metadata: dict = None):
         self.error_type = error_type  # e.g., 'PermissionError', 'ConnectionError'
         self.message = message  # Human-readable message
-        self.code = code  # Optional error code (e.g., HTTP status code)
         self.metadata = metadata or {}  # Additional contextual details
 
     def to_dict(self) -> dict:
         return {
             "error_type": self.error_type,
             "message": self.message,
-            "code": self.code,
             "metadata": self.metadata,
         }
 
