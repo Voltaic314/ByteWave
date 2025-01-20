@@ -44,10 +44,8 @@ def main(testing=False):
                 print("Please review the paths we have found and filter out any paths you do not need migrated.")
                 print("Once you are ready to proceed, please click \"Confirm\" to begin the migration process.")
 
-            # Perform any extra manipulation you want to the paths here. Please see the logger class for more info on this.
-            # Syntax is like this: service.logger.modify_path_log_file(lambda some_function_here) similar to cron dispatcher
-
             # Upload all currently logged files
+            # TODO: This is placeholder code and will need to be replaced with db logic instead of the logger.
             files_to_upload = service.logger.get_docs_that_need_uploading()
             if upload_files and files_to_upload:
                 num_of_files_found = len(files_to_upload)

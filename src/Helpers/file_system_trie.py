@@ -1,8 +1,9 @@
 import uuid
-from Helpers.db import DB
+from src.Helpers.db import DB
 from typing import Union
-from Helpers.file import File, FileSubItem
-from Helpers.folder import Folder, FolderSubItem
+from src.Helpers.file import File, FileSubItem
+from src.Helpers.folder import Folder, FolderSubItem
+from src import Response
 
 
 class TrieNode:
@@ -36,8 +37,8 @@ class TrieNode:
         if child_name not in self.children:
             child_node = TrieNode(source=child_source, destination=child_destination, parent=self)
             self.children[child_name] = child_node
-            return child_node
-        return self.children[child_name]
+            return Response(success=True, response=child_node)
+        return Response(success=True, response=self.children[child_name])
 
     def update_traversal_status(self, new_status: str):
         self.traversal_status = new_status
@@ -90,7 +91,13 @@ class FileSystemTrie:
                 print(f"Flushed {len(self.node_updates)} node updates to the database.")
                 self.node_updates.clear()
         except Exception as e:
-            print(f"Error flushing updates: {e}")
+            response = Response(success=False)
+            response.add_error(
+                error_type="FlushError",
+                message="Failed to flush updates to the database.",
+                details=str(e)
+            )
+            return response
 
     async def add_item(self, item: Union[File, Folder], parent_id=None, is_destination=False):
         """

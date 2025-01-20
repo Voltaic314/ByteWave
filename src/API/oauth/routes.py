@@ -1,9 +1,13 @@
-from flask import Blueprint, request, redirect, jsonify
+from quart import Blueprint, request, redirect
+from src import API_Response
 from API.oauth.utils import save_tokens
-import requests
+import aiohttp
 
 oauth_bp = Blueprint("oauth", __name__)
 
+## TODO: Instead of hard coding this like an idiot, we need to store oauth credentials elsewhere
+## probably would be a good idea to put them in a json file or in the DB, maybe a separate DB file for extra security
+## This way idiots don't accidentally share their credentials with each other when sharing their DB file for the migration process. 
 OAUTH_CONFIG = {
     "google_drive": {
         "auth_url": "https://accounts.google.com/o/oauth2/v2/auth",
@@ -15,10 +19,17 @@ OAUTH_CONFIG = {
     },
 }
 
+
 @oauth_bp.route("/initiate/<service>", methods=["POST"])
-def initiate_oauth(service):
+async def initiate_oauth(service):
     if service not in OAUTH_CONFIG:
-        return jsonify({"error": f"Service '{service}' not supported"}), 400
+        response = API_Response(success=False, code=400)
+        response.add_error(
+            error_type="ServiceError",
+            message=f"Service '{service}' is not supported.",
+            details="Ensure the service is properly configured in OAUTH_CONFIG."
+        )
+        return response
 
     config = OAUTH_CONFIG[service]
     auth_url = (
@@ -28,32 +39,55 @@ def initiate_oauth(service):
         f"response_type=code&"
         f"scope={config['scope']}"
     )
-    return redirect(auth_url)
+    return API_Response(success=True, response=redirect(auth_url))
+
 
 @oauth_bp.route("/callback/<service>", methods=["GET"])
-def oauth_callback(service):
+async def oauth_callback(service):
     if service not in OAUTH_CONFIG:
-        return jsonify({"error": f"Service '{service}' not supported"}), 400
+        response = API_Response(success=False, code=400)
+        response.add_error(
+            error_type="ServiceError",
+            message=f"Service '{service}' is not supported.",
+            details="Ensure the service is properly configured in OAUTH_CONFIG."
+        )
+        return response
 
     code = request.args.get("code")
     if not code:
-        return jsonify({"error": "Authorization code not provided"}), 400
+        response = API_Response(success=False, code=400)
+        response.add_error(
+            error_type="MissingCodeError",
+            message="Authorization code not provided.",
+            details="The authorization server did not return an authorization code."
+        )
+        return response
 
     config = OAUTH_CONFIG[service]
-    token_response = requests.post(
-        config["token_url"],
-        data={
-            "grant_type": "authorization_code",
-            "code": code,
-            "redirect_uri": config["redirect_uri"],
-            "client_id": config["client_id"],
-            "client_secret": config["client_secret"],
-        },
-    )
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            config["token_url"],
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": config["redirect_uri"],
+                "client_id": config["client_id"],
+                "client_secret": config["client_secret"],
+            }
+        ) as token_response:
+            if token_response.status != 200:
+                error_details = await token_response.text()
+                response = API_Response(success=False, code=400)
+                response.add_error(
+                    error_type="TokenExchangeError",
+                    message="Failed to exchange authorization code for tokens.",
+                    details=error_details
+                )
+                return response
 
-    if token_response.status_code != 200:
-        return jsonify({"error": "Failed to exchange authorization code for tokens"}), 400
-
-    tokens = token_response.json()
-    save_tokens(service, tokens)
-    return jsonify({"message": f"Tokens for '{service}' stored successfully!"})
+            tokens = await token_response.json()
+            save_tokens(service, tokens)
+            return API_Response(
+                success=True,
+                response=f"Tokens for '{service}' stored successfully!"
+            )

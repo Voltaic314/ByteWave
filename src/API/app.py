@@ -3,6 +3,7 @@ from API.oauth.routes import oauth_bp
 # from API.migration.routes import migration_bp
 # from API.reports.routes import reports_bp
 # from API.errors.routes import errors_bp
+from src import API_Response, Error, Warning
 
 class API:
     def __init__(self):
@@ -21,6 +22,7 @@ class API:
         """
         self.app.add_url_rule(rule, endpoint, view_func, methods=methods)
         self.routes.append({"rule": rule, "endpoint": endpoint, "methods": methods})
+        return API_Response(success=True, code=200, response="Route added successfully.")
 
     async def run(self, *args, **kwargs):
         """
@@ -34,6 +36,7 @@ class API:
         kwargs.setdefault('host', '127.0.0.1')  # Default to localhost if 'host' is not provided
         kwargs.setdefault('port', 5000)  # Default to port 5000 if not provided
         await self.app.run(*args, **kwargs)
+        return API_Response(success=True, code=200, response="API started successfully.")
 
     def get_registered_routes(self):
         """
@@ -42,7 +45,7 @@ class API:
         Returns:
             list: List of route dictionaries.
         """
-        return self.routes
+        return API_Response(success=True, code=200, response=self.routes)
 
 
 # Main application logic
@@ -56,8 +59,12 @@ async def main():
     # api.app.register_blueprint(errors_bp)     # Errors routes
 
     print("Registered routes:")
-    for route in api.get_registered_routes():
-        print(route)
+    routes = api.get_registered_routes()
+    if routes.success:
+        for route in routes.response:
+            print(route)
+    else:
+        print("Failed to get registered routes.")
 
     # Run the app
     await api.run()

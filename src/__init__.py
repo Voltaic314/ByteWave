@@ -1,3 +1,3 @@
-from Errors.response_handler import Response, Error, Warning
+from src.Errors.response_handler import API_Response, Response
 
-__all__ = ["Response", "Error", "Warning"]
+__all__ = ["API_Response", "Response"]
