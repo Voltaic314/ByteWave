@@ -1,16 +1,22 @@
 from datetime import datetime
-from typing import List
+from typing import List, Optional, Dict, Any
 
 
 class Error:
-    def __init__(self, error_type: str, message: str, details: str = None, metadata: dict = None):
-        self.error_type = error_type  # e.g., 'PermissionError', 'ConnectionError'
-        self.message = message  # Human-readable message
+
+    def __init__(self, 
+                error_type: str, 
+                message: str, 
+                details: Optional[str] = None, 
+                metadata: Optional[Dict] = None
+    ):
+        self.error_type = error_type
+        self.message = message
         self.details = details
-        self.metadata = metadata or {}  # Additional contextual details
+        self.metadata = metadata or {}
         self.timestamp = datetime.now()
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> Dict[str, Any]:
         return {
             "error_type": self.error_type,
             "message": self.message,
@@ -25,14 +31,20 @@ class Error:
 
 
 class Warning:
-    def __init__(self, warning_type: str, message: str, details: str = None, metadata: dict = None):
-        self.warning_type = warning_type  # e.g., 'RetryWarning', 'DeprecationWarning'
-        self.message = message  # Human-readable message
-        self.details = details # more for the computer related tracebacks and error messages
-        self.metadata = metadata or {}  # Additional contextual details
+
+    def __init__(self,
+                warning_type: str,
+                message: str,
+                details: Optional[str] = None,
+                metadata: Optional[Dict] = None
+    ):
+        self.warning_type = warning_type
+        self.message = message
+        self.details = details
+        self.metadata = metadata or {}
         self.timestamp = datetime.now()
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> Dict[str, Any]:
         return {
             "warning_type": self.warning_type,
             "message": self.message,
@@ -47,45 +59,41 @@ class Warning:
 
 
 class Response:
-    def __init__(self, success: bool, response=None):
-        self.success = success
-        self.response = response
-        self.errors: List[Error] = []  # List of ErrorDetail objects
-        self.warnings: List[Warning] = []  # List of WarningDetail objects
-        self.timestamp = datetime.now()
 
-    def add_error(self, error_type: str, message: str, code: int = None, metadata: dict = None):
+    def __init__(
+        self,
+        success: bool,
+        response: Optional[Any] = None,
+        errors: Optional[List[Error]] = None,
+        warnings: Optional[List[Warning]] = None,
+    ):
         """
-        Add an error to the response.
+        Initializes a Response object.
 
         Args:
-            error_type (str): Type of the error (e.g., 'PermissionError').
-            message (str): Human-readable error message.
-            code (int): Optional error code (e.g., HTTP status).
-            metadata (dict): Additional metadata for debugging.
+            success (bool): Whether the operation was successful.
+            response (Any, optional): The actual response data.
+            errors (List[Error], optional): List of `Error` objects.
+            warnings (List[Warning], optional): List of `Warning` objects.
         """
-        error = Error(error_type, message, code, metadata)
+        self.success = success
+        self.response = response
+        self.errors: List[Error] = errors if errors else []
+        self.warnings: List[Warning] = warnings if warnings else []
+        self.timestamp = datetime.now()
+
+    def add_error(self, error: Error):
+        """Add a single error to the response."""
         if error not in self.errors:
             self.errors.append(error)
 
-    def add_warning(self, warning_type: str, message: str, **kwargs):
-        """
-        Add a warning to the response.
-
-        Args:
-            warning_type (str): Type of the warning (e.g., 'RetryWarning').
-            message (str): Human-readable warning message.
-            details (str): Warning message for developers / computers.
-            metadata (dict): Additional metadata for debugging.
-        """
-        warning = Warning(warning_type, message, **kwargs)
+    def add_warning(self, warning: Warning):
+        """Add a single warning to the response."""
         if warning not in self.warnings:
             self.warnings.append(warning)
 
-    def to_dict(self) -> dict:
-        """
-        Convert the Response object to a dictionary for serialization or logging.
-        """
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert the Response object to a dictionary for serialization or logging."""
         return {
             "success": self.success,
             "response": self.response,
@@ -95,24 +103,31 @@ class Response:
         }
 
     def __str__(self):
-        """
-        String representation of the Response object.
-        """
+        """String representation of the Response object."""
         errors = [str(error) for error in self.errors]
         warnings = [str(warning) for warning in self.warnings]
         return (
             f"Response(success={self.success}, response={self.response}, "
             f"errors={errors}, warnings={warnings}, timestamp={self.timestamp})"
         )
-    
+
     def __bool__(self):
         """
-        Return the success status of the response.
+        Allows using Response as a truthy/falsy value.
+        A Response object evaluates to True if success=True, and False otherwise.
         """
         return self.success
 
+
 class API_Response(Response):
-    def __init__(self, success: bool, code: int, response=None, **kwargs):
+
+    def __init__(self, 
+                success: bool,
+                code: int,
+                response=None,
+                **kwargs
+    ):
+
         super().__init__(success, response)
         self.code = code
         self.metadata = kwargs
