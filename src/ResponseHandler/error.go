@@ -1,4 +1,4 @@
-package ResponseHandler
+package responsehandler
 
 import (
 	"fmt"
