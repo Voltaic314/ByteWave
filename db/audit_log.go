@@ -46,7 +46,7 @@ func (db *DB) WriteLog(entry LogEntry) {
 		INSERT INTO audit_log (category, error_type, details, retry_count, message) 
 		VALUES (?, ?, ?, ?, ?)
 	`
-	db.QueueWrite(query, entry.Category, entry.ErrorType, entry.Details, entry.RetryCount, entry.Message)
+	db.QueueWrite("audit_log", query, entry.Category, entry.ErrorType, entry.Details, entry.RetryCount, entry.Message)
 }
 
 // LogError logs an error with details and a retry count.
@@ -85,6 +85,11 @@ func (db *DB) LogInfo(message string) {
 // CleanOldLogs deletes log entries older than a specified duration.
 func (db *DB) CleanOldLogs(retentionPeriod time.Duration) {
 	query := "DELETE FROM audit_log WHERE timestamp < datetime('now', ?)"
-	db.QueueWrite(query, "-"+retentionPeriod.String())
-	log.Printf("Deleted logs older than %v", retentionPeriod)
+	retentionStr := "-%d days" // Convert Go duration to SQL-compatible format
+
+	// Convert duration to days for SQLite compatibility
+	days := int(retentionPeriod.Hours() / 24)
+	db.QueueWrite("audit_log", query, retentionStr, days)
+
+	log.Printf("Deleted logs older than %d days", days)
 }

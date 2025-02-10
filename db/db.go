@@ -10,8 +10,8 @@ import (
 )
 
 type DB struct {
-	conn       *sql.DB
-	wq *WriteQueue
+	conn *sql.DB
+	wq   *WriteQueue
 }
 
 // NewDB initializes the database connection and ensures the DB file exists.
@@ -31,18 +31,20 @@ func NewDB(dbPath string, batchSize int, flushTimer time.Duration) (*DB, error) 
 	}
 
 	// Initialize write queue
-	wq := NewQueue(batchSize, flushTimer, func(queries []string, params [][]interface{}) error {
-		return batchExecute(conn, queries, params)
+	wq := NewQueue(batchSize, flushTimer, func(tableQueries map[string][]string, tableParams map[string][][]interface{}) error {
+		return batchExecute(conn, tableQueries, tableParams)
 	})
 
 	return &DB{conn: conn, wq: wq}, nil
 }
 
+// Close closes the database connection.
 func (db *DB) Close() {
-    if db.conn != nil {
-        db.conn.Close()
-    }
+	if db.conn != nil {
+		db.conn.Close()
+	}
 }
+
 // Write executes an immediate query (for table creation, schema updates, etc.).
 func (db *DB) Write(query string, params ...interface{}) error {
 	_, err := db.conn.Exec(query, params...)
@@ -50,8 +52,8 @@ func (db *DB) Write(query string, params ...interface{}) error {
 }
 
 // QueueWrite adds a query to the flush queue for batch processing.
-func (db *DB) QueueWrite(query string, params ...interface{}) {
-	db.wq.AddWriteOperation(query, params)
+func (db *DB) QueueWrite(tableName string, query string, params ...interface{}) {
+	db.wq.AddWriteOperation(tableName, query, params)
 }
 
 // CreateTable creates a table if it doesn’t exist.
@@ -66,11 +68,12 @@ func (db *DB) DropTable(tableName string) error {
 	return db.Write(query)
 }
 
-func batchExecute(conn *sql.DB, queries []string, params [][]interface{}) error {
-    if len(queries) == 0 { // No queries to execute
-        return nil
-    }
-	
+// batchExecute processes batch write operations grouped by table name.
+func batchExecute(conn *sql.DB, tableQueries map[string][]string, tableParams map[string][][]interface{}) error {
+	if len(tableQueries) == 0 { // No queries to execute
+		return nil
+	}
+
 	tx, err := conn.Begin()
 	if err != nil {
 		return err
@@ -78,17 +81,20 @@ func batchExecute(conn *sql.DB, queries []string, params [][]interface{}) error 
 
 	failedQueries := []string{}
 
-	for i, query := range queries {
-		_, err := tx.Exec(query, params[i]...)
-		if err != nil {
-			// Log the failed query instead of rolling back everything
-			log.Printf("Query failed: %s | Error: %v", query, err)
-			failedQueries = append(failedQueries, query)
+	// Execute queries per table
+	for table, queries := range tableQueries {
+		params := tableParams[table]
+		for i, query := range queries {
+			_, err := tx.Exec(query, params[i]...)
+			if err != nil {
+				// Log the failed query instead of rolling back everything
+				log.Printf("Query failed in table %s: %s | Error: %v", table, query, err)
+				failedQueries = append(failedQueries, query)
+			}
 		}
 	}
 
 	if len(failedQueries) > 0 {
-		// Optional: Retry failed queries separately
 		log.Printf("%d queries failed, but committing successful ones.", len(failedQueries))
 	}
 
