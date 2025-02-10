@@ -1,6 +1,6 @@
 package nodetables
 
-import "github.com/Voltaic314/Data_Migration_Tool/database"
+import "github.com/Voltaic314/Data_Migration_Tool/db"
 
 type SourceNodesTable struct{}
 
@@ -24,6 +24,6 @@ func (t SourceNodesTable) Schema() string {
 	`
 }
 
-func (t SourceNodesTable) Init(db *database.DB) error {
+func (t SourceNodesTable) Init(db *db.DB) error {
 	return db.CreateTable(t.Name(), t.Schema())
 }

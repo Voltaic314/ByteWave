@@ -1,11 +1,11 @@
 package nodetables
 
-import "github.com/Voltaic314/Data_Migration_Tool/database"
+import "github.com/Voltaic314/Data_Migration_Tool/db"
 
 type Table interface {
 	Name() string
 	Schema() string
-	Init(db *database.DB) error
+	Init(db *db.DB) error
 }
 
 // NodesTable defines the schema for the "nodes" table.
@@ -27,6 +27,6 @@ func (t NodesTable) Schema() string {
 	`
 }
 
-func (t NodesTable) Init(db *database.DB) error {
+func (t NodesTable) Init(db *db.DB) error {
 	return db.CreateTable(t.Name(), t.Schema())
 }

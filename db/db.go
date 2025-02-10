@@ -1,4 +1,4 @@
-package database
+package db
 
 import (
 	"database/sql"
@@ -11,7 +11,7 @@ import (
 
 type DB struct {
 	conn       *sql.DB
-	writeQueue *WriteQueue
+	wq *WriteQueue
 }
 
 // NewDB initializes the database connection and ensures the DB file exists.
@@ -31,11 +31,11 @@ func NewDB(dbPath string, batchSize int, flushTimer time.Duration) (*DB, error) 
 	}
 
 	// Initialize write queue
-	writeQueue := NewQueue(batchSize, flushTimer, func(queries []string, params [][]interface{}) error {
+	wq := NewQueue(batchSize, flushTimer, func(queries []string, params [][]interface{}) error {
 		return batchExecute(conn, queries, params)
 	})
 
-	return &DB{conn: conn, writeQueue: writeQueue}, nil
+	return &DB{conn: conn, wq: wq}, nil
 }
 
 // Close closes the database connection.
@@ -51,7 +51,7 @@ func (db *DB) Write(query string, params ...interface{}) error {
 
 // QueueWrite adds a query to the flush queue for batch processing.
 func (db *DB) QueueWrite(query string, params ...interface{}) {
-	db.writeQueue.AddWriteOperation(query, params)
+	db.wq.AddWriteOperation(query, params)
 }
 
 // CreateTable creates a table if it doesn’t exist.
