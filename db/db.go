@@ -38,11 +38,11 @@ func NewDB(dbPath string, batchSize int, flushTimer time.Duration) (*DB, error) 
 	return &DB{conn: conn, wq: wq}, nil
 }
 
-// Close closes the database connection.
 func (db *DB) Close() {
-	db.conn.Close()
+    if db.conn != nil {
+        db.conn.Close()
+    }
 }
-
 // Write executes an immediate query (for table creation, schema updates, etc.).
 func (db *DB) Write(query string, params ...interface{}) error {
 	_, err := db.conn.Exec(query, params...)
@@ -67,6 +67,10 @@ func (db *DB) DropTable(tableName string) error {
 }
 
 func batchExecute(conn *sql.DB, queries []string, params [][]interface{}) error {
+    if len(queries) == 0 { // No queries to execute
+        return nil
+    }
+	
 	tx, err := conn.Begin()
 	if err != nil {
 		return err
