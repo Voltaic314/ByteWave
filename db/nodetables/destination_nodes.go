@@ -10,16 +10,15 @@ func (t DestinationNodesTable) Name() string {
 
 func (t DestinationNodesTable) Schema() string {
 	return `
-		id INTEGER PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
-		path TEXT NOT NULL,
-		identifier TEXT,
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		path TEXT NOT NULL UNIQUE,
+		identifier TEXT,  -- NULLable for filesystems that don’t provide IDs
+		type TEXT NOT NULL CHECK(type IN ('file', 'folder')),
+		level INTEGER NOT NULL,
 		size INTEGER,
 		last_modified TEXT,
-		exists BOOLEAN NOT NULL DEFAULT 0,
 		traversal_status TEXT NOT NULL CHECK(traversal_status IN ('pending', 'successful', 'failed')),
-		upload_status TEXT NOT NULL CHECK(upload_status IN ('pending', 'successful', 'failed')),
 		traversal_attempts INTEGER DEFAULT 0,
-		upload_attempts INTEGER DEFAULT 0,
 		error_id INTEGER DEFAULT NULL,
 		FOREIGN KEY (error_id) REFERENCES node_errors(id) ON DELETE SET NULL
 	`
