@@ -21,7 +21,6 @@ func (t AuditLogTable) Schema() string {
 		category TEXT NOT NULL CHECK(category IN ('info', 'warning', 'error')),
 		error_type TEXT DEFAULT NULL,
 		details TEXT DEFAULT NULL,
-		retry_count INTEGER DEFAULT 0,
 		message TEXT NOT NULL
 	`
 }
@@ -36,17 +35,16 @@ type LogEntry struct {
 	Category   string
 	ErrorType  *string
 	Details    *string
-	RetryCount int
 	Message    string
 }
 
 // WriteLog inserts a log entry into the audit log table.
 func (db *DB) WriteLog(entry LogEntry) {
 	query := `
-		INSERT INTO audit_log (category, error_type, details, retry_count, message) 
-		VALUES (?, ?, ?, ?, ?)
+		INSERT INTO audit_log (category, error_type, details, message) 
+		VALUES (?, ?, ?, ?)
 	`
-	db.QueueWrite("audit_log", query, entry.Category, entry.ErrorType, entry.Details, entry.RetryCount, entry.Message)
+	db.QueueWrite("audit_log", query, entry.Category, entry.ErrorType, entry.Details, entry.Message)
 }
 
 // LogError logs an error with details and a retry count.
@@ -55,7 +53,6 @@ func (db *DB) LogError(errorType, message string, details *string, retryCount in
 		Category:   "error",
 		ErrorType:  &errorType,
 		Details:    details,
-		RetryCount: retryCount,
 		Message:    message,
 	})
 }
@@ -66,7 +63,6 @@ func (db *DB) LogWarning(message string, details *string) {
 		Category:   "warning",
 		ErrorType:  nil,
 		Details:    details,
-		RetryCount: 0,
 		Message:    message,
 	})
 }
@@ -77,7 +73,6 @@ func (db *DB) LogInfo(message string) {
 		Category:   "info",
 		ErrorType:  nil,
 		Details:    nil,
-		RetryCount: 0,
 		Message:    message,
 	})
 }

@@ -21,8 +21,8 @@ func (t SourceNodesTable) Schema() string {
 		upload_status TEXT NOT NULL CHECK(upload_status IN ('pending', 'successful', 'failed')),
 		traversal_attempts INTEGER DEFAULT 0,
 		upload_attempts INTEGER DEFAULT 0,
-		error_id INTEGER DEFAULT NULL,
-		FOREIGN KEY (error_id) REFERENCES node_errors(id) ON DELETE SET NULL
+		error_ids TEXT DEFAULT NULL,  -- Store error IDs as a comma-separated list
+		FOREIGN KEY (error_ids) REFERENCES node_errors(id) ON DELETE SET NULL
 	`
 }
 
