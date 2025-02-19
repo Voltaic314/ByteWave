@@ -3,8 +3,8 @@ package processing
 import (
 	"time"
 	"fmt"
-	"github.com/Voltaic314/Data_Migration_Tool/responsehandler"
-	"github.com/Voltaic314/Data_Migration_Tool/filesystem"
+	"github.com/Voltaic314/Data_Migration_Tool/code/responsehandler"
+	"github.com/Voltaic314/Data_Migration_Tool/code/filesystem"
 )
 
 // TaskType defines the type of work this task is performing.

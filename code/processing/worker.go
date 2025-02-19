@@ -6,8 +6,8 @@ import (
 	"time"
 	"log"
 
-	"github.com/Voltaic314/Data_Migration_Tool/responsehandler"
-	"github.com/Voltaic314/Data_Migration_Tool/filesystem"
+	"github.com/Voltaic314/Data_Migration_Tool/code/responsehandler"
+	"github.com/Voltaic314/Data_Migration_Tool/code/filesystem"
 )
 
 // Worker represents a worker that processes tasks from a queue.

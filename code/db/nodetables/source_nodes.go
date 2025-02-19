@@ -1,6 +1,6 @@
 package nodetables
 
-import "github.com/Voltaic314/Data_Migration_Tool/db"
+import "github.com/Voltaic314/Data_Migration_Tool/code/db"
 
 type SourceNodesTable struct{}
 
