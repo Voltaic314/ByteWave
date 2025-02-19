@@ -3,7 +3,7 @@ package services
 import (
 	"io"
 
-	"github.com/Voltaic314/Data_Migration_Tool/code/responsehandler"
+	"github.com/Voltaic314/Data_Migration_Tool/code/core/responsehandler"
 )
 
 // Service defines common operations for handling files & folders.
