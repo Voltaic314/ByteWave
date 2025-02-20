@@ -3,38 +3,41 @@ package core
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"net"
 	"os"
 	"sync"
 	"time"
+
+	"github.com/Voltaic314/Data_Migration_Tool/code/core/db"
 )
 
 // Logger handles log streaming and batch writes to the audit_log DB.
 type Logger struct {
 	logLevel       string
 	logQueue       chan LogEntry
-	udpAddr        *net.UDPAddr
 	udpConn        *net.UDPConn
 	batchSize      int
 	batchSleepTime time.Duration
+	dbInstance     *db.DB
 	mu             sync.Mutex
 }
 
 // LogEntry represents a structured log.
 type LogEntry struct {
-	Timestamp string `json:"timestamp"`
-	Level     string `json:"level"`
-	Message   string `json:"message"`
+	Timestamp string                 `json:"timestamp"`
+	Level     string                 `json:"level"`
+	Message   string                 `json:"message"`
+	Details   map[string]interface{} `json:"details,omitempty"` // Optional details field
 }
 
 // Global Logger instance
 var GlobalLogger *Logger
 
-// InitLogger initializes the global logger.
-func InitLogger(configPath string) {
+// InitLogger initializes the global logger with a DB connection.
+func InitLogger(configPath string, dbInstance *db.DB) {
 	GlobalLogger = &Logger{
-		logQueue: make(chan LogEntry, 100),
+		logQueue:   make(chan LogEntry, 100),
+		dbInstance: dbInstance, // Assign DB instance
 	}
 	GlobalLogger.loadSettings(configPath)
 	GlobalLogger.connectToUDP()
@@ -91,8 +94,8 @@ func (l *Logger) connectToUDP() {
 	l.udpConn = conn
 }
 
-// LogMessage sends logs to UDP and queues them for batch DB writing.
-func (l *Logger) LogMessage(level, msg string) {
+// LogMessage sends logs to UDP, queues them for batch DB writing.
+func (l *Logger) LogMessage(level, message string, details map[string]interface{}) {
 	if !l.shouldLog(level) {
 		return
 	}
@@ -100,18 +103,21 @@ func (l *Logger) LogMessage(level, msg string) {
 	logEntry := LogEntry{
 		Timestamp: time.Now().Format(time.RFC3339),
 		Level:     level,
-		Message:   msg,
+		Message:   message,
+		Details:   details,
 	}
 
+	// Send log to UDP listener
 	if l.udpConn != nil {
 		serialized, _ := json.Marshal(logEntry)
 		l.udpConn.Write(serialized)
 	}
 
+	// Queue log for batch DB writing
 	l.logQueue <- logEntry
 }
 
-// batchLogWriter periodically writes logs in batches.
+// batchLogWriter periodically writes logs in batches to the DB.
 func (l *Logger) batchLogWriter() {
 	for {
 		time.Sleep(l.batchSleepTime)
@@ -119,7 +125,7 @@ func (l *Logger) batchLogWriter() {
 	}
 }
 
-// flushLogs writes queued logs to the DB.
+// flushLogs writes queued logs to the DB via `write_queue.go`.
 func (l *Logger) flushLogs() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -128,11 +134,34 @@ func (l *Logger) flushLogs() {
 		return
 	}
 
-	// Simulate DB write (replace with actual DB logic)
+	// Prepare batch DB writes
 	for len(l.logQueue) > 0 {
 		entry := <-l.logQueue
-		log.Printf("[%s] %s: %s\n", entry.Timestamp, entry.Level, entry.Message)
+		l.WriteLogToDB(entry)
 	}
+}
+
+// WriteLogToDB inserts logs into the DB via the write queue.
+func (l *Logger) WriteLogToDB(entry LogEntry) {
+	if l.dbInstance == nil {
+		fmt.Println("❌ Logger Error: No DB instance available")
+		return
+	}
+
+	// Convert details to JSON string
+	detailsJSON, err := json.Marshal(entry.Details)
+	if err != nil {
+		detailsJSON = []byte("{}") // Default to empty object if error
+	}
+	detailsStr := string(detailsJSON)
+
+	// Insert into DB via queue
+	l.dbInstance.WriteLog(db.LogEntry{
+		Category:   entry.Level,
+		ErrorType:  nil,
+		Details:    &detailsStr,
+		Message:    entry.Message,
+	})
 }
 
 // shouldLog checks if a message should be logged based on log level.

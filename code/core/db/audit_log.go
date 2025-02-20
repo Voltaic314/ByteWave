@@ -20,7 +20,7 @@ func (t AuditLogTable) Schema() string {
 		timestamp TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
 		category TEXT NOT NULL CHECK(category IN ('info', 'warning', 'error')),
 		error_type TEXT DEFAULT NULL,
-		details TEXT DEFAULT NULL,
+		details JSON DEFAULT NULL,
 		message TEXT NOT NULL
 	`
 }

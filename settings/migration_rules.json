@@ -1,0 +1,5 @@
+{
+    "mode": "copy",  
+    "overwrite_policy": "newest",
+    "clean_slate": false
+} 
