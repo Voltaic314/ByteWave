@@ -3,7 +3,6 @@ package processing
 import (
 	"time"
 	"fmt"
-	"github.com/Voltaic314/Data_Migration_Tool/code/core/responsehandler"
 	"github.com/Voltaic314/Data_Migration_Tool/code/core/filesystem"
 )
 
@@ -115,9 +114,4 @@ func (t *Task) CanRetry() bool {
 // AddMetadata attaches additional info to the task.
 func (t *Task) AddMetadata(key string, value interface{}) {
 	t.Metadata[key] = value
-}
-
-// ToResponse converts a task to a Response object.
-func (t *Task) ToResponse() responsehandler.Response {
-	return responsehandler.NewResponse(true, t, nil, nil)
 }

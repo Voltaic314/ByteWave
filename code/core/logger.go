@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -19,6 +20,8 @@ type Logger struct {
 	batchSize      int
 	batchSleepTime time.Duration
 	dbInstance     *db.DB
+	ctx            context.Context
+	cancel         context.CancelFunc
 	mu             sync.Mutex
 }
 
@@ -35,9 +38,12 @@ var GlobalLogger *Logger
 
 // InitLogger initializes the global logger with a DB connection.
 func InitLogger(configPath string, dbInstance *db.DB) {
+	ctx, cancel := context.WithCancel(context.Background())
 	GlobalLogger = &Logger{
 		logQueue:   make(chan LogEntry, 100),
-		dbInstance: dbInstance, // Assign DB instance
+		dbInstance: dbInstance,
+		ctx:        ctx,
+		cancel:     cancel,
 	}
 	GlobalLogger.loadSettings(configPath)
 	GlobalLogger.connectToUDP()
@@ -94,7 +100,7 @@ func (l *Logger) connectToUDP() {
 	l.udpConn = conn
 }
 
-// LogMessage sends logs to UDP, queues them for batch DB writing.
+// LogMessage sends logs asynchronously to UDP and queues for batch DB writing.
 func (l *Logger) LogMessage(level, message string, details map[string]interface{}) {
 	if !l.shouldLog(level) {
 		return
@@ -107,41 +113,52 @@ func (l *Logger) LogMessage(level, message string, details map[string]interface{
 		Details:   details,
 	}
 
-	// Send log to UDP listener
+	// Send log to UDP listener asynchronously
 	if l.udpConn != nil {
-		serialized, _ := json.Marshal(logEntry)
-		l.udpConn.Write(serialized)
+		go func(entry LogEntry) {
+			serialized, _ := json.Marshal(entry)
+			l.udpConn.Write(serialized)
+		}(logEntry)
 	}
 
-	// Queue log for batch DB writing
-	l.logQueue <- logEntry
+	// Queue log for batch DB writing asynchronously
+	select {
+	case l.logQueue <- logEntry:
+	default:
+		fmt.Println("⚠️  Log queue is full, dropping log entry.")
+	}
 }
 
-// batchLogWriter periodically writes logs in batches to the DB.
+// batchLogWriter handles logs asynchronously in batches with graceful shutdown.
 func (l *Logger) batchLogWriter() {
+	ticker := time.NewTicker(l.batchSleepTime)
+	defer ticker.Stop()
+
 	for {
-		time.Sleep(l.batchSleepTime)
-		l.flushLogs()
+		select {
+		case <-l.ctx.Done():
+			fmt.Println("🛑 Logger shutting down.")
+			return
+		case <-ticker.C:
+			l.flushLogs()
+		case entry := <-l.logQueue:
+			l.WriteLogToDB(entry)
+		}
 	}
 }
 
-// flushLogs writes queued logs to the DB via `write_queue.go`.
+// flushLogs writes queued logs to the DB.
 func (l *Logger) flushLogs() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	if len(l.logQueue) == 0 {
-		return
-	}
-
-	// Prepare batch DB writes
 	for len(l.logQueue) > 0 {
 		entry := <-l.logQueue
 		l.WriteLogToDB(entry)
 	}
 }
 
-// WriteLogToDB inserts logs into the DB via the write queue.
+// WriteLogToDB writes logs to the DB.
 func (l *Logger) WriteLogToDB(entry LogEntry) {
 	if l.dbInstance == nil {
 		fmt.Println("❌ Logger Error: No DB instance available")

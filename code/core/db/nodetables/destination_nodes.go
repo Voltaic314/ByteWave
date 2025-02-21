@@ -24,6 +24,11 @@ func (t DestinationNodesTable) Schema() string {
 	`
 }
 
+// Init creates the destination nodes table asynchronously.
 func (t DestinationNodesTable) Init(db *db.DB) error {
-	return db.CreateTable(t.Name(), t.Schema())
+	done := make(chan error)
+	go func() {
+		done <- db.CreateTable(t.Name(), t.Schema())
+	}()
+	return <-done
 }

@@ -1,6 +1,7 @@
 package services
 
 import (
+    "context"
     "encoding/json"
     "errors"
     "io"
@@ -28,13 +29,18 @@ type BaseService struct {
     Rules     MigrationRules // Holds migration rules in memory
     RulesPath string         // Path to migration_rules.json
     mu        sync.Mutex     // Prevents race conditions when writing rules
+    ctx       context.Context
+    cancel    context.CancelFunc
 }
 
 // NewBaseService initializes a BaseService, loading migration rules from JSON.
 func NewBaseService(logger *core.Logger, rulesPath string) (*BaseService, error) {
+    ctx, cancel := context.WithCancel(context.Background())
     base := &BaseService{
         Logger:    logger,
         RulesPath: rulesPath,
+        ctx:       ctx,
+        cancel:    cancel,
     }
 
     err := base.LoadMigrationRules()
@@ -49,53 +55,75 @@ func NewBaseService(logger *core.Logger, rulesPath string) (*BaseService, error)
     return base, nil
 }
 
-// LoadMigrationRules loads migration settings from the JSON file into memory.
+// LoadMigrationRules loads migration settings asynchronously.
 func (b *BaseService) LoadMigrationRules() error {
-    b.mu.Lock()
-    defer b.mu.Unlock()
+    done := make(chan error, 1)
 
-    file, err := os.Open(b.RulesPath)
-    if err != nil {
-        return err
-    }
-    defer file.Close()
+    go func() {
+        b.mu.Lock()
+        defer b.mu.Unlock()
 
-    data, err := io.ReadAll(file)
-    if err != nil {
-        return err
-    }
+        file, err := os.Open(b.RulesPath)
+        if err != nil {
+            done <- err
+            return
+        }
+        defer file.Close()
 
-    if err := json.Unmarshal(data, &b.Rules); err != nil {
-        return err
-    }
+        data, err := io.ReadAll(file)
+        if err != nil {
+            done <- err
+            return
+        }
+
+        if err := json.Unmarshal(data, &b.Rules); err != nil {
+            done <- err
+            return
+        }
 
     // Set defaults if fields are missing
-    if b.Rules.Mode == "" {
-        b.Rules.Mode = "copy"
-    }
-    if b.Rules.OverwritePolicy == "" {
-        b.Rules.OverwritePolicy = "newest"
-    }
+        if b.Rules.Mode == "" {
+            b.Rules.Mode = "copy"
+        }
+        if b.Rules.OverwritePolicy == "" {
+            b.Rules.OverwritePolicy = "newest"
+        }
 
-    return nil
+        done <- nil
+    }()
+
+    select {
+    case <-b.ctx.Done():
+        return errors.New("load migration rules canceled")
+    case err := <-done:
+        return err
+    }
 }
 
-// SaveMigrationRules writes the in-memory rules back to the JSON file.
+// SaveMigrationRules writes the in-memory rules back to the JSON file asynchronously.
 func (b *BaseService) SaveMigrationRules() error {
-    b.mu.Lock()
-    defer b.mu.Unlock()
+    done := make(chan error, 1)
 
-    data, err := json.MarshalIndent(b.Rules, "", "  ")
-    if err != nil {
+    go func() {
+        b.mu.Lock()
+        defer b.mu.Unlock()
+
+        data, err := json.MarshalIndent(b.Rules, "", "  ")
+        if err != nil {
+            done <- err
+            return
+        }
+
+        err = os.WriteFile(b.RulesPath, data, 0644)
+        done <- err
+    }()
+
+    select {
+    case <-b.ctx.Done():
+        return errors.New("save migration rules canceled")
+    case err := <-done:
         return err
     }
-
-    err = os.WriteFile(b.RulesPath, data, 0644)
-    if err != nil {
-        return err
-    }
-
-    return nil
 }
 
 // Example of modifying a rule dynamically and persisting it.
@@ -137,7 +165,6 @@ func (b *BaseService) UploadFile(filePath string, reader io.Reader, shouldOverWr
 func (b *BaseService) GetFileIdentifier(path string) string {
     return ""
 }
-
 
 func (b *BaseService) NormalizePath(path string) string {
     return path

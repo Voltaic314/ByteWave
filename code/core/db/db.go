@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"log"
 	"os"
@@ -12,6 +13,8 @@ import (
 type DB struct {
 	conn *sql.DB
 	wq   *WriteQueue
+	ctx  context.Context
+	cancel context.CancelFunc
 }
 
 // NewDB initializes the database connection and ensures the DB file exists.
@@ -30,16 +33,19 @@ func NewDB(dbPath string, batchSize int, flushTimer time.Duration) (*DB, error) 
 		return nil, err
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
+
 	// Initialize write queue
 	wq := NewQueue(batchSize, flushTimer, func(tableQueries map[string][]string, tableParams map[string][][]interface{}) error {
-		return batchExecute(conn, tableQueries, tableParams)
+		return batchExecute(ctx, conn, tableQueries, tableParams)
 	})
 
-	return &DB{conn: conn, wq: wq}, nil
+	return &DB{conn: conn, wq: wq, ctx: ctx, cancel: cancel}, nil
 }
 
 // Close closes the database connection.
 func (db *DB) Close() {
+	db.cancel()
 	if db.conn != nil {
 		db.conn.Close()
 	}
@@ -47,13 +53,13 @@ func (db *DB) Close() {
 
 // Write executes an immediate query (for table creation, schema updates, etc.).
 func (db *DB) Write(query string, params ...interface{}) error {
-	_, err := db.conn.Exec(query, params...)
+	_, err := db.conn.ExecContext(db.ctx, query, params...)
 	return err
 }
 
-// QueueWrite adds a query to the flush queue for batch processing.
+// QueueWrite adds a query to the flush queue for batch processing asynchronously.
 func (db *DB) QueueWrite(tableName string, query string, params ...interface{}) {
-	db.wq.AddWriteOperation(tableName, query, params)
+	go db.wq.AddWriteOperation(tableName, query, params)
 }
 
 // CreateTable creates a table if it doesn’t exist.
@@ -68,13 +74,13 @@ func (db *DB) DropTable(tableName string) error {
 	return db.Write(query)
 }
 
-// batchExecute processes batch write operations grouped by table name.
-func batchExecute(conn *sql.DB, tableQueries map[string][]string, tableParams map[string][][]interface{}) error {
+// batchExecute processes batch write operations grouped by table name asynchronously.
+func batchExecute(ctx context.Context, conn *sql.DB, tableQueries map[string][]string, tableParams map[string][][]interface{}) error {
 	if len(tableQueries) == 0 { // No queries to execute
 		return nil
 	}
 
-	tx, err := conn.Begin()
+	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -85,7 +91,7 @@ func batchExecute(conn *sql.DB, tableQueries map[string][]string, tableParams ma
 	for table, queries := range tableQueries {
 		params := tableParams[table]
 		for i, query := range queries {
-			_, err := tx.Exec(query, params[i]...)
+			_, err := tx.ExecContext(ctx, query, params[i]...)
 			if err != nil {
 				// Log the failed query instead of rolling back everything
 				log.Printf("Query failed in table %s: %s | Error: %v", table, query, err)

@@ -28,32 +28,38 @@ func generateSessionID() string {
 	return fmt.Sprintf("%X", rand.Uint64())
 }
 
-// SendLog sends a log message via UDP.
+// SendLog sends a log message via UDP asynchronously.
 func (s *Sender) SendLog(level, message string, details map[string]interface{}) {
-	logEntry := core.LogEntry{
-		Timestamp: time.Now().Format(time.RFC3339),
-		Level:     level,
-		Message:   message,
-		Details:   details, // Include structured details
-	}
+	go func() {
+		logEntry := core.LogEntry{
+			Timestamp: time.Now().Format(time.RFC3339),
+			Level:     level,
+			Message:   message,
+			Details:   details, // Include structured details
+		}
 
-	// Serialize log entry
-	serialized, err := json.Marshal(logEntry)
-	if err != nil {
-		fmt.Println("❌ Error encoding log entry:", err)
-		return
-	}
+		// Serialize log entry
+		serialized, err := json.Marshal(logEntry)
+		if err != nil {
+			fmt.Println("❌ Error encoding log entry:", err)
+			return
+		}
 
-	// Send log to UDP listener
-	conn, err := net.Dial("udp", "127.0.0.1:9999")
-	if err != nil {
-		fmt.Println("❌ Error sending log via UDP:", err)
-		return
-	}
-	defer conn.Close()
+		// Send log to UDP listener
+		conn, err := net.Dial("udp", "127.0.0.1:9999")
+		if err != nil {
+			fmt.Println("❌ Error sending log via UDP:", err)
+			return
+		}
+		defer conn.Close()
 
-	conn.Write(serialized)
+		_, writeErr := conn.Write(serialized)
+		if writeErr != nil {
+			fmt.Println("❌ Error writing to UDP connection:", writeErr)
+			return
+		}
+	}()
 
-	// Also push log to global logger (stores in DB queue)
+	// Also push log to global logger (already async internally)
 	core.GlobalLogger.LogMessage(level, message, details)
 }
