@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"sync"
 	"time"
 )
@@ -14,21 +15,26 @@ type WriteQueue struct {
 	batchSize  int
 	flushTimer time.Duration
 	flushFunc  func(map[string][]string, map[string][][]interface{}) error // Adjusted flush function signature
+	ctx        context.Context
+	cancel     context.CancelFunc
 }
 
-// NewQueue initializes the write queue.
+// NewQueue initializes the write queue with asynchronous flushing.
 func NewQueue(batchSize int, flushTimer time.Duration, flushFunc func(map[string][]string, map[string][][]interface{}) error) *WriteQueue {
+	ctx, cancel := context.WithCancel(context.Background())
 	wq := &WriteQueue{
 		queue:      make(map[string][]struct{ Query string; Params []interface{} }),
 		batchSize:  batchSize,
 		flushTimer: flushTimer,
 		flushFunc:  flushFunc,
+		ctx:        ctx,
+		cancel:     cancel,
 	}
 	go wq.startFlushTimer()
 	return wq
 }
 
-// AddWriteOperation adds a query to the queue under its respective table.
+// AddWriteOperation adds a query to the queue under its respective table asynchronously.
 func (wq *WriteQueue) AddWriteOperation(table string, query string, params []interface{}) {
 	wq.mu.Lock()
 	defer wq.mu.Unlock()
@@ -45,12 +51,11 @@ func (wq *WriteQueue) AddWriteOperation(table string, query string, params []int
 	}
 }
 
-// Flush writes all pending queries, grouped by table, to the DB and clears the queue.
+// Flush writes all pending queries, grouped by table, to the DB and clears the queue asynchronously.
 func (wq *WriteQueue) Flush() {
 	wq.mu.Lock()
-	defer wq.mu.Unlock()
-
 	if len(wq.queue) == 0 {
+		wq.mu.Unlock()
 		return // Nothing to flush
 	}
 
@@ -69,15 +74,18 @@ func (wq *WriteQueue) Flush() {
 		tableParams[table] = params
 	}
 
-	// Execute batch write per table
-	err := wq.flushFunc(tableQueries, tableParams)
-	if err != nil {
-		// Handle error logging or retry logic
-		return
-	}
-
-	// Clear queue after flush
+	// Clear the queue before releasing the lock
 	wq.queue = make(map[string][]struct{ Query string; Params []interface{} })
+	wq.mu.Unlock()
+
+	// Execute batch write per table asynchronously
+	go func() {
+		err := wq.flushFunc(tableQueries, tableParams)
+		if err != nil {
+			// Handle error logging or retry logic here
+			return
+		}
+	}()
 }
 
 // startFlushTimer ensures queue flushes even if batch size isn’t reached.
@@ -85,7 +93,17 @@ func (wq *WriteQueue) startFlushTimer() {
 	ticker := time.NewTicker(wq.flushTimer)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		wq.Flush()
+	for {
+		select {
+		case <-wq.ctx.Done():
+			return // Stop the timer if context is canceled
+		case <-ticker.C:
+			wq.Flush()
+		}
 	}
+}
+
+// Stop gracefully cancels any running timers and operations.
+func (wq *WriteQueue) Stop() {
+	wq.cancel()
 }
