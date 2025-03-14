@@ -14,37 +14,33 @@ const (
 	UploadQueueType    QueueType = "upload"
 )
 
-// QueuePhase defines the phase of the queue (level-based processing).
-type QueuePhase int
-
-// TaskQueue manages tasks for either traversal or upload.
+// TaskQueue manages tasks and stores global execution settings.
 type TaskQueue struct {
-	QueueID        string        // Unique identifier for the queue (e.g., "traversal-src-phase-1")
-	Type           QueueType     // Type of queue (traversal or upload)
-	Phase          QueuePhase    // Current phase (for level-based processing)
-	SrcOrDst       string        // "src" or "dst"
-	tasks          []*Task       // List of tasks
-	mu             sync.Mutex    // Mutex to handle concurrent access
-	workers        int           // Number of workers assigned to this queue
-	LastModified   time.Time     // Timestamp of the last queue modification
-	PaginationSize int           // Dynamic pagination size (default: 100)
+	QueueID        string              // Unique identifier for the queue
+	Type           QueueType           // Type of queue (traversal or upload)
+	Phase          int                 // Current phase
+	SrcOrDst       string              // "src" or "dst"
+	tasks          []*Task             // List of tasks
+	mu             sync.Mutex          // Mutex for concurrent access
+	LastModified   time.Time           // Last modification timestamp
+	PaginationSize int                 // Pagination width for folder content listing
+	PaginationChan chan int            // Channel for live updates
+	GlobalSettings map[string]any      // Stores global settings
 }
 
 // NewTaskQueue initializes a new queue for traversal or upload.
-func NewTaskQueue(queueType QueueType, phase QueuePhase, srcOrDst string, paginationSize int) *TaskQueue {
+func NewTaskQueue(queueType QueueType, phase int, srcOrDst string, paginationSize int) *TaskQueue {
 	queueID := fmt.Sprintf("%s-%s-phase-%d", queueType, srcOrDst, phase)
-	if paginationSize <= 0 {
-		paginationSize = 100 // Default pagination size
-	}
 	return &TaskQueue{
 		QueueID:        queueID,
 		Type:           queueType,
 		Phase:          phase,
 		SrcOrDst:       srcOrDst,
 		tasks:          []*Task{},
-		workers:        0,
 		LastModified:   time.Now(),
 		PaginationSize: paginationSize,
+		PaginationChan: make(chan int, 1),
+		GlobalSettings: make(map[string]any),
 	}
 }
 
@@ -52,25 +48,37 @@ func NewTaskQueue(queueType QueueType, phase QueuePhase, srcOrDst string, pagina
 func (q *TaskQueue) AddTask(task *Task) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-
 	q.tasks = append(q.tasks, task)
 	q.LastModified = time.Now()
 }
 
-// GetTask retrieves and removes the next task from the queue.
-func (q *TaskQueue) GetTask() *Task {
+// PopTask retrieves and locks the next available task.
+func (q *TaskQueue) PopTask() *Task {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
-	if len(q.tasks) == 0 {
-		return nil
+	for _, task := range q.tasks {
+		if !task.Locked { // Ensure it's not taken by another worker
+			task.Locked = true
+			q.LastModified = time.Now()
+			return task
+		}
 	}
+	return nil // No available tasks
+}
 
-	task := q.tasks[0]
-	q.tasks = q.tasks[1:]
-	q.LastModified = time.Now()
+// UnlockTask allows a worker or BG worker to reassign a failed/stalled task.
+func (q *TaskQueue) UnlockTask(taskID string) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
 
-	return task
+	for _, task := range q.tasks {
+		if task.ID == taskID {
+			task.Locked = false
+			q.LastModified = time.Now()
+			return
+		}
+	}
 }
 
 // QueueSize returns the number of tasks in the queue.
@@ -80,42 +88,37 @@ func (q *TaskQueue) QueueSize() int {
 	return len(q.tasks)
 }
 
-// AssignWorker increments the worker count for this queue.
-func (q *TaskQueue) AssignWorker() {
+// SetPaginationSize updates the pagination size and notifies workers.
+func (q *TaskQueue) SetPaginationSize(newSize int) {
 	q.mu.Lock()
-	defer q.mu.Unlock()
-	q.workers++
-}
+	q.PaginationSize = newSize
+	q.mu.Unlock()
 
-// ReleaseWorker decrements the worker count for this queue.
-func (q *TaskQueue) ReleaseWorker() {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	if q.workers > 0 {
-		q.workers--
+	// Push new size into channel (non-blocking)
+	select {
+	case q.PaginationChan <- newSize:
+	default:
+		// Drop if channel is full (prevents deadlocks)
 	}
 }
 
-// GetWorkerCount returns the number of workers currently assigned to this queue.
-func (q *TaskQueue) GetWorkerCount() int {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	return q.workers
+// GetPaginationChan provides the pagination size stream.
+func (q *TaskQueue) GetPaginationChan() <-chan int {
+	return q.PaginationChan
 }
 
-// SetPaginationSize updates the pagination size dynamically.
-func (q *TaskQueue) SetPaginationSize(size int) {
+// SetGlobalSetting updates a global setting dynamically.
+func (q *TaskQueue) SetGlobalSetting(key string, value interface{}) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if size > 0 {
-		q.PaginationSize = size
-		q.LastModified = time.Now()
-	}
+	q.GlobalSettings[key] = value
+	q.LastModified = time.Now()
 }
 
-// GetPaginationSize retrieves the current pagination size.
-func (q *TaskQueue) GetPaginationSize() int {
+// GetGlobalSetting retrieves a global setting dynamically.
+func (q *TaskQueue) GetGlobalSetting(key string) (interface{}, bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	return q.PaginationSize
+	val, exists := q.GlobalSettings[key]
+	return val, exists
 }
