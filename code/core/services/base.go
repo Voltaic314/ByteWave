@@ -144,8 +144,9 @@ func (b *BaseService) IsDirectory(path string) (bool, error) {
     return false, errors.New("IsDirectory not implemented in BaseService")
 }
 
-func (b *BaseService) GetAllItems(folderPath string, offset int) ([]filesystem.Folder, []filesystem.File, error) {
-    return nil, nil, errors.New("GetAllItems not implemented in BaseService")
+// GetAllItems is a stub function that must be overridden in actual services.
+func (b *BaseService) GetAllItems(folder filesystem.Folder, paginationStream <-chan int) ([]filesystem.Folder, []filesystem.File, error) {
+	return nil, nil, errors.New("GetAllItems must be implemented in a specific service (e.g., OS, Dropbox, etc.)")
 }
 
 func (b *BaseService) GetFileContents(filePath string) (io.ReadCloser, error) {

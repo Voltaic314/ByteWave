@@ -75,8 +75,8 @@ func (osSvc *OSService) ConvertFileInfoToMap(info os.FileInfo, path string) map[
     return metadata
 }
 
-// GetAllItems retrieves all items in a folder asynchronously with pagination support.
-func (osSvc *OSService) GetAllItems(folderPath string, offset int) (<-chan []filesystem.Folder, <-chan []filesystem.File, <-chan error) {
+// GetAllItems retrieves all items in a folder asynchronously with dynamic pagination.
+func (osSvc *OSService) GetAllItems(folderPath string) (<-chan []filesystem.Folder, <-chan []filesystem.File, <-chan error) {
     foldersChan := make(chan []filesystem.Folder, 1)
     filesChan := make(chan []filesystem.File, 1)
     errChan := make(chan error, 1)
@@ -100,54 +100,62 @@ func (osSvc *OSService) GetAllItems(folderPath string, offset int) (<-chan []fil
 
         var foldersList []filesystem.Folder
         var filesList []filesystem.File
+        totalEntries := len(entries)
+        currentIndex := 0
 
-        startIdx := offset * osSvc.PaginationSize
-        endIdx := startIdx + osSvc.PaginationSize
-        if startIdx >= len(entries) {
+        // Paginate dynamically based on current settings
+        for currentIndex < totalEntries {
+            paginationSize := osSvc.PaginationSize // Dynamically fetch updated pagination size
+
+            endIdx := currentIndex + paginationSize
+            if endIdx > totalEntries {
+                endIdx = totalEntries
+            }
+
+            for _, item := range entries[currentIndex:endIdx] {
+                itemPath := filepath.Join(normalizedPath, item.Name())
+                info, statErr := os.Stat(itemPath)
+                if statErr != nil {
+                    osSvc.Logger.LogMessage("error", "Failed to retrieve item details", map[string]interface{}{
+                        "itemPath": itemPath,
+                        "err":      statErr.Error(),
+                    })
+                    continue
+                }
+
+                metadata := osSvc.ConvertFileInfoToMap(info, itemPath)
+                if info.IsDir() {
+                    foldersList = append(foldersList, filesystem.Folder{
+                        Name:         item.Name(),
+                        Path:         itemPath,
+                        Identifier:   metadata["identifier"].(string),
+                        ParentID:     normalizedPath,
+                        LastModified: metadata["last_modified"].(string),
+                    })
+                } else {
+                    filesList = append(filesList, filesystem.File{
+                        Name:         item.Name(),
+                        Path:         itemPath,
+                        Identifier:   metadata["identifier"].(string),
+                        ParentID:     normalizedPath,
+                        Size:         metadata["size"].(int64),
+                        LastModified: metadata["last_modified"].(string),
+                    })
+                }
+            }
+
+            // Send results per batch
             foldersChan <- foldersList
             filesChan <- filesList
             errChan <- nil
-            return
-        }
-        if endIdx > len(entries) {
-            endIdx = len(entries)
-        }
 
-        for _, item := range entries[startIdx:endIdx] {
-            itemPath := filepath.Join(normalizedPath, item.Name())
-            info, statErr := os.Stat(itemPath)
-            if statErr != nil {
-                osSvc.Logger.LogMessage("error", "Failed to retrieve item details", map[string]interface{}{
-                    "itemPath": itemPath,
-                    "err":      statErr.Error(),
-                })
-                continue
-            }
+            // Clear lists for the next batch
+            foldersList = nil
+            filesList = nil
 
-            metadata := osSvc.ConvertFileInfoToMap(info, itemPath)
-            if info.IsDir() {
-                foldersList = append(foldersList, filesystem.Folder{
-                    Name:         item.Name(),
-                    Path:         itemPath,
-                    Identifier:   metadata["identifier"].(string),
-                    ParentID:     normalizedPath,
-                    LastModified: metadata["last_modified"].(string),
-                })
-            } else {
-                filesList = append(filesList, filesystem.File{
-                    Name:         item.Name(),
-                    Path:         itemPath,
-                    Identifier:   metadata["identifier"].(string),
-                    ParentID:     normalizedPath,
-                    Size:         metadata["size"].(int64),
-                    LastModified: metadata["last_modified"].(string),
-                })
-            }
+            // Move to the next batch
+            currentIndex += paginationSize
         }
-
-        foldersChan <- foldersList
-        filesChan <- filesList
-        errChan <- nil
     }()
 
     return foldersChan, filesChan, errChan
