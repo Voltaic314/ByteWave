@@ -1,12 +1,12 @@
 package workers
 
 import (
-	"github.com/Voltaic314/Data_Migration_Tool/code/core/filesystem"
-	"github.com/Voltaic314/Data_Migration_Tool/code/core/db"
-	"github.com/Voltaic314/Data_Migration_Tool/code/core/services"
-	"github.com/Voltaic314/Data_Migration_Tool/code/core/pv"
-	"github.com/Voltaic314/Data_Migration_Tool/code/core/processing"
-	"github.com/Voltaic314/Data_Migration_Tool/code/core"
+	"github.com/Voltaic314/ByteWave/code/core"
+	"github.com/Voltaic314/ByteWave/code/core/db"
+	"github.com/Voltaic314/ByteWave/code/core/filesystem"
+	"github.com/Voltaic314/ByteWave/code/core/processing"
+	"github.com/Voltaic314/ByteWave/code/core/pv"
+	"github.com/Voltaic314/ByteWave/code/core/services"
 )
 
 // TraverserWorker processes folder traversal tasks.

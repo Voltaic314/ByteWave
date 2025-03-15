@@ -7,7 +7,7 @@ import (
 	"net"
 	"time"
 
-	"github.com/Voltaic314/Data_Migration_Tool/code/core"
+	"github.com/Voltaic314/ByteWave/code/core"
 )
 
 // Sender struct sends log messages via UDP.

@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Voltaic314/Data_Migration_Tool/code/core/db"
+	"github.com/Voltaic314/ByteWave/code/core/db"
 )
 
 // Logger handles log streaming and batch writes to the audit_log DB.
@@ -174,10 +174,10 @@ func (l *Logger) WriteLogToDB(entry LogEntry) {
 
 	// Insert into DB via queue
 	l.dbInstance.WriteLog(db.LogEntry{
-		Category:   entry.Level,
-		ErrorType:  nil,
-		Details:    &detailsStr,
-		Message:    entry.Message,
+		Category:  entry.Level,
+		ErrorType: nil,
+		Details:   &detailsStr,
+		Message:   entry.Message,
 	})
 }
 

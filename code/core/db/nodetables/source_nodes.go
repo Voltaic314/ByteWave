@@ -1,6 +1,6 @@
 package nodetables
 
-import "github.com/Voltaic314/Data_Migration_Tool/code/core/db"
+import "github.com/Voltaic314/ByteWave/code/core/db"
 
 type SourceNodesTable struct{}
 

@@ -1,4 +1,4 @@
-module github.com/Voltaic314/Data_Migration_Tool
+module github.com/Voltaic314/ByteWave
 
 go 1.23.5
 
