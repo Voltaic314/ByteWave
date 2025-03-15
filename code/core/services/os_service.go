@@ -47,7 +47,7 @@ func (osSvc *OSService) IsDirectory(path string) <-chan bool {
 		osSvc.TotalDiskReads++
 		info, err := os.Stat(path)
 		if err != nil {
-			osSvc.Logger.LogMessage("error", "Failed to check directory status", map[string]interface{}{
+			osSvc.Logger.LogMessage("error", "Failed to check directory status", map[string]any{
 				"path": path,
 				"err":  err.Error(),
 			})
@@ -60,10 +60,10 @@ func (osSvc *OSService) IsDirectory(path string) <-chan bool {
 	return result
 }
 
-// ConvertFileInfoToMap converts os.FileInfo into a generic map[string]interface{}
+// ConvertFileInfoToMap converts os.FileInfo into a generic map[string]any
 // and retrieves a proper unique identifier (MFT ID on Windows, Inode on Linux/macOS).
-func (osSvc *OSService) ConvertFileInfoToMap(info os.FileInfo, path string) map[string]interface{} {
-	metadata := map[string]interface{}{
+func (osSvc *OSService) ConvertFileInfoToMap(info os.FileInfo, path string) map[string]any {
+	metadata := map[string]any{
 		"name":          info.Name(),
 		"path":          path,
 		"size":          info.Size(),
@@ -90,7 +90,7 @@ func (osSvc *OSService) GetAllItems(folderPath string) (<-chan []filesystem.Fold
 		normalizedPath := osSvc.NormalizePath(folderPath)
 		entries, err := os.ReadDir(normalizedPath)
 		if err != nil {
-			osSvc.Logger.LogMessage("error", "Failed to read directory", map[string]interface{}{
+			osSvc.Logger.LogMessage("error", "Failed to read directory", map[string]any{
 				"folderPath": folderPath,
 				"err":        err.Error(),
 			})
@@ -116,7 +116,7 @@ func (osSvc *OSService) GetAllItems(folderPath string) (<-chan []filesystem.Fold
 				itemPath := filepath.Join(normalizedPath, item.Name())
 				info, statErr := os.Stat(itemPath)
 				if statErr != nil {
-					osSvc.Logger.LogMessage("error", "Failed to retrieve item details", map[string]interface{}{
+					osSvc.Logger.LogMessage("error", "Failed to retrieve item details", map[string]any{
 						"itemPath": itemPath,
 						"err":      statErr.Error(),
 					})
@@ -173,7 +173,7 @@ func (osSvc *OSService) GetFileContents(filePath string) (<-chan io.ReadCloser, 
 		osSvc.TotalDiskReads++
 		file, err := os.Open(filePath)
 		if err != nil {
-			osSvc.Logger.LogMessage("error", "Failed to open file", map[string]interface{}{
+			osSvc.Logger.LogMessage("error", "Failed to open file", map[string]any{
 				"filePath": filePath,
 				"err":      err.Error(),
 			})
@@ -206,7 +206,7 @@ func (osSvc *OSService) CreateFolder(folderPath string) <-chan error {
 
 		if _, err := os.Stat(normalizedPath); os.IsNotExist(err) {
 			if mkErr := os.MkdirAll(normalizedPath, os.ModePerm); mkErr != nil {
-				osSvc.Logger.LogMessage("error", "Failed to create folder", map[string]interface{}{
+				osSvc.Logger.LogMessage("error", "Failed to create folder", map[string]any{
 					"folderPath": folderPath,
 					"err":        mkErr.Error(),
 				})
@@ -231,7 +231,7 @@ func (osSvc *OSService) UploadFile(filePath string, reader io.Reader, shouldOver
 		if _, err := os.Stat(filePath); err == nil {
 			overwrite, policyErr := shouldOverWrite()
 			if policyErr != nil {
-				osSvc.Logger.LogMessage("error", "Failed to determine overwrite policy", map[string]interface{}{
+				osSvc.Logger.LogMessage("error", "Failed to determine overwrite policy", map[string]any{
 					"filePath": filePath,
 					"err":      policyErr.Error(),
 				})
@@ -240,7 +240,7 @@ func (osSvc *OSService) UploadFile(filePath string, reader io.Reader, shouldOver
 			}
 			osSvc.TotalDiskReads++
 			if !overwrite {
-				osSvc.Logger.LogMessage("info", "File already exists; overwrite disabled", map[string]interface{}{
+				osSvc.Logger.LogMessage("info", "File already exists; overwrite disabled", map[string]any{
 					"filePath": filePath,
 				})
 				result <- nil
@@ -250,7 +250,7 @@ func (osSvc *OSService) UploadFile(filePath string, reader io.Reader, shouldOver
 
 		file, err := os.Create(filePath)
 		if err != nil {
-			osSvc.Logger.LogMessage("error", "Failed to create file", map[string]interface{}{
+			osSvc.Logger.LogMessage("error", "Failed to create file", map[string]any{
 				"filePath": filePath,
 				"err":      err.Error(),
 			})
@@ -260,7 +260,7 @@ func (osSvc *OSService) UploadFile(filePath string, reader io.Reader, shouldOver
 		defer file.Close()
 
 		if _, copyErr := io.Copy(file, reader); copyErr != nil {
-			osSvc.Logger.LogMessage("error", "Failed to write file contents", map[string]interface{}{
+			osSvc.Logger.LogMessage("error", "Failed to write file contents", map[string]any{
 				"filePath": filePath,
 				"err":      copyErr.Error(),
 			})
@@ -287,7 +287,7 @@ func (osSvc *OSService) getFileIdentifierWindows(path string) string {
 		0,
 	)
 	if err != nil {
-		osSvc.Logger.LogMessage("error", "Failed to get file handle for MFT index", map[string]interface{}{
+		osSvc.Logger.LogMessage("error", "Failed to get file handle for MFT index", map[string]any{
 			"path": path,
 			"err":  err.Error(),
 		})
@@ -298,7 +298,7 @@ func (osSvc *OSService) getFileIdentifierWindows(path string) string {
 	var fileInfo windows.ByHandleFileInformation
 	err = windows.GetFileInformationByHandle(windows.Handle(handle), &fileInfo)
 	if err != nil {
-		osSvc.Logger.LogMessage("error", "Failed to retrieve file info for MFT index", map[string]interface{}{
+		osSvc.Logger.LogMessage("error", "Failed to retrieve file info for MFT index", map[string]any{
 			"path": path,
 			"err":  err.Error(),
 		})

@@ -27,10 +27,10 @@ type Logger struct {
 
 // LogEntry represents a structured log.
 type LogEntry struct {
-	Timestamp string                 `json:"timestamp"`
-	Level     string                 `json:"level"`
-	Message   string                 `json:"message"`
-	Details   map[string]interface{} `json:"details,omitempty"` // Optional details field
+	Timestamp string         `json:"timestamp"`
+	Level     string         `json:"level"`
+	Message   string         `json:"message"`
+	Details   map[string]any `json:"details,omitempty"` // Optional details field
 }
 
 // Global Logger instance
@@ -61,7 +61,7 @@ func (l *Logger) loadSettings(configPath string) {
 		return
 	}
 
-	var config map[string]interface{}
+	var config map[string]any
 	json.Unmarshal(file, &config)
 
 	if val, ok := config["log_level"].(string); ok {
@@ -101,7 +101,7 @@ func (l *Logger) connectToUDP() {
 }
 
 // LogMessage sends logs asynchronously to UDP and queues for batch DB writing.
-func (l *Logger) LogMessage(level, message string, details map[string]interface{}) {
+func (l *Logger) LogMessage(level, message string, details map[string]any) {
 	if !l.shouldLog(level) {
 		return
 	}

@@ -29,7 +29,7 @@ func generateSessionID() string {
 }
 
 // SendLog sends a log message via UDP asynchronously.
-func (s *Sender) SendLog(level, message string, details map[string]interface{}) {
+func (s *Sender) SendLog(level, message string, details map[string]any) {
 	go func() {
 		logEntry := core.LogEntry{
 			Timestamp: time.Now().Format(time.RFC3339),

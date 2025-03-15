@@ -7,23 +7,26 @@ import (
 )
 
 type WriteQueue struct {
-	mu         sync.Mutex
-	queue      map[string][]struct {
+	mu    sync.Mutex
+	queue map[string][]struct {
 		Query  string
-		Params []interface{}
+		Params []any
 	} // Grouped by table name
 	batchSize  int
 	flushTimer time.Duration
-	flushFunc  func(map[string][]string, map[string][][]interface{}) error // Adjusted flush function signature
+	flushFunc  func(map[string][]string, map[string][][]any) error // Adjusted flush function signature
 	ctx        context.Context
 	cancel     context.CancelFunc
 }
 
 // NewQueue initializes the write queue with asynchronous flushing.
-func NewQueue(batchSize int, flushTimer time.Duration, flushFunc func(map[string][]string, map[string][][]interface{}) error) *WriteQueue {
+func NewQueue(batchSize int, flushTimer time.Duration, flushFunc func(map[string][]string, map[string][][]any) error) *WriteQueue {
 	ctx, cancel := context.WithCancel(context.Background())
 	wq := &WriteQueue{
-		queue:      make(map[string][]struct{ Query string; Params []interface{} }),
+		queue: make(map[string][]struct {
+			Query  string
+			Params []any
+		}),
 		batchSize:  batchSize,
 		flushTimer: flushTimer,
 		flushFunc:  flushFunc,
@@ -35,12 +38,15 @@ func NewQueue(batchSize int, flushTimer time.Duration, flushFunc func(map[string
 }
 
 // AddWriteOperation adds a query to the queue under its respective table asynchronously.
-func (wq *WriteQueue) AddWriteOperation(table string, query string, params []interface{}) {
+func (wq *WriteQueue) AddWriteOperation(table string, query string, params []any) {
 	wq.mu.Lock()
 	defer wq.mu.Unlock()
 
 	// Append the query under the respective table
-	wq.queue[table] = append(wq.queue[table], struct{ Query string; Params []interface{} }{Query: query, Params: params})
+	wq.queue[table] = append(wq.queue[table], struct {
+		Query  string
+		Params []any
+	}{Query: query, Params: params})
 
 	// Trigger a flush if batch size is reached for any table
 	for _, queries := range wq.queue {
@@ -61,11 +67,11 @@ func (wq *WriteQueue) Flush() {
 
 	// Separate queries and params by table
 	tableQueries := make(map[string][]string)
-	tableParams := make(map[string][][]interface{})
+	tableParams := make(map[string][][]any)
 
 	for table, entries := range wq.queue {
 		queries := make([]string, len(entries))
-		params := make([][]interface{}, len(entries))
+		params := make([][]any, len(entries))
 		for i, entry := range entries {
 			queries[i] = entry.Query
 			params[i] = entry.Params
@@ -75,7 +81,10 @@ func (wq *WriteQueue) Flush() {
 	}
 
 	// Clear the queue before releasing the lock
-	wq.queue = make(map[string][]struct{ Query string; Params []interface{} })
+	wq.queue = make(map[string][]struct {
+		Query  string
+		Params []any
+	})
 	wq.mu.Unlock()
 
 	// Execute batch write per table asynchronously

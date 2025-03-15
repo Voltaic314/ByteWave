@@ -58,7 +58,7 @@ func (r *Receiver) StartListener() {
 					continue
 				}
 
-				var logEntry map[string]interface{}
+				var logEntry map[string]any
 				if err := json.Unmarshal(buffer[:n], &logEntry); err != nil {
 					fmt.Println("❌ Error decoding log entry:", err)
 					continue

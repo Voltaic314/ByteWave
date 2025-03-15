@@ -11,9 +11,9 @@ import (
 )
 
 type DB struct {
-	conn *sql.DB
-	wq   *WriteQueue
-	ctx  context.Context
+	conn   *sql.DB
+	wq     *WriteQueue
+	ctx    context.Context
 	cancel context.CancelFunc
 }
 
@@ -36,7 +36,7 @@ func NewDB(dbPath string, batchSize int, flushTimer time.Duration) (*DB, error) 
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Initialize write queue
-	wq := NewQueue(batchSize, flushTimer, func(tableQueries map[string][]string, tableParams map[string][][]interface{}) error {
+	wq := NewQueue(batchSize, flushTimer, func(tableQueries map[string][]string, tableParams map[string][][]any) error {
 		return batchExecute(ctx, conn, tableQueries, tableParams)
 	})
 
@@ -52,13 +52,13 @@ func (db *DB) Close() {
 }
 
 // Write executes an immediate query (for table creation, schema updates, etc.).
-func (db *DB) Write(query string, params ...interface{}) error {
+func (db *DB) Write(query string, params ...any) error {
 	_, err := db.conn.ExecContext(db.ctx, query, params...)
 	return err
 }
 
 // QueueWrite adds a query to the flush queue for batch processing asynchronously.
-func (db *DB) QueueWrite(tableName string, query string, params ...interface{}) {
+func (db *DB) QueueWrite(tableName string, query string, params ...any) {
 	go db.wq.AddWriteOperation(tableName, query, params)
 }
 
@@ -75,7 +75,7 @@ func (db *DB) DropTable(tableName string) error {
 }
 
 // batchExecute processes batch write operations grouped by table name asynchronously.
-func batchExecute(ctx context.Context, conn *sql.DB, tableQueries map[string][]string, tableParams map[string][][]interface{}) error {
+func batchExecute(ctx context.Context, conn *sql.DB, tableQueries map[string][]string, tableParams map[string][][]any) error {
 	if len(tableQueries) == 0 { // No queries to execute
 		return nil
 	}

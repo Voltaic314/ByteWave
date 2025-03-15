@@ -25,7 +25,8 @@ type TaskQueue struct {
 	LastModified   time.Time           // Last modification timestamp
 	PaginationSize int                 // Pagination width for folder content listing
 	PaginationChan chan int            // Channel for live updates
-	GlobalSettings map[string]any      // Stores global settings
+	GlobalSettings map[string]any      // Stores global settings,
+	Locked         bool                // Prevents workers from picking up tasks and QP from publishing new work.
 }
 
 // NewTaskQueue initializes a new queue for traversal or upload.
@@ -41,7 +42,18 @@ func NewTaskQueue(queueType QueueType, phase int, srcOrDst string, paginationSiz
 		PaginationSize: paginationSize,
 		PaginationChan: make(chan int, 1),
 		GlobalSettings: make(map[string]any),
+		Locked:         false,
 	}
+}
+
+
+// Lock the queue (pause migration)
+func (q *TaskQueue) Lock() {
+	q.Locked = true
+}
+
+func (q *TaskQueue) Unlock() {
+	q.Locked = false
 }
 
 // AddTask adds a task to the queue.
@@ -54,6 +66,11 @@ func (q *TaskQueue) AddTask(task *Task) {
 
 // PopTask retrieves and locks the next available task.
 func (q *TaskQueue) PopTask() *Task {
+
+	if q.Locked {
+		return nil
+	}
+
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
@@ -108,7 +125,7 @@ func (q *TaskQueue) GetPaginationChan() <-chan int {
 }
 
 // SetGlobalSetting updates a global setting dynamically.
-func (q *TaskQueue) SetGlobalSetting(key string, value interface{}) {
+func (q *TaskQueue) SetGlobalSetting(key string, value any) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.GlobalSettings[key] = value
@@ -116,7 +133,7 @@ func (q *TaskQueue) SetGlobalSetting(key string, value interface{}) {
 }
 
 // GetGlobalSetting retrieves a global setting dynamically.
-func (q *TaskQueue) GetGlobalSetting(key string) (interface{}, bool) {
+func (q *TaskQueue) GetGlobalSetting(key string) (any, bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	val, exists := q.GlobalSettings[key]
