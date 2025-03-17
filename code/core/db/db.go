@@ -51,6 +51,19 @@ func (db *DB) Close() {
 	}
 }
 
+// Query retrieves data from the database, ensuring fresh results by flushing first.
+func (db *DB) Query(query string, params ...any) (*sql.Rows, error) {
+	// Ensure all pending writes are flushed before querying
+	db.wq.Flush()
+
+	// Execute the query
+	rows, err := db.conn.QueryContext(db.ctx, query, params...)
+	if err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
 // Write executes an immediate query (for table creation, schema updates, etc.).
 func (db *DB) Write(query string, params ...any) error {
 	_, err := db.conn.ExecContext(db.ctx, query, params...)

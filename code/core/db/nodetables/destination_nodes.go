@@ -12,7 +12,7 @@ func (t DestinationNodesTable) Schema() string {
 	return `
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		path TEXT NOT NULL UNIQUE,
-		identifier TEXT,  -- NULLable for filesystems that don’t provide IDs
+		identifier TEXT,  -- NULLable for filesystems that don't provide IDs
 		type TEXT NOT NULL CHECK(type IN ('file', 'folder')),
 		level INTEGER NOT NULL,
 		size INTEGER,

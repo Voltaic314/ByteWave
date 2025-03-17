@@ -1,9 +1,8 @@
 package processing
 
 import (
-	"sync"
-	"time"
 	"fmt"
+	"sync"
 )
 
 // QueueType defines whether a queue is for traversal or uploading.
@@ -14,15 +13,29 @@ const (
 	UploadQueueType    QueueType = "upload"
 )
 
-// TaskQueue manages tasks and stores global execution settings.
+// WorkerState defines the possible states of a worker.
+type WorkerState string
+
+const (
+	WorkerIdle    WorkerState = "idle"
+	WorkerActive  WorkerState = "active"
+)
+
+// Worker represents an instance of a worker assigned to this queue.
+type Worker struct {
+	ID    string
+	State WorkerState
+}
+
+// TaskQueue manages tasks, workers, and execution settings.
 type TaskQueue struct {
 	QueueID        string              // Unique identifier for the queue
 	Type           QueueType           // Type of queue (traversal or upload)
 	Phase          int                 // Current phase
 	SrcOrDst       string              // "src" or "dst"
 	tasks          []*Task             // List of tasks
+	workers        []*Worker           // List of active workers
 	mu             sync.Mutex          // Mutex for concurrent access
-	LastModified   time.Time           // Last modification timestamp
 	PaginationSize int                 // Pagination width for folder content listing
 	PaginationChan chan int            // Channel for live updates
 	GlobalSettings map[string]any      // Stores global settings,
@@ -38,14 +51,13 @@ func NewTaskQueue(queueType QueueType, phase int, srcOrDst string, paginationSiz
 		Phase:          phase,
 		SrcOrDst:       srcOrDst,
 		tasks:          []*Task{},
-		LastModified:   time.Now(),
+		workers:        []*Worker{},
 		PaginationSize: paginationSize,
 		PaginationChan: make(chan int, 1),
 		GlobalSettings: make(map[string]any),
 		Locked:         false,
 	}
 }
-
 
 // Lock the queue (pause migration)
 func (q *TaskQueue) Lock() {
@@ -61,12 +73,10 @@ func (q *TaskQueue) AddTask(task *Task) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.tasks = append(q.tasks, task)
-	q.LastModified = time.Now()
 }
 
 // PopTask retrieves and locks the next available task.
 func (q *TaskQueue) PopTask() *Task {
-
 	if q.Locked {
 		return nil
 	}
@@ -77,7 +87,6 @@ func (q *TaskQueue) PopTask() *Task {
 	for _, task := range q.tasks {
 		if !task.Locked { // Ensure it's not taken by another worker
 			task.Locked = true
-			q.LastModified = time.Now()
 			return task
 		}
 	}
@@ -92,7 +101,6 @@ func (q *TaskQueue) UnlockTask(taskID string) {
 	for _, task := range q.tasks {
 		if task.ID == taskID {
 			task.Locked = false
-			q.LastModified = time.Now()
 			return
 		}
 	}
@@ -129,7 +137,6 @@ func (q *TaskQueue) SetGlobalSetting(key string, value any) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.GlobalSettings[key] = value
-	q.LastModified = time.Now()
 }
 
 // GetGlobalSetting retrieves a global setting dynamically.
@@ -138,4 +145,47 @@ func (q *TaskQueue) GetGlobalSetting(key string) (any, bool) {
 	defer q.mu.Unlock()
 	val, exists := q.GlobalSettings[key]
 	return val, exists
+}
+
+// AddWorker registers a new worker instance.
+func (q *TaskQueue) AddWorker(workerID string) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.workers = append(q.workers, &Worker{ID: workerID, State: WorkerIdle})
+}
+
+// RemoveWorker removes a worker from the queue.
+func (q *TaskQueue) RemoveWorker(workerID string) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for i, worker := range q.workers {
+		if worker.ID == workerID {
+			q.workers = append(q.workers[:i], q.workers[i+1:]...)
+			return
+		}
+	}
+}
+
+// SetWorkerState updates the state of a worker.
+func (q *TaskQueue) SetWorkerState(workerID string, state WorkerState) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for _, worker := range q.workers {
+		if worker.ID == workerID {
+			worker.State = state
+			return
+		}
+	}
+}
+
+// AreAllWorkersIdle checks if all workers are idle.
+func (q *TaskQueue) AreAllWorkersIdle() bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for _, worker := range q.workers {
+		if worker.State != WorkerIdle {
+			return false
+		}
+	}
+	return true
 }
