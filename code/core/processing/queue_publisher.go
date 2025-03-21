@@ -22,7 +22,9 @@ type QueuePublisher struct {
 	// Configurable settings (adjustable by DRA later)
 	RetryThreshold  int // Max retries before marking failure
 	BatchSize       int // How many tasks to fetch per DB query
-}
+	RunningLowChans map[string]chan int // ✅ Separate signal channels per queue
+	}
+
 
 // NewQueuePublisher initializes a multi-queue publisher.
 func NewQueuePublisher(db *db.DB, retryThreshold, batchSize int) *QueuePublisher {
@@ -34,34 +36,36 @@ func NewQueuePublisher(db *db.DB, retryThreshold, batchSize int) *QueuePublisher
 		PublishSignals:  make(map[string]chan bool),
 		PhaseUpdated:    make(chan int, 1), // Global phase update signal
 		Running:         false,
-
-		// Set adjustable parameters
-		RetryThreshold: retryThreshold,
-		BatchSize:      batchSize,
+		RetryThreshold:  retryThreshold,
+		BatchSize:       batchSize,
+		RunningLowChans: make(map[string]chan int), // ✅ Initialize first
 	}
 }
 
-// RegisterQueue dynamically registers a queue and its channels.
-func (qp *QueuePublisher) RegisterQueue(name string, queue *TaskQueue, initialLevel int) {
-	qp.Queues[name] = queue
-	qp.QueueLevels[name] = initialLevel
-	qp.QueueBoardChans[name] = make(chan int, 1) // Now expects level info
-	qp.PublishSignals[name] = make(chan bool, 1)
-}
-
-// StartListening listens for signals from multiple queue boards.
+// Modify `StartListening` to listen for RunningLowChans
 func (qp *QueuePublisher) StartListening() {
 	qp.Running = true
 	go func() {
 		for qp.Running {
 			for name, signalChan := range qp.QueueBoardChans {
 				select {
-				case level := <-signalChan: // Signal from specific queue board with level
-					qp.QueueLevels[name] = level
-					qp.PublishTasks(name)
+				case level := <-signalChan:
+					if qp.Queues[name].State == QueueRunning {
+						qp.QueueLevels[name] = level
+						qp.PublishTasks(name)
+					}
 
-				case <-time.After(10 * time.Second): // Fallback check (for now)
-					if qp.Queues[name].QueueSize() == 0 {
+				case phase, ok := <-qp.RunningLowChans[name]:  
+					if ok && qp.Queues[name].State == QueueRunning {
+						qp.QueueLevels[name] = phase
+						qp.PublishTasks(name)
+						
+						// ✅ Notify queue to unlock RunningLow trigger
+						qp.Queues[name].ResetRunningLowTrigger()
+					}
+
+				case <-time.After(10 * time.Second):
+					if qp.Queues[name].QueueSize() == 0 && qp.Queues[name].State == QueueRunning {
 						qp.PublishTasks(name)
 					}
 				}
@@ -76,7 +80,7 @@ func (qp *QueuePublisher) PublishTasks(queueName string) {
 	defer qp.Mutex.Unlock()
 
 	queue, exists := qp.Queues[queueName]
-	if !exists || queue.Locked {
+	if !exists || queue.State == QueuePaused { // ✅ Check if queue is paused
 		return
 	}
 
@@ -93,12 +97,14 @@ func (qp *QueuePublisher) PublishTasks(queueName string) {
 		// 🎯 Round is over! Increment level & notify queue board
 		queue.Phase++
 		qp.QueueLevels[queueName] = queue.Phase
-
+	
 		// Signal Queue Board that the phase has changed
 		qp.PhaseUpdated <- queue.Phase
-
-		// Immediately fetch new tasks for the next level
-		qp.PublishTasks(queueName)
+	
+		// ✅ Ensure next round is only started if queue is running
+		if queue.State == QueueRunning {
+			qp.PublishTasks(queueName)
+		}
 		return
 	}
 

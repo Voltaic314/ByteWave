@@ -21,6 +21,10 @@ type TraverserWorker struct {
 
 // FetchAndProcessTask pulls a task from the queue and executes it.
 func (tw *TraverserWorker) FetchAndProcessTask() error {
+	if tw.Queue.State == processing.QueuePaused {
+		tw.Logger.LogMessage("info", "Worker waiting, queue is paused", nil)
+		return nil
+	}
 	task := tw.Queue.PopTask() // Fetch and lock a task
 	if task == nil {
 		tw.Logger.LogMessage("info", "No tasks available in queue", map[string]any{

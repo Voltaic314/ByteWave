@@ -13,6 +13,14 @@ const (
 	UploadQueueType    QueueType = "upload"
 )
 
+// QueueState defines the possible states of a queue.
+type QueueState string
+
+const (
+	QueueRunning QueueState = "running"
+	QueuePaused  QueueState = "paused"
+)
+
 // WorkerState defines the possible states of a worker.
 type WorkerState string
 
@@ -29,43 +37,71 @@ type Worker struct {
 
 // TaskQueue manages tasks, workers, and execution settings.
 type TaskQueue struct {
-	QueueID        string              // Unique identifier for the queue
-	Type           QueueType           // Type of queue (traversal or upload)
-	Phase          int                 // Current phase
-	SrcOrDst       string              // "src" or "dst"
-	tasks          []*Task             // List of tasks
-	workers        []*Worker           // List of active workers
-	mu             sync.Mutex          // Mutex for concurrent access
-	PaginationSize int                 // Pagination width for folder content listing
-	PaginationChan chan int            // Channel for live updates
-	GlobalSettings map[string]any      // Stores global settings,
-	Locked         bool                // Prevents workers from picking up tasks and QP from publishing new work.
+	QueueID             string         // Unique identifier for the queue
+	Type                QueueType      // Type of queue (traversal or upload)
+	Phase               int            // Current phase
+	SrcOrDst            string         // "src" or "dst"
+	tasks               []*Task        // List of tasks
+	workers             []*Worker      // Managed by Conductor
+	mu                  sync.Mutex     // Mutex for concurrent access
+	PaginationSize      int            // Pagination width for folder content listing
+	PaginationChan      chan int       // Channel for live updates
+	GlobalSettings      map[string]any // Stores global settings
+	State               QueueState     // Tracks if the queue is running or paused
+	cond                *sync.Cond     // Queue-specific condition variable
+	RunningLowChan      chan int       // Unique channel per queue for RunningLow signals
+	RunningLowTriggered bool           // ✅ Prevents duplicate RunningLow signals
 }
 
 // NewTaskQueue initializes a new queue for traversal or upload.
-func NewTaskQueue(queueType QueueType, phase int, srcOrDst string, paginationSize int) *TaskQueue {
+func NewTaskQueue(queueType QueueType, phase int, srcOrDst string, paginationSize int, runningLowChan chan int) *TaskQueue {
 	queueID := fmt.Sprintf("%s-%s-phase-%d", queueType, srcOrDst, phase)
-	return &TaskQueue{
+	q := &TaskQueue{
 		QueueID:        queueID,
 		Type:           queueType,
 		Phase:          phase,
 		SrcOrDst:       srcOrDst,
 		tasks:          []*Task{},
-		workers:        []*Worker{},
+		workers:        []*Worker{}, // ✅ Workers are assigned externally by Conductor
 		PaginationSize: paginationSize,
 		PaginationChan: make(chan int, 1),
 		GlobalSettings: make(map[string]any),
-		Locked:         false,
+		State:          QueueRunning,  // ✅ Start in Running state
+		RunningLowChan: runningLowChan, // ✅ Receive from Conductor instead of creating it
+	}
+	q.cond = sync.NewCond(&q.mu) // Initialize per-queue sync.Cond
+	return q
+}
+
+// CheckAndTriggerQP checks the queue size and signals QP if tasks are low.
+func (q *TaskQueue) CheckAndTriggerQP() {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	// If queue is running and task count is low, signal QP
+	if q.State == QueueRunning && len(q.tasks) < q.PaginationSize {
+		select {
+		case q.RunningLowChan <- q.PaginationSize:
+			// ✅ Sent signal to QP to start publishing
+		default:
+			// Prevent duplicate signals if already sent
+		}
 	}
 }
 
-// Lock the queue (pause migration)
-func (q *TaskQueue) Lock() {
-	q.Locked = true
+// Pause the queue (workers will stop picking up tasks)
+func (q *TaskQueue) Pause() {
+	q.mu.Lock()
+	q.State = QueuePaused
+	q.mu.Unlock()
 }
 
-func (q *TaskQueue) Unlock() {
-	q.Locked = false
+// Resume the queue (wake up all workers)
+func (q *TaskQueue) Resume() {
+	q.mu.Lock()
+	q.State = QueueRunning
+	q.cond.Broadcast() // Wake up all workers assigned to this queue
+	q.mu.Unlock()
 }
 
 // AddTask adds a task to the queue.
@@ -75,25 +111,43 @@ func (q *TaskQueue) AddTask(task *Task) {
 	q.tasks = append(q.tasks, task)
 }
 
-// PopTask retrieves and locks the next available task.
+// ✅ ResetRunningLowTrigger is called by QP when new tasks are added.
+func (q *TaskQueue) ResetRunningLowTrigger() {
+	q.mu.Lock()
+	q.RunningLowTriggered = false
+	q.mu.Unlock()
+}
+
+// PopTask retrieves the next available task, pausing workers if needed.
 func (q *TaskQueue) PopTask() *Task {
-	if q.Locked {
-		return nil
+	q.mu.Lock()
+	for q.State == QueuePaused { // If queue is paused, all workers wait here
+		q.cond.Wait()
 	}
+	q.mu.Unlock()
 
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
+	// Check if the queue is running low and trigger QP if needed
+	if len(q.tasks) < q.PaginationSize && !q.RunningLowTriggered {
+		q.RunningLowTriggered = true // Lock the trigger
+		select {
+		case q.RunningLowChan <- q.PaginationSize:
+		default:
+		}
+	}
+
 	for _, task := range q.tasks {
-		if !task.Locked { // Ensure it's not taken by another worker
+		if !task.Locked {
 			task.Locked = true
 			return task
 		}
 	}
-	return nil // No available tasks
+	return nil
 }
 
-// UnlockTask allows a worker or BG worker to reassign a failed/stalled task.
+// UnlockTask allows reassigning failed/stalled tasks.
 func (q *TaskQueue) UnlockTask(taskID string) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -145,37 +199,6 @@ func (q *TaskQueue) GetGlobalSetting(key string) (any, bool) {
 	defer q.mu.Unlock()
 	val, exists := q.GlobalSettings[key]
 	return val, exists
-}
-
-// AddWorker registers a new worker instance.
-func (q *TaskQueue) AddWorker(workerID string) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	q.workers = append(q.workers, &Worker{ID: workerID, State: WorkerIdle})
-}
-
-// RemoveWorker removes a worker from the queue.
-func (q *TaskQueue) RemoveWorker(workerID string) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	for i, worker := range q.workers {
-		if worker.ID == workerID {
-			q.workers = append(q.workers[:i], q.workers[i+1:]...)
-			return
-		}
-	}
-}
-
-// SetWorkerState updates the state of a worker.
-func (q *TaskQueue) SetWorkerState(workerID string, state WorkerState) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	for _, worker := range q.workers {
-		if worker.ID == workerID {
-			worker.State = state
-			return
-		}
-	}
 }
 
 // AreAllWorkersIdle checks if all workers are idle.
