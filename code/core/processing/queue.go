@@ -193,7 +193,7 @@ func (q *TaskQueue) SetGlobalSetting(key string, value any) {
 	q.GlobalSettings[key] = value
 }
 
-// GetGlobalSetting retrieves a global setting dynamically.
+// GetGlobalSetting retrieves a global asetting dynamically.
 func (q *TaskQueue) GetGlobalSetting(key string) (any, bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -211,4 +211,15 @@ func (q *TaskQueue) AreAllWorkersIdle() bool {
 		}
 	}
 	return true
+}
+
+func (q *TaskQueue) NotifyWorkers() {
+    q.mu.Lock()
+    defer q.mu.Unlock()
+    
+    for _, worker := range q.workers {
+        if worker.State == WorkerIdle {
+            worker.State = WorkerActive // ✅ Mark as ready
+        }
+    }
 }

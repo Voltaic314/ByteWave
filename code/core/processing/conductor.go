@@ -5,7 +5,6 @@ import (
 )
 
 // The Boss 😎 - Responsible for setting up QP, queues, and workers
-
 type Conductor struct {
 	DB           *db.DB
 	QP           *QueuePublisher

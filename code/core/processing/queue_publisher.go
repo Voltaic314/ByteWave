@@ -55,14 +55,28 @@ func (qp *QueuePublisher) StartListening() {
 						qp.PublishTasks(name)
 					}
 
-				case phase, ok := <-qp.RunningLowChans[name]:  
-					if ok && qp.Queues[name].State == QueueRunning {
-						qp.QueueLevels[name] = phase
-						qp.PublishTasks(name)
-						
-						// ✅ Notify queue to unlock RunningLow trigger
-						qp.Queues[name].ResetRunningLowTrigger()
-					}
+					go func(queueName string, signalChan chan int) {
+						for {
+							phase, ok := <-signalChan
+							if !ok {
+								return // Exit goroutine if channel closes
+							}
+					
+							qp.Mutex.Lock()
+							queue, exists := qp.Queues[queueName]
+							qp.Mutex.Unlock()
+					
+							if !exists || queue.State != QueueRunning {
+								continue // Skip if queue doesn't exist or is paused
+							}
+					
+							qp.QueueLevels[queueName] = phase
+							qp.PublishTasks(queueName)
+					
+							// ✅ Unlock the RunningLow trigger so it can fire again
+							queue.ResetRunningLowTrigger()
+						}
+					}(name, qp.RunningLowChans[name])
 
 				case <-time.After(10 * time.Second):
 					if qp.Queues[name].QueueSize() == 0 && qp.Queues[name].State == QueueRunning {
@@ -93,7 +107,7 @@ func (qp *QueuePublisher) PublishTasks(queueName string) {
 	// Fetch only the tasks at the current level
 	currentLevel := qp.QueueLevels[queueName]
 	tasks := qp.FetchTasksFromDB(table, queue.Type, currentLevel)
-	if len(tasks) == 0 && queue.AreAllWorkersIdle() {
+	if len(tasks) == 0 && queue.AreAllWorkersIdle() && queue.State == QueueRunning {
 		// 🎯 Round is over! Increment level & notify queue board
 		queue.Phase++
 		qp.QueueLevels[queueName] = queue.Phase
@@ -113,6 +127,9 @@ func (qp *QueuePublisher) PublishTasks(queueName string) {
 		queue.AddTask(task)
 	}
 
+	// ✅ Notify workers that new tasks are available
+	queue.NotifyWorkers()
+	
 	// Notify workers that tasks are ready
 	select {
 	case qp.PublishSignals[queueName] <- true:

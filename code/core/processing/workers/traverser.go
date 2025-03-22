@@ -1,6 +1,8 @@
 package workers
 
 import (
+	"time"
+
 	"github.com/Voltaic314/ByteWave/code/core"
 	"github.com/Voltaic314/ByteWave/code/core/db"
 	"github.com/Voltaic314/ByteWave/code/core/filesystem"
@@ -17,31 +19,48 @@ type TraverserWorker struct {
 	pv        pv.PathValidator
 	Logger    *core.Logger
 	Queue     *processing.TaskQueue // NEW: Needed to get the Pagination Channel
+	TaskReady bool
 }
 
 // FetchAndProcessTask pulls a task from the queue and executes it.
 func (tw *TraverserWorker) FetchAndProcessTask() error {
+	// If the queue is paused, log and return immediately
 	if tw.Queue.State == processing.QueuePaused {
 		tw.Logger.LogMessage("info", "Worker waiting, queue is paused", nil)
 		return nil
 	}
-	task := tw.Queue.PopTask() // Fetch and lock a task
-	if task == nil {
-		tw.Logger.LogMessage("info", "No tasks available in queue", map[string]any{
-			"queue_type": tw.QueueType,
-		})
-		return nil
-	}
 
-	// Ensure task is a traversal task
-	if task.Type != processing.TaskTraversal {
-		tw.Logger.LogMessage("warning", "Non-traversal task found in traversal queue", map[string]any{
-			"task_id": task.ID,
-		})
-		return nil
-	}
+	// Worker loop: Keep checking for tasks if none are available
+	for {
+		task := tw.Queue.PopTask() // Fetch and lock a task
 
-	return tw.ProcessTraversalTask(task)
+		// If a task is found, reset TaskReady (if applicable) and process it
+		if task != nil {
+			tw.Logger.LogMessage("info", "Task acquired, processing", map[string]any{
+				"task_id":    task.ID,
+				"queue_type": tw.QueueType,
+			})
+
+			// ✅ Reset worker state since a task is found
+			tw.TaskReady = false
+
+			// Process the task
+			return tw.ProcessTraversalTask(task)
+		}
+
+		// If no task is available, check if TaskReady was previously set
+		if tw.TaskReady {
+			tw.Logger.LogMessage("info", "Worker is idle but ready for new tasks", map[string]any{
+				"queue_type": tw.QueueType,
+			})
+
+			// ✅ Reset TaskReady flag to prevent redundant wake-ups
+			tw.TaskReady = false
+		}
+
+		// Worker remains idle and loops until a task is available
+		time.Sleep(2 * time.Second) // ✅ Prevent excessive CPU usage
+	}
 }
 
 // ProcessTraversalTask executes a traversal task.
