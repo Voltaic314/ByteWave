@@ -51,12 +51,14 @@ Response:
 POST /api/v1/migrations/stop
 ```
 
-Request body:
+Request body (optional):
 ```json
 {
   "id": "550e8400-e29b-41d4-a716-446655440000"
 }
 ```
+
+If no ID is provided in the request body, the current active migration will be stopped.
 
 Response:
 ```json
@@ -71,12 +73,14 @@ Response:
 POST /api/v1/migrations/pause
 ```
 
-Request body:
+Request body (optional):
 ```json
 {
   "id": "550e8400-e29b-41d4-a716-446655440000"
 }
 ```
+
+If no ID is provided in the request body, the current active migration will be paused.
 
 Response:
 ```json
@@ -91,12 +95,14 @@ Response:
 POST /api/v1/migrations/resume
 ```
 
-Request body:
+Request body (optional):
 ```json
 {
   "id": "550e8400-e29b-41d4-a716-446655440000"
 }
 ```
+
+If no ID is provided in the request body, the current active migration will be resumed.
 
 Response:
 ```json
@@ -108,8 +114,15 @@ Response:
 #### Get Migration Status
 
 ```
-GET /api/v1/migrations/status?id=550e8400-e29b-41d4-a716-446655440000
+GET /api/v1/migrations/status
 ```
+
+Query parameter (optional):
+```
+?id=550e8400-e29b-41d4-a716-446655440000
+```
+
+If no ID is provided as a query parameter, the status of the current active migration will be returned.
 
 Response:
 ```json

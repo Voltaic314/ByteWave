@@ -48,11 +48,18 @@ type MigrationManager interface {
 	PauseMigration(id string) error
 	ResumeMigration(id string) error
 	GetMigrationStatus(id string) (*MigrationInfo, error)
+	
+	// New methods that don't require an ID
+	StopCurrentMigration() error
+	PauseCurrentMigration() error
+	ResumeCurrentMigration() error
+	GetCurrentMigrationStatus() (*MigrationInfo, error)
 }
 
 // DefaultMigrationManager is the default implementation of MigrationManager
 type DefaultMigrationManager struct {
 	migrations map[string]*MigrationInfo
+	currentMigrationID string
 	mu         sync.RWMutex
 }
 
@@ -60,6 +67,7 @@ type DefaultMigrationManager struct {
 func NewMigrationManager() *DefaultMigrationManager {
 	return &DefaultMigrationManager{
 		migrations: make(map[string]*MigrationInfo),
+		currentMigrationID: "",
 	}
 }
 
@@ -84,6 +92,9 @@ func (m *DefaultMigrationManager) StartMigration(config MigrationConfig) (string
 	
 	// Store the migration
 	m.migrations[id] = migration
+	
+	// Set as current migration
+	m.currentMigrationID = id
 	
 	// TODO: Start the actual migration process
 	// This would involve calling into the core ByteWave functionality
@@ -177,4 +188,56 @@ func (m *DefaultMigrationManager) GetMigrationStatus(id string) (*MigrationInfo,
 	migrationCopy := *migration
 	
 	return &migrationCopy, nil
+}
+
+// StopCurrentMigration stops the current migration
+func (m *DefaultMigrationManager) StopCurrentMigration() error {
+	m.mu.RLock()
+	currentID := m.currentMigrationID
+	m.mu.RUnlock()
+	
+	if currentID == "" {
+		return errors.New("no active migration found")
+	}
+	
+	return m.StopMigration(currentID)
+}
+
+// PauseCurrentMigration pauses the current migration
+func (m *DefaultMigrationManager) PauseCurrentMigration() error {
+	m.mu.RLock()
+	currentID := m.currentMigrationID
+	m.mu.RUnlock()
+	
+	if currentID == "" {
+		return errors.New("no active migration found")
+	}
+	
+	return m.PauseMigration(currentID)
+}
+
+// ResumeCurrentMigration resumes the current migration
+func (m *DefaultMigrationManager) ResumeCurrentMigration() error {
+	m.mu.RLock()
+	currentID := m.currentMigrationID
+	m.mu.RUnlock()
+	
+	if currentID == "" {
+		return errors.New("no active migration found")
+	}
+	
+	return m.ResumeMigration(currentID)
+}
+
+// GetCurrentMigrationStatus gets the status of the current migration
+func (m *DefaultMigrationManager) GetCurrentMigrationStatus() (*MigrationInfo, error) {
+	m.mu.RLock()
+	currentID := m.currentMigrationID
+	m.mu.RUnlock()
+	
+	if currentID == "" {
+		return nil, errors.New("no active migration found")
+	}
+	
+	return m.GetMigrationStatus(currentID)
 }

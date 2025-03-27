@@ -80,21 +80,25 @@ func (s *Server) startMigration(c *gin.Context) {
 
 // stopMigration handles the request to stop a migration
 func (s *Server) stopMigration(c *gin.Context) {
-	// Get migration ID from request
+	// Check if ID is provided in the request body
 	var req struct {
-		ID string `json:"id" binding:"required"`
+		ID string `json:"id"`
 	}
 	
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request format", "details": err.Error()})
-		return
-	}
-	
-	// Stop the migration
-	err := s.migrationMgr.StopMigration(req.ID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to stop migration", "details": err.Error()})
-		return
+	if err := c.ShouldBindJSON(&req); err == nil && req.ID != "" {
+		// If ID is provided, use it to stop the specific migration
+		err := s.migrationMgr.StopMigration(req.ID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to stop migration", "details": err.Error()})
+			return
+		}
+	} else {
+		// Otherwise, stop the current migration
+		err := s.migrationMgr.StopCurrentMigration()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to stop current migration", "details": err.Error()})
+			return
+		}
 	}
 	
 	c.JSON(http.StatusOK, gin.H{
@@ -104,21 +108,25 @@ func (s *Server) stopMigration(c *gin.Context) {
 
 // pauseMigration handles the request to pause a migration
 func (s *Server) pauseMigration(c *gin.Context) {
-	// Get migration ID from request
+	// Check if ID is provided in the request body
 	var req struct {
-		ID string `json:"id" binding:"required"`
+		ID string `json:"id"`
 	}
 	
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request format", "details": err.Error()})
-		return
-	}
-	
-	// Pause the migration
-	err := s.migrationMgr.PauseMigration(req.ID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to pause migration", "details": err.Error()})
-		return
+	if err := c.ShouldBindJSON(&req); err == nil && req.ID != "" {
+		// If ID is provided, use it to pause the specific migration
+		err := s.migrationMgr.PauseMigration(req.ID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to pause migration", "details": err.Error()})
+			return
+		}
+	} else {
+		// Otherwise, pause the current migration
+		err := s.migrationMgr.PauseCurrentMigration()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to pause current migration", "details": err.Error()})
+			return
+		}
 	}
 	
 	c.JSON(http.StatusOK, gin.H{
@@ -128,21 +136,25 @@ func (s *Server) pauseMigration(c *gin.Context) {
 
 // resumeMigration handles the request to resume a paused migration
 func (s *Server) resumeMigration(c *gin.Context) {
-	// Get migration ID from request
+	// Check if ID is provided in the request body
 	var req struct {
-		ID string `json:"id" binding:"required"`
+		ID string `json:"id"`
 	}
 	
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request format", "details": err.Error()})
-		return
-	}
-	
-	// Resume the migration
-	err := s.migrationMgr.ResumeMigration(req.ID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to resume migration", "details": err.Error()})
-		return
+	if err := c.ShouldBindJSON(&req); err == nil && req.ID != "" {
+		// If ID is provided, use it to resume the specific migration
+		err := s.migrationMgr.ResumeMigration(req.ID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to resume migration", "details": err.Error()})
+			return
+		}
+	} else {
+		// Otherwise, resume the current migration
+		err := s.migrationMgr.ResumeCurrentMigration()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to resume current migration", "details": err.Error()})
+			return
+		}
 	}
 	
 	c.JSON(http.StatusOK, gin.H{
@@ -154,15 +166,23 @@ func (s *Server) resumeMigration(c *gin.Context) {
 func (s *Server) getMigrationStatus(c *gin.Context) {
 	// Get migration ID from query parameter
 	id := c.Query("id")
-	if id == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Missing migration ID"})
+	
+	// If ID is provided, get status for that migration
+	if id != "" {
+		status, err := s.migrationMgr.GetMigrationStatus(id)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get migration status", "details": err.Error()})
+			return
+		}
+		
+		c.JSON(http.StatusOK, status)
 		return
 	}
 	
-	// Get migration status
-	status, err := s.migrationMgr.GetMigrationStatus(id)
+	// Otherwise, get status for the current migration
+	status, err := s.migrationMgr.GetCurrentMigrationStatus()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get migration status", "details": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get current migration status", "details": err.Error()})
 		return
 	}
 	
