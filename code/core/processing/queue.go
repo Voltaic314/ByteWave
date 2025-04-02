@@ -3,6 +3,8 @@ package processing
 import (
 	"fmt"
 	"sync"
+
+	"github.com/Voltaic314/ByteWave/code/core"
 )
 
 // QueueType defines whether a queue is for traversal or uploading.
@@ -71,6 +73,28 @@ func NewTaskQueue(queueType QueueType, phase int, srcOrDst string, paginationSiz
 	}
 	q.cond = sync.NewCond(&q.mu) // Initialize per-queue sync.Cond
 	return q
+}
+
+// Lock locks the mutex for the queue.
+func (q *TaskQueue) Lock() {
+	q.mu.Lock() // Doing this to appease the Go gods or whatever...
+}
+
+// Unlock unlocks the mutex for the queue.
+func (q *TaskQueue) Unlock() {
+	q.mu.Unlock() // sigh...
+}
+
+// WaitIfPaused lets a worker block until the queue is resumed.
+// Intended to be called only by workers during task polling.
+func (q *TaskQueue) WaitIfPaused(logger *core.Logger) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	for q.State == QueuePaused {
+		logger.LogMessage("info", "Queue is paused, worker sleeping", nil)
+		q.cond.Wait()
+	}
 }
 
 // CheckAndTriggerQP checks the queue size and signals QP if tasks are low.
@@ -214,12 +238,12 @@ func (q *TaskQueue) AreAllWorkersIdle() bool {
 }
 
 func (q *TaskQueue) NotifyWorkers() {
-    q.mu.Lock()
-    defer q.mu.Unlock()
-    
-    for _, worker := range q.workers {
-        if worker.State == WorkerIdle {
-            worker.State = WorkerActive // ✅ Mark as ready
-        }
-    }
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	for _, worker := range q.workers {
+		if worker.State == WorkerIdle {
+			worker.State = WorkerActive // ✅ Mark as ready
+		}
+	}
 }

@@ -23,43 +23,44 @@ type TraverserWorker struct {
 }
 
 // FetchAndProcessTask pulls a task from the queue and executes it.
-func (tw *TraverserWorker) FetchAndProcessTask() error {
-	// If the queue is paused, log and return immediately
-	if tw.Queue.State == processing.QueuePaused {
-		tw.Logger.LogMessage("info", "Worker waiting, queue is paused", nil)
-		return nil
-	}
-
-	// Worker loop: Keep checking for tasks if none are available
+func (tw *TraverserWorker) FetchAndProcessTask() {
 	for {
-		task := tw.Queue.PopTask() // Fetch and lock a task
+		// Check if queue is paused — if so, wait on the queue cond variable
+		tw.Queue.WaitIfPaused(tw.Logger)
 
-		// If a task is found, reset TaskReady (if applicable) and process it
+		// Try to get a task
+		task := tw.Queue.PopTask()
 		if task != nil {
 			tw.Logger.LogMessage("info", "Task acquired, processing", map[string]any{
 				"task_id":    task.ID,
 				"queue_type": tw.QueueType,
 			})
 
-			// ✅ Reset worker state since a task is found
+			// Reset task-ready flag just in case
 			tw.TaskReady = false
 
 			// Process the task
-			return tw.ProcessTraversalTask(task)
+			err := tw.ProcessTraversalTask(task)
+			if err != nil {
+				tw.Logger.LogMessage("error", "Error during traversal task", map[string]any{
+					"task_id": task.ID,
+					"error":   err.Error(),
+				})
+			}
+
+			continue // Go back and try to get the next task
 		}
 
-		// If no task is available, check if TaskReady was previously set
+		// If worker was marked ready, log and reset it
 		if tw.TaskReady {
-			tw.Logger.LogMessage("info", "Worker is idle but ready for new tasks", map[string]any{
+			tw.Logger.LogMessage("info", "Worker still ready but no task available", map[string]any{
 				"queue_type": tw.QueueType,
 			})
-
-			// ✅ Reset TaskReady flag to prevent redundant wake-ups
 			tw.TaskReady = false
 		}
 
-		// Worker remains idle and loops until a task is available
-		time.Sleep(2 * time.Second) // ✅ Prevent excessive CPU usage
+		// Sleep briefly before polling again
+		time.Sleep(2 * time.Second)
 	}
 }
 
