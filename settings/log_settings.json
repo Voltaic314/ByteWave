@@ -1,7 +1,7 @@
 {
     "log_print_address": "127.0.0.1",
     "log_print_port": 9999,
-    "log_level": "warning",
-    "log_batch_size": 50,
+    "log_level": "info",
+    "log_batch_size": 500,
     "log_batch_sleep_time": 5
 }

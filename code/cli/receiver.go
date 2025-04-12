@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"os/exec"
+	"runtime"
 )
 
 // Receiver struct listens for log messages via UDP.
@@ -24,6 +26,17 @@ func NewReceiver() *Receiver {
 		ctx:        ctx,
 		cancel:     cancel,
 	}
+}
+
+// SpawnReceiverTerminal opens a second terminal to run the log receiver.
+func SpawnReceiverTerminal() error {
+	if runtime.GOOS != "windows" {
+		fmt.Println("⚠️ Terminal spawning only implemented for Windows")
+		return nil
+	}
+
+	cmd := exec.Command("C:\\Windows\\System32\\cmd.exe", "/C", "start", "cmd", "/K", "go run ./code/cli/main/open_terminal.go")
+	return cmd.Start()
 }
 
 // StartListener begins listening for incoming logs via UDP asynchronously.
@@ -67,11 +80,27 @@ func (r *Receiver) StartListener() {
 				// Print formatted log message with details
 				fmt.Printf("[%s] %s: %s\n", logEntry["timestamp"], logEntry["level"], logEntry["message"])
 				if details, exists := logEntry["details"]; exists {
-					fmt.Printf("   ➡️ Details: %v\n", details)
+					jsonDetails, err := json.MarshalIndent(details, "   ", "  ")
+					if err != nil {
+						fmt.Printf("   ⚠️  Details decode failed: %v\n", err)
+					} else {
+						fmt.Printf("   ➡️ Details:\n   %s\n", jsonDetails)
+					}
 				}
+				
 			}
 		}
 	}()
+}
+
+// StartReceiverLoop runs the listener in the foreground and blocks.
+func StartReceiverLoop() {
+	r := NewReceiver()
+	r.StartListener()
+
+	fmt.Println("📡 Now listening for ByteWave's log outputs...")
+
+	select {} // block forever
 }
 
 // StopListener gracefully shuts down the log listener.

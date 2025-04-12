@@ -186,3 +186,11 @@ func (l *Logger) shouldLog(level string) bool {
 	levels := map[string]int{"error": 0, "warn": 1, "info": 2, "debug": 3, "trace": 4}
 	return levels[level] <= levels[l.logLevel]
 }
+
+func (l *Logger) Stop() {
+	l.flushLogs() // force final write
+	l.cancel()
+	if l.udpConn != nil {
+		l.udpConn.Close()
+	}
+}
