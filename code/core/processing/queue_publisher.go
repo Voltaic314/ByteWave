@@ -166,7 +166,7 @@ func (qp *QueuePublisher) FetchTasksFromDB(table string, queueType QueueType, cu
 	query += ` LIMIT ?` // Add pagination
 
 	// Execute query
-	rows, err := qp.DB.Query(query, qp.RetryThreshold, currentLevel, qp.BatchSize)
+	rows, err := qp.DB.Query(table, query, qp.RetryThreshold, currentLevel, qp.BatchSize)
 	if err != nil {
 		return nil
 	}

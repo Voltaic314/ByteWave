@@ -10,23 +10,23 @@ func (t SourceNodesTable) Name() string {
 
 func (t SourceNodesTable) Schema() string {
 	return `
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		path TEXT NOT NULL UNIQUE,
-		identifier TEXT,  -- NULLable for filesystems that don't provide IDs
-		type TEXT NOT NULL CHECK(type IN ('file', 'folder')),
+		id BIGINT PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+		path VARCHAR NOT NULL UNIQUE,
+		identifier VARCHAR,  -- NULLable for filesystems that don't provide IDs
+		type VARCHAR NOT NULL CHECK(type IN ('file', 'folder')),
 		level INTEGER NOT NULL,
-		size INTEGER,
-		last_modified TEXT NOT NULL,
-		traversal_status TEXT NOT NULL CHECK(traversal_status IN ('pending', 'successful', 'failed')),
-		upload_status TEXT NOT NULL CHECK(upload_status IN ('pending', 'successful', 'failed')),
+		size BIGINT,
+		last_modified TIMESTAMP NOT NULL,
+		traversal_status VARCHAR NOT NULL CHECK(traversal_status IN ('pending', 'successful', 'failed')),
+		upload_status VARCHAR NOT NULL CHECK(upload_status IN ('pending', 'successful', 'failed')),
 		traversal_attempts INTEGER DEFAULT 0,
 		upload_attempts INTEGER DEFAULT 0,
-		error_ids TEXT DEFAULT NULL,  -- Store error IDs as a comma-separated list
+		error_ids VARCHAR DEFAULT NULL,
 		FOREIGN KEY (error_ids) REFERENCES node_errors(id) ON DELETE SET NULL
 	`
 }
 
-// Init creates the source nodes table asynchronously.
+// Init creates the source_nodes table asynchronously.
 func (t SourceNodesTable) Init(db *db.DB) error {
 	done := make(chan error)
 	go func() {

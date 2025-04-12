@@ -10,21 +10,21 @@ func (t DestinationNodesTable) Name() string {
 
 func (t DestinationNodesTable) Schema() string {
 	return `
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		path TEXT NOT NULL UNIQUE,
-		identifier TEXT,  -- NULLable for filesystems that don't provide IDs
-		type TEXT NOT NULL CHECK(type IN ('file', 'folder')),
+		id BIGINT PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+		path VARCHAR NOT NULL UNIQUE,
+		identifier VARCHAR,  -- NULLable for filesystems that don't provide IDs
+		type VARCHAR NOT NULL CHECK(type IN ('file', 'folder')),
 		level INTEGER NOT NULL,
-		size INTEGER,
-		last_modified TEXT,
-		traversal_status TEXT NOT NULL CHECK(traversal_status IN ('pending', 'successful', 'failed')),
+		size BIGINT,
+		last_modified TIMESTAMP,
+		traversal_status VARCHAR NOT NULL CHECK(traversal_status IN ('pending', 'successful', 'failed')),
 		traversal_attempts INTEGER DEFAULT 0,
-		error_ids TEXT DEFAULT NULL,  -- Store error IDs as a comma-separated list
+		error_ids VARCHAR DEFAULT NULL,
 		FOREIGN KEY (error_ids) REFERENCES node_errors(id) ON DELETE SET NULL
 	`
 }
 
-// Init creates the destination nodes table asynchronously.
+// Init creates the destination_nodes table asynchronously.
 func (t DestinationNodesTable) Init(db *db.DB) error {
 	done := make(chan error)
 	go func() {
