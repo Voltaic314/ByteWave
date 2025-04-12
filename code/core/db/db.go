@@ -31,7 +31,6 @@ func NewDB(dbPath string, batchSize int, flushTimer time.Duration) (*DB, error) 
 	wq := writequeue.NewQueue(batchSize, flushTimer, func(tableQueries map[string][]string, tableParams map[string][][]any) error {
 		return batchExecute(ctx, conn, tableQueries, tableParams)
 	})
-	wq.Start()
 
 	return &DB{
 		conn:   conn,
@@ -77,6 +76,11 @@ func (db *DB) CreateTable(tableName string, schema string) error {
 func (db *DB) DropTable(tableName string) error {
 	query := "DROP TABLE IF EXISTS " + tableName
 	return db.Write(query)
+}
+
+// WriteBatch exposes batchExecute for use by external modules (e.g., logger).
+func (db *DB) WriteBatch(tableQueries map[string][]string, tableParams map[string][][]any) error {
+	return batchExecute(db.ctx, db.conn, tableQueries, tableParams)
 }
 
 // batchExecute flushes all pending write queries in a single transaction.

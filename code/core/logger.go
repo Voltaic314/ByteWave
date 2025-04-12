@@ -6,23 +6,22 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"sync"
 	"time"
 
 	"github.com/Voltaic314/ByteWave/code/core/db"
+	"github.com/Voltaic314/ByteWave/code/core/db/writequeue"
 )
 
 // Logger handles log streaming and batch writes to the audit_log DB.
 type Logger struct {
-	logLevel       string
-	logQueue       chan LogEntry
-	udpConn        *net.UDPConn
-	batchSize      int
-	batchSleepTime time.Duration
-	dbInstance     *db.DB
-	ctx            context.Context
-	cancel         context.CancelFunc
-	mu             sync.Mutex
+	logLevel    string
+	udpConn     *net.UDPConn
+	logWQ       *writequeue.WriteQueue
+	dbInstance  *db.DB
+	ctx         context.Context
+	cancel      context.CancelFunc
+	batchSize   int
+	batchDelay  time.Duration
 }
 
 // LogEntry represents a structured log.
@@ -39,25 +38,34 @@ var GlobalLogger *Logger
 // InitLogger initializes the global logger with a DB connection.
 func InitLogger(configPath string, dbInstance *db.DB) {
 	ctx, cancel := context.WithCancel(context.Background())
-	GlobalLogger = &Logger{
-		logQueue:   make(chan LogEntry, 100),
+	logger := &Logger{
 		dbInstance: dbInstance,
 		ctx:        ctx,
 		cancel:     cancel,
 	}
-	GlobalLogger.loadSettings(configPath)
-	GlobalLogger.connectToUDP()
-	go GlobalLogger.batchLogWriter()
+
+	logger.loadSettings(configPath)
+
+	// Initialize WriteQueue for logs
+	logger.logWQ = writequeue.NewQueue(logger.batchSize, logger.batchDelay, func(tableQueries map[string][]string, tableParams map[string][][]any) error {
+		return dbInstance.WriteBatch(tableQueries, tableParams)
+	})
+
+	logger.connectToUDP()
+
+	GlobalLogger = logger
+
+	fmt.Println("✅ Logger initialized and write queue started.")
 }
 
-// loadSettings loads logger settings from JSON.
+// loadSettings loads logger settings from JSON config.
 func (l *Logger) loadSettings(configPath string) {
 	file, err := os.ReadFile(configPath)
 	if err != nil {
 		fmt.Println("⚠️  Failed to load logger.json, using defaults.")
 		l.logLevel = "warning"
 		l.batchSize = 50
-		l.batchSleepTime = 5 * time.Second
+		l.batchDelay = 5 * time.Second
 		return
 	}
 
@@ -77,12 +85,12 @@ func (l *Logger) loadSettings(configPath string) {
 	}
 
 	if val, ok := config["log_batch_sleep_time"].(float64); ok {
-		l.batchSleepTime = time.Duration(int(val)) * time.Second
+		l.batchDelay = time.Duration(int(val)) * time.Second
 	} else {
-		l.batchSleepTime = 5 * time.Second
+		l.batchDelay = 5 * time.Second
 	}
 
-	fmt.Println("✅ Logger settings loaded:", l.logLevel, l.batchSize, l.batchSleepTime)
+	fmt.Println("✅ Logger settings loaded:", l.logLevel, l.batchSize, l.batchDelay)
 }
 
 // connectToUDP initializes UDP connection for log streaming.
@@ -100,7 +108,7 @@ func (l *Logger) connectToUDP() {
 	l.udpConn = conn
 }
 
-// LogMessage sends logs asynchronously to UDP and queues for batch DB writing.
+// LogMessage sends logs to UDP and queues for DB via write queue.
 func (l *Logger) LogMessage(level, message string, details map[string]any) {
 	if !l.shouldLog(level) {
 		return
@@ -113,7 +121,7 @@ func (l *Logger) LogMessage(level, message string, details map[string]any) {
 		Details:   details,
 	}
 
-	// Send log to UDP listener asynchronously
+	// Send to terminal
 	if l.udpConn != nil {
 		go func(entry LogEntry) {
 			serialized, _ := json.Marshal(entry)
@@ -121,64 +129,17 @@ func (l *Logger) LogMessage(level, message string, details map[string]any) {
 		}(logEntry)
 	}
 
-	// Queue log for batch DB writing asynchronously
-	select {
-	case l.logQueue <- logEntry:
-	default:
-		fmt.Println("⚠️  Log queue is full, dropping log entry.")
-	}
-}
-
-// batchLogWriter handles logs asynchronously in batches with graceful shutdown.
-func (l *Logger) batchLogWriter() {
-	ticker := time.NewTicker(l.batchSleepTime)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-l.ctx.Done():
-			fmt.Println("🛑 Logger shutting down.")
-			return
-		case <-ticker.C:
-			l.flushLogs()
-		case entry := <-l.logQueue:
-			l.WriteLogToDB(entry)
-		}
-	}
-}
-
-// flushLogs writes queued logs to the DB.
-func (l *Logger) flushLogs() {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	for len(l.logQueue) > 0 {
-		entry := <-l.logQueue
-		l.WriteLogToDB(entry)
-	}
-}
-
-// WriteLogToDB writes logs to the DB.
-func (l *Logger) WriteLogToDB(entry LogEntry) {
-	if l.dbInstance == nil {
-		fmt.Println("❌ Logger Error: No DB instance available")
-		return
-	}
-
-	// Convert details to JSON string
-	detailsJSON, err := json.Marshal(entry.Details)
+	// Prepare DB write
+	detailsJSON, err := json.Marshal(details)
 	if err != nil {
-		detailsJSON = []byte("{}") // Default to empty object if error
+		detailsJSON = []byte("{}")
 	}
 	detailsStr := string(detailsJSON)
 
-	// Insert into DB via queue
-	l.dbInstance.WriteLog(db.LogEntry{
-		Category:  entry.Level,
-		ErrorType: nil,
-		Details:   &detailsStr,
-		Message:   entry.Message,
-	})
+	query := `INSERT INTO audit_log (category, error_type, details, message) VALUES (?, ?, ?, ?)`
+	params := []any{level, nil, &detailsStr, message}
+
+	l.logWQ.AddWriteOperation("audit_log", query, params)
 }
 
 // shouldLog checks if a message should be logged based on log level.
@@ -187,10 +148,13 @@ func (l *Logger) shouldLog(level string) bool {
 	return levels[level] <= levels[l.logLevel]
 }
 
+// Stop flushes and closes everything cleanly.
 func (l *Logger) Stop() {
-	l.flushLogs() // force final write
+	l.logWQ.FlushAll()
+	l.logWQ.Stop()
 	l.cancel()
 	if l.udpConn != nil {
 		l.udpConn.Close()
 	}
+	fmt.Println("🛑 Logger shut down.")
 }
