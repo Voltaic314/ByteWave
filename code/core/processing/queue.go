@@ -23,55 +23,43 @@ const (
 	QueuePaused  QueueState = "paused"
 )
 
-// WorkerState defines the possible states of a worker.
-type WorkerState string
-
-const (
-	WorkerIdle    WorkerState = "idle"
-	WorkerActive  WorkerState = "active"
-)
-
-// Worker represents an instance of a worker assigned to this queue.
-type Worker struct {
-	ID    string
-	State WorkerState
-}
-
 // TaskQueue manages tasks, workers, and execution settings.
 type TaskQueue struct {
-	QueueID             string         // Unique identifier for the queue
-	Type                QueueType      // Type of queue (traversal or upload)
-	Phase               int            // Current phase
-	SrcOrDst            string         // "src" or "dst"
-	tasks               []*Task        // List of tasks
-	workers             []*Worker      // Managed by Conductor
-	mu                  sync.Mutex     // Mutex for concurrent access
-	PaginationSize      int            // Pagination width for folder content listing
-	PaginationChan      chan int       // Channel for live updates
-	GlobalSettings      map[string]any // Stores global settings
-	State               QueueState     // Tracks if the queue is running or paused
-	cond                *sync.Cond     // Queue-specific condition variable
-	RunningLowChan      chan int       // Unique channel per queue for RunningLow signals
-	RunningLowTriggered bool           // ✅ Prevents duplicate RunningLow signals
+	QueueID             string                // Unique identifier for the queue
+	Type                QueueType             // Type of queue (traversal or upload)
+	Phase               int                   // Current phase
+	SrcOrDst            string                // "src" or "dst"
+	tasks               []*Task               // List of tasks
+	workers             []*WorkerBase         // Managed by Conductor
+	mu                  sync.Mutex            // Mutex for concurrent access
+	PaginationSize      int                   // Pagination width for folder content listing
+	PaginationChan      chan int              // Channel for live updates
+	GlobalSettings      map[string]any        // Stores global settings
+	State               QueueState            // Tracks if the queue is running or paused
+	cond                *sync.Cond            // Queue-specific condition variable
+	RunningLowChan      chan int              // Unique channel per queue for RunningLow signals
+	RunningLowTriggered bool                  // Prevents duplicate RunningLow signals
+	RunningLowThreshold int                   // Threshold for triggering RunningLow signals
 }
 
 // NewTaskQueue initializes a new queue for traversal or upload.
-func NewTaskQueue(queueType QueueType, phase int, srcOrDst string, paginationSize int, runningLowChan chan int) *TaskQueue {
-	queueID := fmt.Sprintf("%s-%s-phase-%d", queueType, srcOrDst, phase)
+func NewTaskQueue(queueType QueueType, phase int, srcOrDst string, paginationSize int, runningLowChan chan int, runningLowThreshold int) *TaskQueue {
+	queueID := fmt.Sprintf("%s-%s", srcOrDst, queueType) // Updated naming convention
 	q := &TaskQueue{
-		QueueID:        queueID,
-		Type:           queueType,
-		Phase:          phase,
-		SrcOrDst:       srcOrDst,
-		tasks:          []*Task{},
-		workers:        []*Worker{}, // ✅ Workers are assigned externally by Conductor
-		PaginationSize: paginationSize,
-		PaginationChan: make(chan int, 1),
-		GlobalSettings: make(map[string]any),
-		State:          QueueRunning,  // ✅ Start in Running state
-		RunningLowChan: runningLowChan, // ✅ Receive from Conductor instead of creating it
+		QueueID:             queueID,
+		Type:                queueType,
+		Phase:               phase,
+		SrcOrDst:            srcOrDst,
+		tasks:               []*Task{},
+		workers:             []*WorkerBase{},
+		PaginationSize:      paginationSize,
+		PaginationChan:      make(chan int, 1),
+		GlobalSettings:      make(map[string]any),
+		State:               QueueRunning,
+		RunningLowChan:      runningLowChan,
+		RunningLowThreshold: runningLowThreshold,
 	}
-	q.cond = sync.NewCond(&q.mu) // Initialize per-queue sync.Cond
+	q.cond = sync.NewCond(&q.mu)
 	return q
 }
 
@@ -102,13 +90,11 @@ func (q *TaskQueue) CheckAndTriggerQP() {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
-	// If queue is running and task count is low, signal QP
-	if q.State == QueueRunning && len(q.tasks) < q.PaginationSize {
+	if q.State == QueueRunning && len(q.tasks) < q.RunningLowThreshold && !q.RunningLowTriggered {
+		q.RunningLowTriggered = true
 		select {
-		case q.RunningLowChan <- q.PaginationSize:
-			// ✅ Sent signal to QP to start publishing
+		case q.RunningLowChan <- q.RunningLowThreshold:
 		default:
-			// Prevent duplicate signals if already sent
 		}
 	}
 }
@@ -135,7 +121,7 @@ func (q *TaskQueue) AddTask(task *Task) {
 	q.tasks = append(q.tasks, task)
 }
 
-// ✅ ResetRunningLowTrigger is called by QP when new tasks are added.
+// ResetRunningLowTrigger is called by QP when new tasks are added.
 func (q *TaskQueue) ResetRunningLowTrigger() {
 	q.mu.Lock()
 	q.RunningLowTriggered = false
@@ -145,7 +131,7 @@ func (q *TaskQueue) ResetRunningLowTrigger() {
 // PopTask retrieves the next available task, pausing workers if needed.
 func (q *TaskQueue) PopTask() *Task {
 	q.mu.Lock()
-	for q.State == QueuePaused { // If queue is paused, all workers wait here
+	for q.State == QueuePaused {
 		q.cond.Wait()
 	}
 	q.mu.Unlock()
@@ -153,11 +139,10 @@ func (q *TaskQueue) PopTask() *Task {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
-	// Check if the queue is running low and trigger QP if needed
-	if len(q.tasks) < q.PaginationSize && !q.RunningLowTriggered {
-		q.RunningLowTriggered = true // Lock the trigger
+	if len(q.tasks) < q.RunningLowThreshold && !q.RunningLowTriggered {
+		q.RunningLowTriggered = true
 		select {
-		case q.RunningLowChan <- q.PaginationSize:
+		case q.RunningLowChan <- q.RunningLowThreshold:
 		default:
 		}
 	}
@@ -217,7 +202,7 @@ func (q *TaskQueue) SetGlobalSetting(key string, value any) {
 	q.GlobalSettings[key] = value
 }
 
-// GetGlobalSetting retrieves a global asetting dynamically.
+// GetGlobalSetting retrieves a global setting dynamically.
 func (q *TaskQueue) GetGlobalSetting(key string) (any, bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -237,6 +222,7 @@ func (q *TaskQueue) AreAllWorkersIdle() bool {
 	return true
 }
 
+// NotifyWorkers sets all idle workers to active.
 func (q *TaskQueue) NotifyWorkers() {
 	q.mu.Lock()
 	defer q.mu.Unlock()

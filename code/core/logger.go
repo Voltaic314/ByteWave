@@ -35,28 +35,32 @@ type LogEntry struct {
 // Global Logger instance
 var GlobalLogger *Logger
 
-// InitLogger initializes the global logger with a DB connection.
-func InitLogger(configPath string, dbInstance *db.DB) {
+func InitLogger(configPath string) {
 	ctx, cancel := context.WithCancel(context.Background())
 	logger := &Logger{
-		dbInstance: dbInstance,
-		ctx:        ctx,
-		cancel:     cancel,
+		ctx:    ctx,
+		cancel: cancel,
 	}
 
 	logger.loadSettings(configPath)
-
-	// Initialize WriteQueue for logs
-	logger.logWQ = writequeue.NewQueue(logger.batchSize, logger.batchDelay, func(tableQueries map[string][]string, tableParams map[string][][]any) error {
-		return dbInstance.WriteBatch(tableQueries, tableParams)
-	})
-
 	logger.connectToUDP()
 
 	GlobalLogger = logger
-
-	fmt.Println("✅ Logger initialized and write queue started.")
+	fmt.Println("✅ Logger initialized in UDP-only mode.")
 }
+
+func (l *Logger) RegisterDB(dbInstance *db.DB) {
+	l.dbInstance = dbInstance
+	l.logWQ = writequeue.NewQueue(
+		l.batchSize,
+		l.batchDelay,
+		func(tableQueries map[string][]string, tableParams map[string][][]any) error {
+			return dbInstance.WriteBatch(tableQueries, tableParams)
+		},
+	)
+	fmt.Println("✅ Logger connected to DB and write queue activated.")
+}
+
 
 // loadSettings loads logger settings from JSON config.
 func (l *Logger) loadSettings(configPath string) {
@@ -138,6 +142,10 @@ func (l *Logger) LogMessage(level, message string, details map[string]any) {
 
 	query := `INSERT INTO audit_log (category, error_type, details, message) VALUES (?, ?, ?, ?)`
 	params := []any{level, nil, &detailsStr, message}
+
+	if l.logWQ != nil {
+		l.logWQ.AddWriteOperation("audit_log", query, params)
+	}
 
 	l.logWQ.AddWriteOperation("audit_log", query, params)
 }

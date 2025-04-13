@@ -13,13 +13,13 @@ import (
 
 type DB struct {
 	conn   *sql.DB
-	wq     *writequeue.WriteQueue
 	ctx    context.Context
 	cancel context.CancelFunc
+	wqMap  map[string]*writequeue.WriteQueue // ✅ Separate queue per table
 }
 
-// NewDB initializes the DuckDB connection and write queue.
-func NewDB(dbPath string, batchSize int, flushTimer time.Duration) (*DB, error) {
+// NewDB initializes the DuckDB connection without any write queues.
+func NewDB(dbPath string) (*DB, error) {
 	conn, err := sql.Open("duckdb", dbPath)
 	if err != nil {
 		return nil, err
@@ -27,22 +27,28 @@ func NewDB(dbPath string, batchSize int, flushTimer time.Duration) (*DB, error) 
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Initialize write queue
-	wq := writequeue.NewQueue(batchSize, flushTimer, func(tableQueries map[string][]string, tableParams map[string][][]any) error {
-		return batchExecute(ctx, conn, tableQueries, tableParams)
-	})
-
 	return &DB{
 		conn:   conn,
-		wq:     wq,
 		ctx:    ctx,
 		cancel: cancel,
+		wqMap:  make(map[string]*writequeue.WriteQueue),
 	}, nil
 }
 
-// Close shuts down the write queue and DB connection.
+// InitWriteQueueTable initializes a write queue for a specific table.
+func (db *DB) InitWriteQueueTable(table string, batchSize int, flushInterval time.Duration) {
+	// TODO: Add overwrite logic (drop if already exists?)
+	wq := writequeue.NewQueue(batchSize, flushInterval, func(tableQueries map[string][]string, tableParams map[string][][]any) error {
+		return batchExecute(db.ctx, db.conn, tableQueries, tableParams)
+	})
+	db.wqMap[table] = wq
+}
+
+// Close shuts down all write queues and DB connection.
 func (db *DB) Close() {
-	db.wq.Stop()
+	for _, wq := range db.wqMap {
+		wq.Stop()
+	}
 	db.cancel()
 	if db.conn != nil {
 		db.conn.Close()
@@ -51,7 +57,9 @@ func (db *DB) Close() {
 
 // Query runs a read query after flushing pending writes for the given table.
 func (db *DB) Query(table string, query string, params ...any) (*sql.Rows, error) {
-	db.wq.FlushTable(table)
+	if wq, ok := db.wqMap[table]; ok {
+		wq.FlushTable(table)
+	}
 	return db.conn.QueryContext(db.ctx, query, params...)
 }
 
@@ -63,7 +71,9 @@ func (db *DB) Write(query string, params ...any) error {
 
 // QueueWrite adds an insert/update to the async write queue.
 func (db *DB) QueueWrite(tableName string, query string, params ...any) {
-	go db.wq.AddWriteOperation(tableName, query, params)
+	if wq, ok := db.wqMap[tableName]; ok {
+		go wq.AddWriteOperation(tableName, query, params)
+	}
 }
 
 // CreateTable creates a table if it doesn’t exist.

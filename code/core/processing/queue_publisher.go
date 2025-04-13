@@ -1,12 +1,21 @@
 package processing
 
 import (
+	"context"
 	"sync"
 	"time"
 
 	"github.com/Voltaic314/ByteWave/code/core/filesystem"
 	"github.com/Voltaic314/ByteWave/code/core/db"
 )
+
+// PollingController manages soft polling state per queue.
+type PollingController struct {
+	IsPolling  bool
+	CancelFunc context.CancelFunc
+	Interval   time.Duration
+	Mutex      sync.Mutex
+}
 
 // QueuePublisher manages multiple queues dynamically.
 type QueuePublisher struct {
@@ -23,26 +32,27 @@ type QueuePublisher struct {
 	RetryThreshold  int // Max retries before marking failure
 	BatchSize       int // How many tasks to fetch per DB query
 	RunningLowChans map[string]chan int // ✅ Separate signal channels per queue
-	}
 
+	PollingControllers map[string]*PollingController
+}
 
 // NewQueuePublisher initializes a multi-queue publisher.
 func NewQueuePublisher(db *db.DB, retryThreshold, batchSize int) *QueuePublisher {
 	return &QueuePublisher{
-		DB:              db,
-		Queues:          make(map[string]*TaskQueue),
-		QueueLevels:     make(map[string]int),
-		QueueBoardChans: make(map[string]chan int),
-		PublishSignals:  make(map[string]chan bool),
-		PhaseUpdated:    make(chan int, 1), // Global phase update signal
-		Running:         false,
-		RetryThreshold:  retryThreshold,
-		BatchSize:       batchSize,
-		RunningLowChans: make(map[string]chan int), // ✅ Initialize first
+		DB:                  db,
+		Queues:              make(map[string]*TaskQueue),
+		QueueLevels:         make(map[string]int),
+		QueueBoardChans:     make(map[string]chan int),
+		PublishSignals:      make(map[string]chan bool),
+		PhaseUpdated:        make(chan int, 1),
+		Running:             false,
+		RetryThreshold:      retryThreshold,
+		BatchSize:           batchSize,
+		RunningLowChans:     make(map[string]chan int),
+		PollingControllers:  make(map[string]*PollingController),
 	}
 }
 
-// Modify `StartListening` to listen for RunningLowChans
 func (qp *QueuePublisher) StartListening() {
 	qp.Running = true
 	go func() {
@@ -61,15 +71,15 @@ func (qp *QueuePublisher) StartListening() {
 							if !ok {
 								return // Exit goroutine if channel closes
 							}
-					
+
 							qp.Mutex.Lock()
 							queue, exists := qp.Queues[queueName]
 							qp.Mutex.Unlock()
-					
+
 							if !exists || queue.State != QueueRunning {
 								continue // Skip if queue doesn't exist or is paused
 							}
-					
+
 							qp.QueueLevels[queueName] = phase
 							qp.PublishTasks(queueName)
 					
@@ -107,6 +117,11 @@ func (qp *QueuePublisher) PublishTasks(queueName string) {
 	// Fetch only the tasks at the current level
 	currentLevel := qp.QueueLevels[queueName]
 	tasks := qp.FetchTasksFromDB(table, queue.Type, currentLevel)
+
+	if len(tasks) < qp.BatchSize {
+		qp.startPolling(queueName)
+	}
+
 	if len(tasks) == 0 && queue.AreAllWorkersIdle() && queue.State == QueueRunning {
 		// 🎯 Round is over! Increment level & notify queue board
 		queue.Phase++
@@ -137,7 +152,54 @@ func (qp *QueuePublisher) PublishTasks(queueName string) {
 	}
 }
 
-// FetchTasksFromDB intelligently retrieves and constructs tasks from the DB.
+func (qp *QueuePublisher) startPolling(queueName string) {
+	controller, exists := qp.PollingControllers[queueName]
+	if exists {
+		controller.Mutex.Lock()
+		if controller.IsPolling {
+			controller.Mutex.Unlock()
+			return
+		}
+		controller.Mutex.Unlock()
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	controller = &PollingController{
+		IsPolling:  true,
+		CancelFunc: cancel,
+		Interval:   2 * time.Second,
+	}
+	controller.Mutex = sync.Mutex{}
+	qp.PollingControllers[queueName] = controller
+
+	go func() {
+		ticker := time.NewTicker(controller.Interval)
+		defer ticker.Stop()
+		defer func() {
+			controller.Mutex.Lock()
+			controller.IsPolling = false
+			controller.Mutex.Unlock()
+		}()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				qp.PublishTasks(queueName)
+				queue := qp.Queues[queueName]
+				if queue.QueueSize() == 0 && queue.AreAllWorkersIdle() {
+					queue.Phase++
+					qp.QueueLevels[queueName] = queue.Phase
+					qp.PhaseUpdated <- queue.Phase
+					qp.PublishTasks(queueName)
+					return
+				}
+			}
+		}
+	}()
+}
+
 func (qp *QueuePublisher) FetchTasksFromDB(table string, queueType QueueType, currentLevel int) []*Task {
 	// Determine columns to fetch based on queue type & phase
 	statusColumn := "traversal_status"
@@ -153,9 +215,9 @@ func (qp *QueuePublisher) FetchTasksFromDB(table string, queueType QueueType, cu
 	onlyFiles := queueType == UploadQueueType      // Upload: Fetch only files
 
 	// Construct query dynamically
-	query := `SELECT id, type, path, parent_id, last_modified, identifier FROM ` + table + ` 
-	WHERE (` + statusColumn + ` = 'pending' OR (` + statusColumn + ` = 'failed' AND ` + retryColumn + ` < ?)) 
-	AND level = ?`
+	query := `SELECT id, type, path, parent_id, last_modified, identifier FROM ` + table + `
+		WHERE (` + statusColumn + ` = 'pending' OR (` + statusColumn + ` = 'failed' AND ` + retryColumn + ` < ?)) 
+		AND level = ?`
 
 	if onlyFolders {
 		query += ` AND type = 'folder'`

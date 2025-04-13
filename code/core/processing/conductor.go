@@ -1,6 +1,7 @@
 package processing
 
 import (
+	"github.com/Voltaic314/ByteWave/code/core"
 	"github.com/Voltaic314/ByteWave/code/core/db"
 )
 
@@ -8,43 +9,76 @@ import (
 type Conductor struct {
 	DB           *db.DB
 	QP           *QueuePublisher
+	retryThreshold int
+	batchSize      int 
+	logger       *core.Logger
 }
 
-// NewConductor initializes and wires everything up
-func NewConductor(db *db.DB, retryThreshold, batchSize int) *Conductor {
-	conductor := &Conductor{
-		DB:          db,
-		QP:          NewQueuePublisher(db, retryThreshold, batchSize),
+// NewConductor initializes with DB config, but defers QP setup
+func NewConductor(dbPath string, retryThreshold, batchSize int, logger *core.Logger) *Conductor {
+	dbInstance, err := db.NewDB(dbPath) // Creates DB connection
+	if err != nil {
+		logger.LogMessage("error", "Failed to initialize DB", map[string]any{
+			"error": err.Error(),
+		})
+		return nil
+	}
+	return &Conductor{
+		DB:             dbInstance,
+		retryThreshold: retryThreshold,
+		batchSize:      batchSize,
+		logger:         logger,
+	}
+}
+
+// StartTraversal initializes QP, sets up queues/workers, and starts the system
+func (c *Conductor) StartTraversal(logger *core.Logger) {
+	// Initialize QP after DB and other components are ready
+	c.QP = NewQueuePublisher(c.DB, c.retryThreshold, c.batchSize)
+
+	// Setup queues
+	c.SetupQueue("src-traversal", TraversalQueueType, 0, "src", 100)
+
+	// Add workers (example: 2 workers)
+	for i := 0; i < 2; i++ {
+		worker := c.AddWorker("src-traversal", logger, "src")
+		go worker.RunMainLoop(func() bool {
+			// Worker logic placeholder (replace with real task handler)
+			return false
+		})
 	}
 
-	return conductor
+	// Start QP listening loop
+	c.StartAll()
 }
 
 // SetupQueue initializes a queue and registers it with QP
 func (c *Conductor) SetupQueue(name string, queueType QueueType, phase int, srcOrDst string, paginationSize int) {
-	// Create signal channels for QP communication
-	runningLowChan := make(chan int, 1) // Unique channel for RunningLow signal
-	c.QP.RunningLowChans[name] = runningLowChan
+	runningLowChan := make(chan int, 1)
+	RunningLowThreshold := 100
+	queue := NewTaskQueue(queueType, phase, srcOrDst, paginationSize, runningLowChan, RunningLowThreshold)
 
-	// Initialize queue board with its channels
-	queue := NewTaskQueue(queueType, phase, srcOrDst, paginationSize, runningLowChan)
 	c.QP.Queues[name] = queue
 	c.QP.QueueLevels[name] = phase
 	c.QP.QueueBoardChans[name] = make(chan int, 1)
 	c.QP.PublishSignals[name] = make(chan bool, 1)
+	c.QP.RunningLowChans[name] = runningLowChan
 }
 
 // AddWorker assigns a new worker to a queue
-func (c *Conductor) AddWorker(queueName string, workerID string) {
+func (c *Conductor) AddWorker(queueName string, logger *core.Logger, queueType string) *WorkerBase {
 	queue, exists := c.QP.Queues[queueName]
 	if !exists {
-		return // Queue doesn't exist
+		return nil
 	}
 
-	worker := &Worker{ID: workerID, State: WorkerIdle}
+	worker := NewWorkerBase(logger, queue, queueType)
+
 	queue.mu.Lock()
 	queue.workers = append(queue.workers, worker)
 	queue.mu.Unlock()
+
+	return worker
 }
 
 // RemoveWorker removes a worker from a queue
