@@ -3,10 +3,9 @@ module github.com/Voltaic314/ByteWave
 // go version we are using
 go 1.24.2
 
-// main dependencies
+// main dependencies -- quack quack 🦆
 require (
 	github.com/marcboeker/go-duckdb v1.8.5
-	golang.org/x/sys v0.32.0
 )
 
 // Indirect dependencies required for duckdb
@@ -25,4 +24,5 @@ require (
 	golang.org/x/sync v0.13.0 // indirect
 	golang.org/x/tools v0.32.0 // indirect
 	golang.org/x/xerrors v0.0.0-20240903120638-7835f813f4da // indirect
+	golang.org/x/sys v0.32.0 // indirect
 )

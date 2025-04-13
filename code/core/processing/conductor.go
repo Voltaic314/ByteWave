@@ -32,16 +32,16 @@ func NewConductor(dbPath string, retryThreshold, batchSize int, logger *core.Log
 }
 
 // StartTraversal initializes QP, sets up queues/workers, and starts the system
-func (c *Conductor) StartTraversal(logger *core.Logger) {
+func (c *Conductor) StartTraversal() {
 	// Initialize QP after DB and other components are ready
 	c.QP = NewQueuePublisher(c.DB, c.retryThreshold, c.batchSize)
 
 	// Setup queues
 	c.SetupQueue("src-traversal", TraversalQueueType, 0, "src", 100)
 
-	// Add workers (example: 2 workers)
-	for i := 0; i < 2; i++ {
-		worker := c.AddWorker("src-traversal", logger, "src")
+	// Add workers (example: 1 worker)
+	for i := 0; i < 1; i++ {
+		worker := c.AddWorker("src-traversal", c.logger, "src")
 		go worker.RunMainLoop(func() bool {
 			// Worker logic placeholder (replace with real task handler)
 			return false
@@ -63,6 +63,7 @@ func (c *Conductor) SetupQueue(name string, queueType QueueType, phase int, srcO
 	c.QP.QueueBoardChans[name] = make(chan int, 1)
 	c.QP.PublishSignals[name] = make(chan bool, 1)
 	c.QP.RunningLowChans[name] = runningLowChan
+	c.QP.LastPathCursors[name] = "" // 🆕 Add path-based cursor for this queue
 }
 
 // AddWorker assigns a new worker to a queue

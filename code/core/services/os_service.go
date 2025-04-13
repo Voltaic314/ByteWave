@@ -1,16 +1,12 @@
+// OSService handles file/folder operations on the OS.
 package services
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
-	"syscall"
 	"time"
-
-	"golang.org/x/sys/windows"
 
 	"github.com/Voltaic314/ByteWave/code/core"
 	"github.com/Voltaic314/ByteWave/code/core/filesystem"
@@ -60,8 +56,7 @@ func (osSvc *OSService) IsDirectory(path string) <-chan bool {
 	return result
 }
 
-// ConvertFileInfoToMap converts os.FileInfo into a generic map[string]any
-// and retrieves a proper unique identifier (MFT ID on Windows, Inode on Linux/macOS).
+// ConvertFileInfoToMap converts os.FileInfo into a generic map[string]any.
 func (osSvc *OSService) ConvertFileInfoToMap(info os.FileInfo, path string) map[string]any {
 	metadata := map[string]any{
 		"name":          info.Name(),
@@ -71,7 +66,8 @@ func (osSvc *OSService) ConvertFileInfoToMap(info os.FileInfo, path string) map[
 		"last_modified": info.ModTime().Format(time.RFC3339),
 	}
 
-	metadata["identifier"] = osSvc.GetFileIdentifier(path)
+	// Use path as identifier for local/Windows services, but set to nil to avoid DB duplication
+	metadata["identifier"] = nil
 	return metadata
 }
 
@@ -124,11 +120,13 @@ func (osSvc *OSService) GetAllItems(folderPath string) (<-chan []filesystem.Fold
 				}
 
 				metadata := osSvc.ConvertFileInfoToMap(info, itemPath)
+				identifier, _ := metadata["identifier"].(string)
+
 				if info.IsDir() {
 					foldersList = append(foldersList, filesystem.Folder{
 						Name:         item.Name(),
 						Path:         itemPath,
-						Identifier:   metadata["identifier"].(string),
+						Identifier:   identifier,
 						ParentID:     normalizedPath,
 						LastModified: metadata["last_modified"].(string),
 					})
@@ -136,7 +134,7 @@ func (osSvc *OSService) GetAllItems(folderPath string) (<-chan []filesystem.Fold
 					filesList = append(filesList, filesystem.File{
 						Name:         item.Name(),
 						Path:         itemPath,
-						Identifier:   metadata["identifier"].(string),
+						Identifier:   identifier,
 						ParentID:     normalizedPath,
 						Size:         metadata["size"].(int64),
 						LastModified: metadata["last_modified"].(string),
@@ -184,16 +182,6 @@ func (osSvc *OSService) GetFileContents(filePath string) (<-chan io.ReadCloser, 
 	}()
 
 	return result, errChan
-}
-
-// GetFileIdentifier retrieves the unique ID (MFT ID on Windows, Inode on Linux/macOS).
-func (osSvc *OSService) GetFileIdentifier(path string) string {
-	switch runtime.GOOS {
-	case "windows":
-		return osSvc.getFileIdentifierWindows(path)
-	default:
-		return ""
-	}
 }
 
 // CreateFolderAsync ensures a folder exists (creates it if needed) asynchronously.
@@ -273,39 +261,6 @@ func (osSvc *OSService) UploadFile(filePath string, reader io.Reader, shouldOver
 	}()
 
 	return result
-}
-
-// getFileIdentifierWindows retrieves the NTFS MFT file index on Windows.
-func (osSvc *OSService) getFileIdentifierWindows(path string) string {
-	handle, err := syscall.CreateFile(
-		syscall.StringToUTF16Ptr(path),
-		syscall.GENERIC_READ,
-		syscall.FILE_SHARE_READ|syscall.FILE_SHARE_WRITE|syscall.FILE_SHARE_DELETE,
-		nil,
-		syscall.OPEN_EXISTING,
-		syscall.FILE_FLAG_BACKUP_SEMANTICS,
-		0,
-	)
-	if err != nil {
-		osSvc.Logger.LogMessage("error", "Failed to get file handle for MFT index", map[string]any{
-			"path": path,
-			"err":  err.Error(),
-		})
-		return ""
-	}
-	defer syscall.CloseHandle(handle)
-
-	var fileInfo windows.ByHandleFileInformation
-	err = windows.GetFileInformationByHandle(windows.Handle(handle), &fileInfo)
-	if err != nil {
-		osSvc.Logger.LogMessage("error", "Failed to retrieve file info for MFT index", map[string]any{
-			"path": path,
-			"err":  err.Error(),
-		})
-		return ""
-	}
-
-	return fmt.Sprintf("%d-%d", fileInfo.FileIndexHigh, fileInfo.FileIndexLow)
 }
 
 // NormalizePath ensures consistent path formatting.

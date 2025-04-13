@@ -17,7 +17,7 @@ func (t AuditLogTable) Name() string {
 // Schema returns the DuckDB-compatible schema definition.
 func (t AuditLogTable) Schema() string {
 	return `
-		id BIGINT PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+		id BIGINT,
 		timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 		category VARCHAR NOT NULL CHECK(category IN ('info', 'warning', 'error')),
 		error_type VARCHAR DEFAULT NULL,
@@ -87,4 +87,9 @@ func (db *DB) CleanOldLogs(retentionPeriod time.Duration) {
 		db.QueueWrite("audit_log", query)
 		log.Printf("Deleted logs older than %d days", days)
 	}()
+}
+
+// GenerateErrorID returns a simple epoch-based ID.
+func GenerateErrorID() int64 {
+	return time.Now().Unix()
 }

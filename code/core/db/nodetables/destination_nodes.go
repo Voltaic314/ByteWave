@@ -10,7 +10,6 @@ func (t DestinationNodesTable) Name() string {
 
 func (t DestinationNodesTable) Schema() string {
 	return `
-		id BIGINT PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
 		path VARCHAR NOT NULL UNIQUE,
 		identifier VARCHAR,  -- NULLable for filesystems that don't provide IDs
 		type VARCHAR NOT NULL CHECK(type IN ('file', 'folder')),

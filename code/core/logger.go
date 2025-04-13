@@ -61,7 +61,6 @@ func (l *Logger) RegisterDB(dbInstance *db.DB) {
 	fmt.Println("✅ Logger connected to DB and write queue activated.")
 }
 
-
 // loadSettings loads logger settings from JSON config.
 func (l *Logger) loadSettings(configPath string) {
 	file, err := os.ReadFile(configPath)

@@ -27,6 +27,8 @@ type QueuePublisher struct {
 	PhaseUpdated    chan int               // Signals when phase has changed
 	Mutex           sync.Mutex
 	Running         bool
+	LastPathCursors map[string]string // Tracks last-seen path per queue for pagination
+
 
 	// Configurable settings (adjustable by DRA later)
 	RetryThreshold  int // Max retries before marking failure
@@ -46,6 +48,7 @@ func NewQueuePublisher(db *db.DB, retryThreshold, batchSize int) *QueuePublisher
 		PublishSignals:      make(map[string]chan bool),
 		PhaseUpdated:        make(chan int, 1),
 		Running:             false,
+		LastPathCursors:     make(map[string]string),
 		RetryThreshold:      retryThreshold,
 		BatchSize:           batchSize,
 		RunningLowChans:     make(map[string]chan int),
@@ -99,12 +102,13 @@ func (qp *QueuePublisher) StartListening() {
 }
 
 // PublishTasks fetches new tasks from DB and publishes them to the queue.
+// PublishTasks fetches new tasks from DB and publishes them to the queue.
 func (qp *QueuePublisher) PublishTasks(queueName string) {
 	qp.Mutex.Lock()
 	defer qp.Mutex.Unlock()
 
 	queue, exists := qp.Queues[queueName]
-	if !exists || queue.State == QueuePaused { // ✅ Check if queue is paused
+	if !exists || queue.State == QueuePaused {
 		return
 	}
 
@@ -114,23 +118,23 @@ func (qp *QueuePublisher) PublishTasks(queueName string) {
 		table = "destination_nodes"
 	}
 
-	// Fetch only the tasks at the current level
+	// Fetch only the tasks at the current level using path-based pagination
 	currentLevel := qp.QueueLevels[queueName]
-	tasks := qp.FetchTasksFromDB(table, queue.Type, currentLevel)
+	lastPath := qp.LastPathCursors[queueName]
+	tasks := qp.FetchTasksFromDB(table, queue.Type, currentLevel, lastPath)
 
+	// If we're under batch size, trigger polling to keep checking
 	if len(tasks) < qp.BatchSize {
 		qp.startPolling(queueName)
 	}
 
+	// If no tasks and all workers are idle, advance to next phase
 	if len(tasks) == 0 && queue.AreAllWorkersIdle() && queue.State == QueueRunning {
-		// 🎯 Round is over! Increment level & notify queue board
 		queue.Phase++
 		qp.QueueLevels[queueName] = queue.Phase
-	
-		// Signal Queue Board that the phase has changed
+		qp.LastPathCursors[queueName] = "" // Reset path-based cursor
 		qp.PhaseUpdated <- queue.Phase
-	
-		// ✅ Ensure next round is only started if queue is running
+
 		if queue.State == QueueRunning {
 			qp.PublishTasks(queueName)
 		}
@@ -142,10 +146,15 @@ func (qp *QueuePublisher) PublishTasks(queueName string) {
 		queue.AddTask(task)
 	}
 
-	// ✅ Notify workers that new tasks are available
+	// Update path-based cursor to the last task seen
+	if len(tasks) > 0 {
+		lastTask := tasks[len(tasks)-1]
+		qp.LastPathCursors[queueName] = lastTask.GetPath()
+	}
+
+	// Notify workers that new tasks are available
 	queue.NotifyWorkers()
-	
-	// Notify workers that tasks are ready
+
 	select {
 	case qp.PublishSignals[queueName] <- true:
 	default:
@@ -200,7 +209,7 @@ func (qp *QueuePublisher) startPolling(queueName string) {
 	}()
 }
 
-func (qp *QueuePublisher) FetchTasksFromDB(table string, queueType QueueType, currentLevel int) []*Task {
+func (qp *QueuePublisher) FetchTasksFromDB(table string, queueType QueueType, currentLevel int, lastSeenPath string) []*Task {
 	// Determine columns to fetch based on queue type & phase
 	statusColumn := "traversal_status"
 	retryColumn := "traversal_attempts"
@@ -210,25 +219,35 @@ func (qp *QueuePublisher) FetchTasksFromDB(table string, queueType QueueType, cu
 		retryColumn = "upload_attempts"
 	}
 
-	// Determine the correct filtering logic
-	onlyFolders := queueType == TraversalQueueType // Traversal: Fetch only folders
-	onlyFiles := queueType == UploadQueueType      // Upload: Fetch only files
+	// Determine filtering type
+	onlyFolders := queueType == TraversalQueueType
+	onlyFiles := queueType == UploadQueueType
 
-	// Construct query dynamically
-	query := `SELECT id, type, path, parent_id, last_modified, identifier FROM ` + table + `
+	// Start building the query
+	query := `SELECT type, path, parent_id, last_modified, identifier FROM ` + table + ` 
 		WHERE (` + statusColumn + ` = 'pending' OR (` + statusColumn + ` = 'failed' AND ` + retryColumn + ` < ?)) 
 		AND level = ?`
 
+	params := []any{qp.RetryThreshold, currentLevel}
+
+	// Apply cursor pagination using path as surrogate key
+	if lastSeenPath != "" {
+		query += ` AND path > ?`
+		params = append(params, lastSeenPath)
+	}
+
+	// Add type filtering
 	if onlyFolders {
 		query += ` AND type = 'folder'`
 	} else if onlyFiles {
 		query += ` AND type = 'file'`
-	} // If `includeBoth`, don't filter
+	}
 
-	query += ` LIMIT ?` // Add pagination
+	query += ` ORDER BY path LIMIT ?`
+	params = append(params, qp.BatchSize)
 
-	// Execute query
-	rows, err := qp.DB.Query(table, query, qp.RetryThreshold, currentLevel, qp.BatchSize)
+	// Run query
+	rows, err := qp.DB.Query(table, query, params...)
 	if err != nil {
 		return nil
 	}
@@ -236,15 +255,14 @@ func (qp *QueuePublisher) FetchTasksFromDB(table string, queueType QueueType, cu
 
 	var tasks []*Task
 	for rows.Next() {
-		var id, nodeType, path, parentID, lastModified, identifier string
-		if err := rows.Scan(&id, &nodeType, &path, &parentID, &lastModified, &identifier); err != nil {
+		var nodeType, path, parentID, lastModified, identifier string
+		if err := rows.Scan(&nodeType, &path, &parentID, &lastModified, &identifier); err != nil {
 			continue
 		}
 
-		// Dynamically construct the correct task
 		if nodeType == "folder" {
 			folder := &filesystem.Folder{
-				Name:         path,
+				Name:         path, // You may want to trim this
 				Path:         path,
 				ParentID:     parentID,
 				Identifier:   identifier,
@@ -252,8 +270,8 @@ func (qp *QueuePublisher) FetchTasksFromDB(table string, queueType QueueType, cu
 				Level:        currentLevel,
 			}
 
-			task, err := NewTraversalTask(id, folder, &parentID)
-			if err == nil { // Only append if valid
+			task, err := NewTraversalTask(path, folder, &parentID) // Using path as ID surrogate
+			if err == nil {
 				tasks = append(tasks, task)
 			}
 		} else if nodeType == "file" {
@@ -263,16 +281,17 @@ func (qp *QueuePublisher) FetchTasksFromDB(table string, queueType QueueType, cu
 				ParentID:     parentID,
 				Identifier:   identifier,
 				LastModified: lastModified,
-				Size:         0, // Might need adjustment based on worker logic
+				Size:         0, // Update later if needed
 				Level:        currentLevel,
 			}
 
-			task, err := NewUploadTask(id, file, nil, &parentID)
-			if err == nil { // Only append if valid
+			task, err := NewUploadTask(path, file, nil, &parentID)
+			if err == nil {
 				tasks = append(tasks, task)
 			}
 		}
 	}
+
 	return tasks
 }
 

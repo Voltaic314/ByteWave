@@ -54,3 +54,13 @@ func NewUploadTask(id string, file *filesystem.File, folder *filesystem.Folder, 
 		Locked:       false, // Initially unlocked
 	}, nil
 }
+
+func (t *Task) GetPath() string {
+    if t.Type == TaskTraversal && t.Folder != nil {
+        return t.Folder.Path
+    }
+    if t.Type == TaskUpload && t.File != nil {
+        return t.File.Path
+    }
+    return ""
+}
