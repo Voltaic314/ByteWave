@@ -21,7 +21,6 @@ type MigrationRules struct {
 
 // BaseService holds shared attributes/methods and migration rules.
 type BaseService struct {
-	Logger          *core.Logger
 	TotalDiskReads  int
 	TotalDiskWrites int
 	PaginationSize  int
@@ -34,10 +33,9 @@ type BaseService struct {
 }
 
 // NewBaseService initializes a BaseService, loading migration rules from JSON.
-func NewBaseService(logger *core.Logger, rulesPath string) (*BaseService, error) {
+func NewBaseService(rulesPath string) (*BaseService, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	base := &BaseService{
-		Logger:    logger,
 		RulesPath: rulesPath,
 		ctx:       ctx,
 		cancel:    cancel,
@@ -45,7 +43,7 @@ func NewBaseService(logger *core.Logger, rulesPath string) (*BaseService, error)
 
 	err := base.LoadMigrationRules()
 	if err != nil {
-		logger.LogMessage("error", "Failed to load migration rules", map[string]any{
+		core.GlobalLogger.LogMessage("error", "Failed to load migration rules", map[string]any{
 			"file": rulesPath,
 			"err":  err.Error(),
 		})

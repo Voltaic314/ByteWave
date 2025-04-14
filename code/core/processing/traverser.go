@@ -2,8 +2,10 @@
 package processing
 
 import (
+	"fmt"
 	"time"
 
+	"github.com/Voltaic314/ByteWave/code/core"
 	"github.com/Voltaic314/ByteWave/code/core/db"
 	"github.com/Voltaic314/ByteWave/code/core/filesystem"
 	"github.com/Voltaic314/ByteWave/code/core/pv"
@@ -20,23 +22,32 @@ type TraverserWorker struct {
 
 // FetchAndProcessTask pulls a task from the queue and executes it.
 func (tw *TraverserWorker) FetchAndProcessTask() {
+	core.GlobalLogger.LogMessage("info", "Starting task fetch and process loop", map[string]any{
+		"workerID":  tw.ID,
+		"queueType": tw.QueueType,
+	})
+
 	for {
-		tw.Queue.WaitIfPaused(tw.Logger)
+		tw.Queue.WaitIfPaused()
 
 		task := tw.Queue.PopTask()
 		if task != nil {
-			tw.Logger.LogMessage("info", "Task acquired, processing", map[string]any{
-				"task_id":    task.ID,
-				"queue_type": tw.QueueType,
+			core.GlobalLogger.LogMessage("info", "Task acquired, processing", map[string]any{
+				"workerID":  tw.ID,
+				"taskID":    task.ID,
+				"queueType": tw.QueueType,
+				"path":      task.GetPath(),
 			})
 
 			tw.TaskReady = false
+			tw.State = WorkerActive
 
 			err := tw.ProcessTraversalTask(task)
 			if err != nil {
-				tw.Logger.LogMessage("error", "Error during traversal task", map[string]any{
-					"task_id": task.ID,
-					"error":   err.Error(),
+				core.GlobalLogger.LogMessage("error", "Error during traversal task", map[string]any{
+					"workerID": tw.ID,
+					"taskID":   task.ID,
+					"error":    err.Error(),
 				})
 			}
 
@@ -44,30 +55,47 @@ func (tw *TraverserWorker) FetchAndProcessTask() {
 		}
 
 		if tw.TaskReady {
-			tw.Logger.LogMessage("info", "Worker still ready but no task available", map[string]any{
-				"queue_type": tw.QueueType,
+			core.GlobalLogger.LogMessage("info", "Worker still ready but no task available", map[string]any{
+				"workerID":  tw.ID,
+				"queueType": tw.QueueType,
 			})
 			tw.TaskReady = false
 		}
 
+		tw.State = WorkerIdle
 		time.Sleep(2 * time.Second)
 	}
 }
 
 // ProcessTraversalTask executes a traversal task.
 func (tw *TraverserWorker) ProcessTraversalTask(task *Task) error {
-	tw.Logger.LogMessage("info", "Processing traversal", map[string]any{
-		"path":       task.Folder.Path,
-		"queue_type": tw.QueueType,
+	core.GlobalLogger.LogMessage("info", "Processing traversal task", map[string]any{
+		"workerID": tw.ID,
+		"taskID":   task.ID,
+		"path":     task.GetPath(),
 	})
 
+	// Validate path
+	if !tw.pv.IsValidPath(task.Folder.Path) {
+		core.GlobalLogger.LogMessage("error", "Invalid path for traversal", map[string]any{
+			"workerID": tw.ID,
+			"taskID":   task.ID,
+			"path":     task.Folder.Path,
+		})
+		tw.logTraversalFailure(task, "invalid path")
+		return fmt.Errorf("invalid path: %s", task.Folder.Path)
+	}
+
+	// List folder contents
 	paginationStream := tw.Queue.GetPaginationChan()
 	allFolders, allFiles, err := tw.Service.GetAllItems(*task.Folder, paginationStream)
 
 	if err != nil {
-		tw.Logger.LogMessage("error", "Error listing contents", map[string]any{
-			"path":  task.Folder.Path,
-			"error": err.Error(),
+		core.GlobalLogger.LogMessage("error", "Failed to list folder contents", map[string]any{
+			"workerID": tw.ID,
+			"taskID":   task.ID,
+			"path":     task.Folder.Path,
+			"error":    err.Error(),
 		})
 		tw.logTraversalFailure(task, err.Error())
 		return err
@@ -92,6 +120,12 @@ func (tw *TraverserWorker) ProcessTraversalTask(task *Task) error {
 }
 
 func (tw *TraverserWorker) logTraversalSuccess(task *Task, files []filesystem.File, folders []filesystem.Folder) error {
+	core.GlobalLogger.LogMessage("info", "Logging traversal success", map[string]any{
+		"workerID": tw.ID,
+		"taskID":   task.ID,
+		"path":     task.Folder.Path,
+	})
+
 	table := "source_nodes"
 	if tw.QueueType == "dst" {
 		table = "destination_nodes"
@@ -107,17 +141,23 @@ func (tw *TraverserWorker) logTraversalSuccess(task *Task, files []filesystem.Fi
 			folder.Path, folder.Identifier, "folder", task.Folder.Level+1, "successful")
 	}
 
-	tw.Logger.LogMessage("info", "Traversal success recorded", map[string]any{
+	core.GlobalLogger.LogMessage("info", "Traversal success logged to DB", map[string]any{
 		"path":       task.Folder.Path,
 		"files":      len(files),
 		"folders":    len(folders),
 		"queue_type": tw.QueueType,
 	})
-
 	return nil
 }
 
 func (tw *TraverserWorker) logTraversalFailure(task *Task, errorMsg string) {
+	core.GlobalLogger.LogMessage("error", "Logging traversal failure", map[string]any{
+		"workerID": tw.ID,
+		"taskID":   task.ID,
+		"path":     task.Folder.Path,
+		"error":    errorMsg,
+	})
+
 	table := "source_nodes"
 	if tw.QueueType == "dst" {
 		table = "destination_nodes"
@@ -125,9 +165,8 @@ func (tw *TraverserWorker) logTraversalFailure(task *Task, errorMsg string) {
 
 	tw.DB.QueueWrite(table, `UPDATE `+table+` SET traversal_status = 'failed', traversal_attempts = traversal_attempts + 1 WHERE path = ?`, task.Folder.Path)
 
-	tw.Logger.LogMessage("error", "Traversal failed", map[string]any{
-		"path":       task.Folder.Path,
-		"error":      errorMsg,
-		"queue_type": tw.QueueType,
+	core.GlobalLogger.LogMessage("info", "Traversal failure logged to DB", map[string]any{
+		"workerID": tw.ID,
+		"taskID":   task.ID,
 	})
 }

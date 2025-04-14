@@ -14,7 +14,6 @@ import (
 
 // OSService handles file/folder operations on the OS.
 type OSService struct {
-	Logger          *core.Logger
 	TotalDiskReads  int
 	TotalDiskWrites int
 	PaginationSize  int
@@ -27,7 +26,6 @@ type OSService struct {
 func NewOSService(logger *core.Logger) *OSService {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &OSService{
-		Logger:         logger,
 		PaginationSize: 100,
 		ctx:            ctx,
 		cancel:         cancel,
@@ -43,7 +41,7 @@ func (osSvc *OSService) IsDirectory(path string) <-chan bool {
 		osSvc.TotalDiskReads++
 		info, err := os.Stat(path)
 		if err != nil {
-			osSvc.Logger.LogMessage("error", "Failed to check directory status", map[string]any{
+			core.GlobalLogger.LogMessage("error", "Failed to check directory status", map[string]any{
 				"path": path,
 				"err":  err.Error(),
 			})
@@ -56,7 +54,6 @@ func (osSvc *OSService) IsDirectory(path string) <-chan bool {
 	return result
 }
 
-// ConvertFileInfoToMap converts os.FileInfo into a generic map[string]any.
 func (osSvc *OSService) ConvertFileInfoToMap(info os.FileInfo, path string) map[string]any {
 	metadata := map[string]any{
 		"name":          info.Name(),
@@ -64,10 +61,8 @@ func (osSvc *OSService) ConvertFileInfoToMap(info os.FileInfo, path string) map[
 		"size":          info.Size(),
 		"is_dir":        info.IsDir(),
 		"last_modified": info.ModTime().Format(time.RFC3339),
+		"identifier":    nil, // Explicitly nil to avoid DB duplication
 	}
-
-	// Use path as identifier for local/Windows services, but set to nil to avoid DB duplication
-	metadata["identifier"] = nil
 	return metadata
 }
 
@@ -86,7 +81,7 @@ func (osSvc *OSService) GetAllItems(folderPath string) (<-chan []filesystem.Fold
 		normalizedPath := osSvc.NormalizePath(folderPath)
 		entries, err := os.ReadDir(normalizedPath)
 		if err != nil {
-			osSvc.Logger.LogMessage("error", "Failed to read directory", map[string]any{
+			core.GlobalLogger.LogMessage("error", "Failed to read directory", map[string]any{
 				"folderPath": folderPath,
 				"err":        err.Error(),
 			})
@@ -99,9 +94,8 @@ func (osSvc *OSService) GetAllItems(folderPath string) (<-chan []filesystem.Fold
 		totalEntries := len(entries)
 		currentIndex := 0
 
-		// Paginate dynamically based on current settings
 		for currentIndex < totalEntries {
-			paginationSize := osSvc.PaginationSize // Dynamically fetch updated pagination size
+			paginationSize := osSvc.PaginationSize
 
 			endIdx := currentIndex + paginationSize
 			if endIdx > totalEntries {
@@ -112,7 +106,7 @@ func (osSvc *OSService) GetAllItems(folderPath string) (<-chan []filesystem.Fold
 				itemPath := filepath.Join(normalizedPath, item.Name())
 				info, statErr := os.Stat(itemPath)
 				if statErr != nil {
-					osSvc.Logger.LogMessage("error", "Failed to retrieve item details", map[string]any{
+					core.GlobalLogger.LogMessage("error", "Failed to retrieve item details", map[string]any{
 						"itemPath": itemPath,
 						"err":      statErr.Error(),
 					})
@@ -171,7 +165,7 @@ func (osSvc *OSService) GetFileContents(filePath string) (<-chan io.ReadCloser, 
 		osSvc.TotalDiskReads++
 		file, err := os.Open(filePath)
 		if err != nil {
-			osSvc.Logger.LogMessage("error", "Failed to open file", map[string]any{
+			core.GlobalLogger.LogMessage("error", "Failed to open file", map[string]any{
 				"filePath": filePath,
 				"err":      err.Error(),
 			})
@@ -194,7 +188,7 @@ func (osSvc *OSService) CreateFolder(folderPath string) <-chan error {
 
 		if _, err := os.Stat(normalizedPath); os.IsNotExist(err) {
 			if mkErr := os.MkdirAll(normalizedPath, os.ModePerm); mkErr != nil {
-				osSvc.Logger.LogMessage("error", "Failed to create folder", map[string]any{
+				core.GlobalLogger.LogMessage("error", "Failed to create folder", map[string]any{
 					"folderPath": folderPath,
 					"err":        mkErr.Error(),
 				})
@@ -219,7 +213,7 @@ func (osSvc *OSService) UploadFile(filePath string, reader io.Reader, shouldOver
 		if _, err := os.Stat(filePath); err == nil {
 			overwrite, policyErr := shouldOverWrite()
 			if policyErr != nil {
-				osSvc.Logger.LogMessage("error", "Failed to determine overwrite policy", map[string]any{
+				core.GlobalLogger.LogMessage("error", "Failed to determine overwrite policy", map[string]any{
 					"filePath": filePath,
 					"err":      policyErr.Error(),
 				})
@@ -228,7 +222,7 @@ func (osSvc *OSService) UploadFile(filePath string, reader io.Reader, shouldOver
 			}
 			osSvc.TotalDiskReads++
 			if !overwrite {
-				osSvc.Logger.LogMessage("info", "File already exists; overwrite disabled", map[string]any{
+				core.GlobalLogger.LogMessage("info", "File already exists; overwrite disabled", map[string]any{
 					"filePath": filePath,
 				})
 				result <- nil
@@ -238,7 +232,7 @@ func (osSvc *OSService) UploadFile(filePath string, reader io.Reader, shouldOver
 
 		file, err := os.Create(filePath)
 		if err != nil {
-			osSvc.Logger.LogMessage("error", "Failed to create file", map[string]any{
+			core.GlobalLogger.LogMessage("error", "Failed to create file", map[string]any{
 				"filePath": filePath,
 				"err":      err.Error(),
 			})
@@ -248,7 +242,7 @@ func (osSvc *OSService) UploadFile(filePath string, reader io.Reader, shouldOver
 		defer file.Close()
 
 		if _, copyErr := io.Copy(file, reader); copyErr != nil {
-			osSvc.Logger.LogMessage("error", "Failed to write file contents", map[string]any{
+			core.GlobalLogger.LogMessage("error", "Failed to write file contents", map[string]any{
 				"filePath": filePath,
 				"err":      copyErr.Error(),
 			})

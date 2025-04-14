@@ -15,10 +15,10 @@ type Conductor struct {
 }
 
 // NewConductor initializes with DB config, but defers QP setup
-func NewConductor(dbPath string, retryThreshold, batchSize int, logger *core.Logger) *Conductor {
+func NewConductor(dbPath string, retryThreshold, batchSize int) *Conductor {
 	dbInstance, err := db.NewDB(dbPath) // Creates DB connection
 	if err != nil {
-		logger.LogMessage("error", "Failed to initialize DB", map[string]any{
+		core.GlobalLogger.LogMessage("error", "Failed to initialize DB", map[string]any{
 			"error": err.Error(),
 		})
 		return nil
@@ -27,7 +27,6 @@ func NewConductor(dbPath string, retryThreshold, batchSize int, logger *core.Log
 		DB:             dbInstance,
 		retryThreshold: retryThreshold,
 		batchSize:      batchSize,
-		logger:         logger,
 	}
 }
 
@@ -41,7 +40,7 @@ func (c *Conductor) StartTraversal() {
 
 	// Add workers (example: 1 worker)
 	for i := 0; i < 1; i++ {
-		worker := c.AddWorker("src-traversal", c.logger, "src")
+		worker := c.AddWorker("src-traversal", "src")
 		go worker.RunMainLoop(func() bool {
 			// Worker logic placeholder (replace with real task handler)
 			return false
@@ -67,13 +66,13 @@ func (c *Conductor) SetupQueue(name string, queueType QueueType, phase int, srcO
 }
 
 // AddWorker assigns a new worker to a queue
-func (c *Conductor) AddWorker(queueName string, logger *core.Logger, queueType string) *WorkerBase {
+func (c *Conductor) AddWorker(queueName string, queueType string) *WorkerBase {
 	queue, exists := c.QP.Queues[queueName]
 	if !exists {
 		return nil
 	}
 
-	worker := NewWorkerBase(logger, queue, queueType)
+	worker := NewWorkerBase(queue, queueType)
 
 	queue.mu.Lock()
 	queue.workers = append(queue.workers, worker)

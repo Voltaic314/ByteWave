@@ -99,7 +99,7 @@ func batchExecute(ctx context.Context, conn *sql.DB, tableQueries map[string][]s
 		return nil
 	}
 
-	tx, err := conn.BeginTx(ctx, nil)
+	tx, err := conn.Begin()
 	if err != nil {
 		return err
 	}
@@ -109,7 +109,7 @@ func batchExecute(ctx context.Context, conn *sql.DB, tableQueries map[string][]s
 	for table, queries := range tableQueries {
 		params := tableParams[table]
 		for i, query := range queries {
-			_, err := tx.ExecContext(ctx, query, params[i]...)
+			_, err := tx.Exec(query, params[i]...)
 			if err != nil {
 				log.Printf("Query failed in table %s: %s | Error: %v", table, query, err)
 				failedQueries = append(failedQueries, query)

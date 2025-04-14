@@ -5,8 +5,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Voltaic314/ByteWave/code/core/filesystem"
+	"github.com/Voltaic314/ByteWave/code/core"
 	"github.com/Voltaic314/ByteWave/code/core/db"
+	"github.com/Voltaic314/ByteWave/code/core/filesystem"
 )
 
 // PollingController manages soft polling state per queue.
@@ -19,52 +20,63 @@ type PollingController struct {
 
 // QueuePublisher manages multiple queues dynamically.
 type QueuePublisher struct {
-	DB              *db.DB
-	Queues          map[string]*TaskQueue  // Dynamic queue storage
-	QueueLevels     map[string]int         // Tracks the level for each queue
-	QueueBoardChans map[string]chan int    // Signals from multiple queue boards (now carries level)
-	PublishSignals  map[string]chan bool   // Signals to workers for multiple queues
-	PhaseUpdated    chan int               // Signals when phase has changed
-	Mutex           sync.Mutex
-	Running         bool
-	LastPathCursors map[string]string // Tracks last-seen path per queue for pagination
-
-
-	// Configurable settings (adjustable by DRA later)
-	RetryThreshold  int // Max retries before marking failure
-	BatchSize       int // How many tasks to fetch per DB query
-	RunningLowChans map[string]chan int // ✅ Separate signal channels per queue
-
+	DB                 *db.DB
+	Queues             map[string]*TaskQueue // Dynamic queue storage
+	QueueLevels        map[string]int        // Tracks the level for each queue
+	QueueBoardChans    map[string]chan int   // Signals from multiple queue boards (now carries level)
+	PublishSignals     map[string]chan bool  // Signals to workers for multiple queues
+	PhaseUpdated       chan int              // Signals when phase has changed
+	Mutex              sync.Mutex
+	Running            bool
+	LastPathCursors    map[string]string   // Tracks last-seen path per queue for pagination
+	RetryThreshold     int                 // Max retries before marking failure
+	BatchSize          int                 // How many tasks to fetch per DB query
+	RunningLowChans    map[string]chan int // ✅ Separate signal channels per queue
 	PollingControllers map[string]*PollingController
 }
 
 // NewQueuePublisher initializes a multi-queue publisher.
 func NewQueuePublisher(db *db.DB, retryThreshold, batchSize int) *QueuePublisher {
+	core.GlobalLogger.LogMessage("info", "Initializing new QueuePublisher", map[string]any{
+		"retryThreshold": retryThreshold,
+		"batchSize":      batchSize,
+	})
+
 	return &QueuePublisher{
-		DB:                  db,
-		Queues:              make(map[string]*TaskQueue),
-		QueueLevels:         make(map[string]int),
-		QueueBoardChans:     make(map[string]chan int),
-		PublishSignals:      make(map[string]chan bool),
-		PhaseUpdated:        make(chan int, 1),
-		Running:             false,
-		LastPathCursors:     make(map[string]string),
-		RetryThreshold:      retryThreshold,
-		BatchSize:           batchSize,
-		RunningLowChans:     make(map[string]chan int),
-		PollingControllers:  make(map[string]*PollingController),
+		DB:                 db,
+		Queues:             make(map[string]*TaskQueue),
+		QueueLevels:        make(map[string]int),
+		QueueBoardChans:    make(map[string]chan int),
+		PublishSignals:     make(map[string]chan bool),
+		PhaseUpdated:       make(chan int, 1),
+		Running:            false,
+		LastPathCursors:    make(map[string]string),
+		RetryThreshold:     retryThreshold,
+		BatchSize:          batchSize,
+		RunningLowChans:    make(map[string]chan int),
+		PollingControllers: make(map[string]*PollingController),
 	}
 }
 
 func (qp *QueuePublisher) StartListening() {
+	core.GlobalLogger.LogMessage("info", "Starting QueuePublisher listening loop", nil)
 	qp.Running = true
-	go func() {
-		for qp.Running {
+
+	for qp.Running {
+		select {
+		case level := <-qp.PhaseUpdated:
+			core.GlobalLogger.LogMessage("info", "Phase updated", map[string]any{
+				"newLevel": level,
+			})
 			for name, signalChan := range qp.QueueBoardChans {
 				select {
 				case level := <-signalChan:
 					if qp.Queues[name].State == QueueRunning {
 						qp.QueueLevels[name] = level
+						core.GlobalLogger.LogMessage("debug", "Signal received, publishing tasks", map[string]any{
+							"queueName": name,
+							"level":     level,
+						})
 						qp.PublishTasks(name)
 					}
 
@@ -85,7 +97,7 @@ func (qp *QueuePublisher) StartListening() {
 
 							qp.QueueLevels[queueName] = phase
 							qp.PublishTasks(queueName)
-					
+
 							// ✅ Unlock the RunningLow trigger so it can fire again
 							queue.ResetRunningLowTrigger()
 						}
@@ -98,7 +110,7 @@ func (qp *QueuePublisher) StartListening() {
 				}
 			}
 		}
-	}()
+	}
 }
 
 // PublishTasks fetches new tasks from DB and publishes them to the queue.
@@ -108,7 +120,10 @@ func (qp *QueuePublisher) PublishTasks(queueName string) {
 	defer qp.Mutex.Unlock()
 
 	queue, exists := qp.Queues[queueName]
-	if !exists || queue.State == QueuePaused {
+	if !exists {
+		core.GlobalLogger.LogMessage("error", "Queue not found", map[string]any{
+			"queueName": queueName,
+		})
 		return
 	}
 
@@ -124,6 +139,11 @@ func (qp *QueuePublisher) PublishTasks(queueName string) {
 	tasks := qp.FetchTasksFromDB(table, queue.Type, currentLevel, lastPath)
 
 	// If we're under batch size, trigger polling to keep checking
+	core.GlobalLogger.LogMessage("info", "Tasks published successfully", map[string]any{
+		"queueName": queueName,
+		"taskCount": len(tasks),
+	})
+
 	if len(tasks) < qp.BatchSize {
 		qp.startPolling(queueName)
 	}
@@ -132,27 +152,26 @@ func (qp *QueuePublisher) PublishTasks(queueName string) {
 	if len(tasks) == 0 && queue.AreAllWorkersIdle() && queue.State == QueueRunning {
 		queue.Phase++
 		qp.QueueLevels[queueName] = queue.Phase
-		qp.LastPathCursors[queueName] = "" // Reset path-based cursor
 		qp.PhaseUpdated <- queue.Phase
-
+		core.GlobalLogger.LogMessage("info", "Advancing to next phase", map[string]any{
+			"queue": queueName,
+			"phase": queue.Phase,
+		})
 		if queue.State == QueueRunning {
 			qp.PublishTasks(queueName)
 		}
 		return
 	}
 
-	// Add tasks to queue
 	for _, task := range tasks {
 		queue.AddTask(task)
 	}
 
-	// Update path-based cursor to the last task seen
 	if len(tasks) > 0 {
 		lastTask := tasks[len(tasks)-1]
 		qp.LastPathCursors[queueName] = lastTask.GetPath()
 	}
 
-	// Notify workers that new tasks are available
 	queue.NotifyWorkers()
 
 	select {
@@ -162,6 +181,10 @@ func (qp *QueuePublisher) PublishTasks(queueName string) {
 }
 
 func (qp *QueuePublisher) startPolling(queueName string) {
+	core.GlobalLogger.LogMessage("info", "Starting polling for queue", map[string]any{
+		"queueName": queueName,
+	})
+
 	controller, exists := qp.PollingControllers[queueName]
 	if exists {
 		controller.Mutex.Lock()
@@ -207,10 +230,21 @@ func (qp *QueuePublisher) startPolling(queueName string) {
 			}
 		}
 	}()
+
+	core.GlobalLogger.LogMessage("info", "Polling started", map[string]any{
+		"queueName": queueName,
+		"interval":  controller.Interval,
+	})
 }
 
 func (qp *QueuePublisher) FetchTasksFromDB(table string, queueType QueueType, currentLevel int, lastSeenPath string) []*Task {
-	// Determine columns to fetch based on queue type & phase
+	core.GlobalLogger.LogMessage("info", "Fetching tasks from DB", map[string]any{
+		"table":        table,
+		"queueType":    queueType,
+		"currentLevel": currentLevel,
+		"lastSeenPath": lastSeenPath,
+	})
+
 	statusColumn := "traversal_status"
 	retryColumn := "traversal_attempts"
 
@@ -224,8 +258,8 @@ func (qp *QueuePublisher) FetchTasksFromDB(table string, queueType QueueType, cu
 	onlyFiles := queueType == UploadQueueType
 
 	// Start building the query
-	query := `SELECT type, path, parent_id, last_modified, identifier FROM ` + table + ` 
-		WHERE (` + statusColumn + ` = 'pending' OR (` + statusColumn + ` = 'failed' AND ` + retryColumn + ` < ?)) 
+	query := `SELECT type, path, parent_id, last_modified, identifier FROM ` + table + `
+		WHERE (` + statusColumn + ` = 'pending' OR (` + statusColumn + ` = 'failed' AND ` + retryColumn + ` < ?))
 		AND level = ?`
 
 	params := []any{qp.RetryThreshold, currentLevel}
@@ -249,6 +283,10 @@ func (qp *QueuePublisher) FetchTasksFromDB(table string, queueType QueueType, cu
 	// Run query
 	rows, err := qp.DB.Query(table, query, params...)
 	if err != nil {
+		core.GlobalLogger.LogMessage("error", "DB query failed", map[string]any{
+			"table": table,
+			"err":   err.Error(),
+		})
 		return nil
 	}
 	defer rows.Close()
@@ -292,10 +330,15 @@ func (qp *QueuePublisher) FetchTasksFromDB(table string, queueType QueueType, cu
 		}
 	}
 
+	core.GlobalLogger.LogMessage("info", "Tasks fetched from DB", map[string]any{
+		"table":     table,
+		"taskCount": len(tasks),
+	})
 	return tasks
 }
 
 // StopListening stops QP operations.
 func (qp *QueuePublisher) StopListening() {
+	core.GlobalLogger.LogMessage("info", "Stopping QueuePublisher listening loop", nil)
 	qp.Running = false
 }

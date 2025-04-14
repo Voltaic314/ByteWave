@@ -132,21 +132,19 @@ func (l *Logger) LogMessage(level, message string, details map[string]any) {
 		}(logEntry)
 	}
 
-	// Prepare DB write
-	detailsJSON, err := json.Marshal(details)
-	if err != nil {
-		detailsJSON = []byte("{}")
-	}
-	detailsStr := string(detailsJSON)
-
-	query := `INSERT INTO audit_log (category, error_type, details, message) VALUES (?, ?, ?, ?)`
-	params := []any{level, nil, &detailsStr, message}
-
+	// Prepare DB write only if DB is registered
 	if l.logWQ != nil {
+		detailsJSON, err := json.Marshal(details)
+		if err != nil {
+			detailsJSON = []byte("{}")
+		}
+		detailsStr := string(detailsJSON)
+
+		query := `INSERT INTO audit_log (category, error_type, details, message) VALUES (?, ?, ?, ?)`
+		params := []any{level, nil, &detailsStr, message}
+
 		l.logWQ.AddWriteOperation("audit_log", query, params)
 	}
-
-	l.logWQ.AddWriteOperation("audit_log", query, params)
 }
 
 // shouldLog checks if a message should be logged based on log level.
@@ -157,8 +155,10 @@ func (l *Logger) shouldLog(level string) bool {
 
 // Stop flushes and closes everything cleanly.
 func (l *Logger) Stop() {
-	l.logWQ.FlushAll()
-	l.logWQ.Stop()
+	if l.logWQ != nil {
+		l.logWQ.FlushAll()
+		l.logWQ.Stop()
+	}
 	l.cancel()
 	if l.udpConn != nil {
 		l.udpConn.Close()
