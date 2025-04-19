@@ -42,6 +42,7 @@ func main() {
 		return
 	}
 
+	conductor.DB.InitWriteQueueTable("audit_log", 10, 5*time.Second)
 	conductor.StartTraversal()
 
 	// Keep main alive so everything can run

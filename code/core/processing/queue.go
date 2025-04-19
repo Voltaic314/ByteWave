@@ -19,8 +19,9 @@ const (
 type QueueState string
 
 const (
-	QueueRunning QueueState = "running"
-	QueuePaused  QueueState = "paused"
+	QueueRunning  QueueState = "running"
+	QueuePaused   QueueState = "paused"
+	QueueComplete QueueState = "complete" 
 )
 
 // TaskQueue manages tasks, workers, and execution settings.
@@ -184,17 +185,22 @@ func (q *TaskQueue) PopTask() *Task {
 	q.Lock()
 	defer q.Unlock()
 
+	// Running‑low trigger (unchanged)
 	if len(q.tasks) < q.RunningLowThreshold && !q.RunningLowTriggered {
 		q.RunningLowTriggered = true
 		select {
-		case q.RunningLowChan <- q.RunningLowThreshold:
+		case q.RunningLowChan <- q.Phase:
 		default:
 		}
 	}
 
-	for _, task := range q.tasks {
+	// Find first unlocked task, remove it from slice, return it
+	for i, task := range q.tasks {
 		if !task.Locked {
 			task.Locked = true
+			// splice: tasks = tasks[:i] + tasks[i+1:]
+			// Sidenote but this is really weird compared to Python's append syntax lol
+			q.tasks = append(q.tasks[:i], q.tasks[i+1:]...) 
 			return task
 		}
 	}
@@ -335,7 +341,12 @@ func (q *TaskQueue) WaitForWork() {
 		"queueID": q.QueueID,
 	})
 	for len(q.tasks) == 0 && q.State == QueueRunning {
-		q.cond.Wait() // This unlocks internally, then reacquires
+		q.cond.Wait()
+	}
+	if q.State == QueueComplete {
+		core.GlobalLogger.LogMessage("info", "Queue marked complete, worker should exit", map[string]any{
+			"queueID": q.QueueID,
+		})
 	}
 	q.cond.L.Unlock()
 }

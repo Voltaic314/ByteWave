@@ -11,7 +11,8 @@ func (t SourceNodesTable) Name() string {
 func (t SourceNodesTable) Schema() string {
 	return `
 		path VARCHAR NOT NULL UNIQUE,
-		identifier VARCHAR,  -- NULLable for filesystems that don't provide IDs
+		identifier VARCHAR NOT NULL,
+		parent_id VARCHAR NOT NULL,
 		type VARCHAR NOT NULL CHECK(type IN ('file', 'folder')),
 		level INTEGER NOT NULL,
 		size BIGINT,
@@ -20,8 +21,7 @@ func (t SourceNodesTable) Schema() string {
 		upload_status VARCHAR NOT NULL CHECK(upload_status IN ('pending', 'successful', 'failed')),
 		traversal_attempts INTEGER DEFAULT 0,
 		upload_attempts INTEGER DEFAULT 0,
-		error_ids VARCHAR DEFAULT NULL,
-		FOREIGN KEY (error_ids) REFERENCES node_errors(id) ON DELETE SET NULL
+		error_ids VARCHAR DEFAULT NULL
 	`
 }
 

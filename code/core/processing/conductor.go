@@ -39,7 +39,11 @@ func (c *Conductor) StartTraversal() {
 	c.QP = NewQueuePublisher(c.DB, c.retryThreshold, c.batchSize)
 
 	// Setup queues
-	c.SetupQueue("src-traversal", TraversalQueueType, 0, "src", 100)
+	name := "src-traversal"
+	c.SetupQueue(name, TraversalQueueType, 0, "src", 100)
+	c.QP.TraversalCompleteSignals[name] = make(chan string, 1)
+
+	c.DB.InitWriteQueueTable("source_nodes", 10, 5*time.Second)
 
 	var os_svc services.BaseServiceInterface = services.NewOSService()
 	pv_obj := pv.NewPathValidator()
@@ -64,6 +68,23 @@ func (c *Conductor) StartTraversal() {
 
 	// kick start the first phase manually
 	c.QP.PhaseUpdated <- 0
+
+	// Listen for traversal complete signals
+	// This is a separate goroutine to handle traversal completion signals
+	go func() {
+		signalChan, exists := c.QP.TraversalCompleteSignals["src-traversal"]
+		if !exists {
+			core.GlobalLogger.LogMessage("error", "No signal channel found for traversal complete", nil)
+			return
+		}
+	
+		for queueName := range signalChan {
+			core.GlobalLogger.LogMessage("info", "Conductor received traversal complete signal", map[string]any{
+				"queue": queueName,
+			})
+			c.TeardownQueue(queueName)
+		}
+	}()
 }
 
 // SetupQueue initializes a queue and registers it with QP
@@ -132,6 +153,50 @@ func (c *Conductor) SetWorkerState(queueName string, workerID string, state Work
 			return
 		}
 	}
+}
+
+func (c *Conductor) TeardownQueue(queueName string) {
+	queue, exists := c.QP.Queues[queueName]
+	if !exists {
+		return
+	}
+
+	// Stop polling if active
+	if controller, ok := c.QP.PollingControllers[queueName]; ok {
+		controller.Mutex.Lock()
+		if controller.IsPolling {
+			controller.CancelFunc()
+		}
+		controller.Mutex.Unlock()
+		delete(c.QP.PollingControllers, queueName)
+	}
+
+	// Remove idle workers
+	queue.mu.Lock()
+	idleWorkers := queue.workers[:0]
+	for _, w := range queue.workers {
+		if w.State == WorkerIdle {
+			continue // skip deleting active ones just in case
+		}
+		idleWorkers = append(idleWorkers, w)
+	}
+	queue.workers = idleWorkers
+	queue.cond.Broadcast() // Notify all workers to stop waiting
+	queue.mu.Unlock()
+
+	// Delete from all QP maps
+	delete(c.QP.Queues, queueName)
+	delete(c.QP.QueueLevels, queueName)
+	delete(c.QP.QueueBoardChans, queueName)
+	delete(c.QP.PublishSignals, queueName)
+	delete(c.QP.LastPathCursors, queueName)
+	delete(c.QP.RunningLowChans, queueName)
+	delete(c.QP.ScanModes, queueName)
+	delete(c.QP.QueriesPerPhase, queueName)
+
+	core.GlobalLogger.LogMessage("info", "Queue teardown complete", map[string]any{
+		"queueID": queueName,
+	})
 }
 
 // StartAll starts QP and any other necessary processes

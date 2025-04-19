@@ -39,7 +39,7 @@ func NewDB(dbPath string) (*DB, error) {
 func (db *DB) InitWriteQueueTable(table string, batchSize int, flushInterval time.Duration) {
 	// TODO: Add overwrite logic (drop if already exists?)
 	wq := writequeue.NewQueue(batchSize, flushInterval, func(tableQueries map[string][]string, tableParams map[string][][]any) error {
-		return batchExecute(db.ctx, db.conn, tableQueries, tableParams)
+		return batchExecute(db.conn, tableQueries, tableParams)
 	})
 	db.wqMap[table] = wq
 }
@@ -90,11 +90,11 @@ func (db *DB) DropTable(tableName string) error {
 
 // WriteBatch exposes batchExecute for use by external modules (e.g., logger).
 func (db *DB) WriteBatch(tableQueries map[string][]string, tableParams map[string][][]any) error {
-	return batchExecute(db.ctx, db.conn, tableQueries, tableParams)
+	return batchExecute(db.conn, tableQueries, tableParams)
 }
 
 // batchExecute flushes all pending write queries in a single transaction.
-func batchExecute(ctx context.Context, conn *sql.DB, tableQueries map[string][]string, tableParams map[string][][]any) error {
+func batchExecute( conn *sql.DB, tableQueries map[string][]string, tableParams map[string][][]any) error {
 	if len(tableQueries) == 0 {
 		return nil
 	}

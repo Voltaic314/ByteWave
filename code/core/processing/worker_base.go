@@ -73,6 +73,13 @@ func (wb *WorkerBase) Run(process func(*Task) error) {
 		// 	"state":     wb.State,
 		// })
 
+		if wb.Queue.State != QueueRunning {
+			core.GlobalLogger.LogMessage("info", "Queue is no longer running, stopping worker", map[string]any{
+				"workerID": wb.ID,
+			})
+			return
+		}
+
 		wb.Queue.WaitIfPaused() 
 
 		// ✅ Lockless check (fast path)
@@ -86,6 +93,7 @@ func (wb *WorkerBase) Run(process func(*Task) error) {
 			wb.Queue.WaitForWork() 
 			continue
 		}
+		
 
 		task := wb.Queue.PopTask()
 
