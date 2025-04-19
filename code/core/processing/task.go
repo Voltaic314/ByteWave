@@ -88,7 +88,7 @@ func NewUploadTask(id string, file *filesystem.File, folder *filesystem.Folder, 
 }
 
 func (t *Task) GetPath() string {
-	core.GlobalLogger.LogMessage("debug", "Getting task path", map[string]any{
+	core.GlobalLogger.LogMessage("info", "Getting task path", map[string]any{
 		"taskID": t.ID,
 		"type":   t.Type,
 	})

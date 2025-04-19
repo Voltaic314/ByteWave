@@ -14,10 +14,10 @@ import (
 
 // TraverserWorker processes folder traversal tasks.
 type TraverserWorker struct {
-	WorkerBase
+	*WorkerBase
 	DB      *db.DB
-	Service services.BaseService // Interface for interacting with FS/API
-	pv      pv.PathValidator
+	Service services.BaseServiceInterface // Interface for interacting with FS/API
+	pv      *pv.PathValidator
 }
 
 // FetchAndProcessTask pulls a task from the queue and executes it.
@@ -88,7 +88,20 @@ func (tw *TraverserWorker) ProcessTraversalTask(task *Task) error {
 
 	// List folder contents
 	paginationStream := tw.Queue.GetPaginationChan()
-	allFolders, allFiles, err := tw.Service.GetAllItems(*task.Folder, paginationStream)
+	foldersChan, filesChan, errChan := tw.Service.GetAllItems(*task.Folder, paginationStream)
+
+	var allFolders []filesystem.Folder
+	var allFiles []filesystem.File
+	
+	for folders := range foldersChan {
+		allFolders = append(allFolders, folders...)
+	}
+	
+	for files := range filesChan {
+		allFiles = append(allFiles, files...)
+	}
+	
+	err := <-errChan // Wait for error channel to close
 
 	if err != nil {
 		core.GlobalLogger.LogMessage("error", "Failed to list folder contents", map[string]any{

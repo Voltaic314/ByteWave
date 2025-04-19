@@ -1,6 +1,7 @@
-import os 
+import os
 import json
 import duckdb
+from pathlib import Path
 from datetime import datetime
 
 # Paths
@@ -12,18 +13,23 @@ if os.path.exists(db_path):
     os.remove(db_path)
     print(f"🗑️ Deleted existing database file: {db_path}")
 
-# Load path data from JSON
+# Load and augment path data from JSON
 with open(json_path, "r") as f:
     path_data = json.load(f)
+
+for item in path_data:
+    item["identifier"] = item["path"]  # 🔁 Set identifier to path
+    item["parent_id"] = str(Path(item["path"]).parent)  # 🧬 Derive parent ID
 
 # Connect to DuckDB
 conn = duckdb.connect(database=db_path)
 
-# Create source_nodes table
+# Create source_nodes table (with parent_id and identifier as NOT NULL)
 source_nodes_schema = """
 CREATE TABLE IF NOT EXISTS source_nodes (
     path VARCHAR NOT NULL UNIQUE,
-    identifier VARCHAR,
+    identifier VARCHAR NOT NULL,
+    parent_id VARCHAR NOT NULL,
     type VARCHAR NOT NULL CHECK(type IN ('file', 'folder')),
     level INTEGER NOT NULL,
     size BIGINT,
@@ -37,7 +43,7 @@ CREATE TABLE IF NOT EXISTS source_nodes (
 """
 conn.execute(source_nodes_schema)
 
-# Create audit_log table
+# Create audit_log table (same as before)
 audit_log_schema = """
 CREATE TABLE IF NOT EXISTS audit_log (
     id BIGINT,
@@ -52,20 +58,27 @@ conn.execute(audit_log_schema)
 
 # Insert source_nodes records
 insert_query = """
-INSERT INTO source_nodes (path, identifier, type, level, size, last_modified, traversal_status, upload_status)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO source_nodes (
+    path, identifier, parent_id, type, level, size,
+    last_modified, traversal_status, upload_status,
+    traversal_attempts, upload_attempts, error_ids
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 for item in path_data:
     conn.execute(insert_query, (
         item["path"],
-        item.get("identifier"),
+        item["identifier"],
+        item["parent_id"],
         item["type"],
         item["level"],
         item.get("size"),
         datetime.strptime(item["last_modified"], "%Y-%m-%dT%H:%M:%SZ"),
         item["traversal_status"],
-        item["upload_status"]
+        item["upload_status"],
+        item.get("traversal_attempts", 0),
+        item.get("upload_attempts", 0),
+        item.get("error_ids")
     ))
 
 conn.close()

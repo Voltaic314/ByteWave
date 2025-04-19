@@ -1,8 +1,12 @@
 package processing
 
 import (
+	"time"
+
 	"github.com/Voltaic314/ByteWave/code/core"
 	"github.com/Voltaic314/ByteWave/code/core/db"
+	"github.com/Voltaic314/ByteWave/code/core/pv"
+	"github.com/Voltaic314/ByteWave/code/core/services"
 )
 
 // The Boss 😎 - Responsible for setting up QP, queues, and workers
@@ -11,7 +15,6 @@ type Conductor struct {
 	QP           *QueuePublisher
 	retryThreshold int
 	batchSize      int 
-	logger       *core.Logger
 }
 
 // NewConductor initializes with DB config, but defers QP setup
@@ -38,17 +41,29 @@ func (c *Conductor) StartTraversal() {
 	// Setup queues
 	c.SetupQueue("src-traversal", TraversalQueueType, 0, "src", 100)
 
+	var os_svc services.BaseServiceInterface = services.NewOSService()
+	pv_obj := pv.NewPathValidator()
+
 	// Add workers (example: 1 worker)
-	for i := 0; i < 1; i++ {
-		worker := c.AddWorker("src-traversal", "src")
-		go worker.RunMainLoop(func() bool {
-			// Worker logic placeholder (replace with real task handler)
-			return false
-		})
+	for range 1 {
+		tw := &TraverserWorker{
+			WorkerBase: c.AddWorker("src-traversal", "src"),
+			DB:         c.DB,
+			Service:    os_svc, // Or whatever service you need
+			pv:         pv_obj, // Or load actual rules if available
+		}
+		// register worker to the queue
+		
+		go tw.Run(tw.ProcessTraversalTask)
 	}
 
 	// Start QP listening loop
 	c.StartAll()
+
+	time.Sleep(100 * time.Millisecond) // Give QP a moment to initialize
+
+	// kick start the first phase manually
+	c.QP.PhaseUpdated <- 0
 }
 
 // SetupQueue initializes a queue and registers it with QP
@@ -69,6 +84,9 @@ func (c *Conductor) SetupQueue(name string, queueType QueueType, phase int, srcO
 func (c *Conductor) AddWorker(queueName string, queueType string) *WorkerBase {
 	queue, exists := c.QP.Queues[queueName]
 	if !exists {
+		core.GlobalLogger.LogMessage("error", "Queue not found", map[string]any{
+			"queueName": queueName,
+		})
 		return nil
 	}
 
@@ -118,5 +136,5 @@ func (c *Conductor) SetWorkerState(queueName string, workerID string, state Work
 
 // StartAll starts QP and any other necessary processes
 func (c *Conductor) StartAll() {
-	c.QP.StartListening()
+	go c.QP.StartListening()
 }

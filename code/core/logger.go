@@ -14,14 +14,14 @@ import (
 
 // Logger handles log streaming and batch writes to the audit_log DB.
 type Logger struct {
-	logLevel    string
-	udpConn     *net.UDPConn
-	logWQ       *writequeue.WriteQueue
-	dbInstance  *db.DB
-	ctx         context.Context
-	cancel      context.CancelFunc
-	batchSize   int
-	batchDelay  time.Duration
+	logLevel   string
+	udpConn    *net.UDPConn
+	logWQ      *writequeue.WriteQueue
+	dbInstance *db.DB
+	ctx        context.Context
+	cancel     context.CancelFunc
+	batchSize  int
+	batchDelay time.Duration
 }
 
 // LogEntry represents a structured log.

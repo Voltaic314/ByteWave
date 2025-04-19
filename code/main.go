@@ -29,9 +29,7 @@ func main() {
 		"origin": "main.go",
 		"status": "init-complete",
 	})
-
-	fmt.Println("just sent a test log")
-
+	
 	// Start the Conductor — now self-contained (handles its own DB + logger)
 	conductor := processing.NewConductor(
 		"C:\\Users\\golde\\OneDrive\\Documents\\GitHub\\ByteWave\\tests\\traversal_tests\\test_src_traversal.db",

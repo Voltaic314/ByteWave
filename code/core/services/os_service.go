@@ -12,6 +12,8 @@ import (
 	"github.com/Voltaic314/ByteWave/code/core/filesystem"
 )
 
+var _ BaseServiceInterface = (*OSService)(nil)
+
 // OSService handles file/folder operations on the OS.
 type OSService struct {
 	TotalDiskReads  int
@@ -21,9 +23,8 @@ type OSService struct {
 	cancel          context.CancelFunc
 }
 
-// NewOSService initializes the OS service with a default pagination size,
-// and injects the logger dependency.
-func NewOSService(logger *core.Logger) *OSService {
+// NewOSService initializes the OS service with a default pagination size.
+func NewOSService() *OSService {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &OSService{
 		PaginationSize: 100,
@@ -32,10 +33,9 @@ func NewOSService(logger *core.Logger) *OSService {
 	}
 }
 
-// IsDirectory checks asynchronously if a given path is a directory.
+// IsDirectory returns a channel that asynchronously sends whether the given path is a directory.
 func (osSvc *OSService) IsDirectory(path string) <-chan bool {
 	result := make(chan bool, 1)
-
 	go func() {
 		defer close(result)
 		osSvc.TotalDiskReads++
@@ -50,24 +50,22 @@ func (osSvc *OSService) IsDirectory(path string) <-chan bool {
 		}
 		result <- info.IsDir()
 	}()
-
 	return result
 }
 
 func (osSvc *OSService) ConvertFileInfoToMap(info os.FileInfo, path string) map[string]any {
-	metadata := map[string]any{
+	return map[string]any{
 		"name":          info.Name(),
 		"path":          path,
 		"size":          info.Size(),
 		"is_dir":        info.IsDir(),
 		"last_modified": info.ModTime().Format(time.RFC3339),
-		"identifier":    nil, // Explicitly nil to avoid DB duplication
+		"identifier":    path,
 	}
-	return metadata
 }
 
-// GetAllItems retrieves all items in a folder asynchronously with dynamic pagination.
-func (osSvc *OSService) GetAllItems(folderPath string) (<-chan []filesystem.Folder, <-chan []filesystem.File, <-chan error) {
+// GetAllItems returns channels that asynchronously emit folders, files, and errors found at a path.
+func (osSvc *OSService) GetAllItems(folder filesystem.Folder, _ <-chan int) (<-chan []filesystem.Folder, <-chan []filesystem.File, <-chan error) {
 	foldersChan := make(chan []filesystem.Folder, 1)
 	filesChan := make(chan []filesystem.File, 1)
 	errChan := make(chan error, 1)
@@ -78,11 +76,11 @@ func (osSvc *OSService) GetAllItems(folderPath string) (<-chan []filesystem.Fold
 		defer close(errChan)
 
 		osSvc.TotalDiskReads++
-		normalizedPath := osSvc.NormalizePath(folderPath)
+		normalizedPath := osSvc.NormalizePath(folder.Path)
 		entries, err := os.ReadDir(normalizedPath)
 		if err != nil {
 			core.GlobalLogger.LogMessage("error", "Failed to read directory", map[string]any{
-				"folderPath": folderPath,
+				"folderPath": folder.Path,
 				"err":        err.Error(),
 			})
 			errChan <- err
@@ -91,69 +89,50 @@ func (osSvc *OSService) GetAllItems(folderPath string) (<-chan []filesystem.Fold
 
 		var foldersList []filesystem.Folder
 		var filesList []filesystem.File
-		totalEntries := len(entries)
-		currentIndex := 0
 
-		for currentIndex < totalEntries {
-			paginationSize := osSvc.PaginationSize
-
-			endIdx := currentIndex + paginationSize
-			if endIdx > totalEntries {
-				endIdx = totalEntries
+		for _, item := range entries {
+			itemPath := filepath.Join(normalizedPath, item.Name())
+			info, statErr := os.Stat(itemPath)
+			if statErr != nil {
+				core.GlobalLogger.LogMessage("error", "Failed to stat file/folder", map[string]any{
+					"itemPath": itemPath,
+					"err":      statErr.Error(),
+				})
+				continue
 			}
 
-			for _, item := range entries[currentIndex:endIdx] {
-				itemPath := filepath.Join(normalizedPath, item.Name())
-				info, statErr := os.Stat(itemPath)
-				if statErr != nil {
-					core.GlobalLogger.LogMessage("error", "Failed to retrieve item details", map[string]any{
-						"itemPath": itemPath,
-						"err":      statErr.Error(),
-					})
-					continue
-				}
+			metadata := osSvc.ConvertFileInfoToMap(info, itemPath)
+			identifier := metadata["identifier"].(string)
 
-				metadata := osSvc.ConvertFileInfoToMap(info, itemPath)
-				identifier, _ := metadata["identifier"].(string)
-
-				if info.IsDir() {
-					foldersList = append(foldersList, filesystem.Folder{
-						Name:         item.Name(),
-						Path:         itemPath,
-						Identifier:   identifier,
-						ParentID:     normalizedPath,
-						LastModified: metadata["last_modified"].(string),
-					})
-				} else {
-					filesList = append(filesList, filesystem.File{
-						Name:         item.Name(),
-						Path:         itemPath,
-						Identifier:   identifier,
-						ParentID:     normalizedPath,
-						Size:         metadata["size"].(int64),
-						LastModified: metadata["last_modified"].(string),
-					})
-				}
+			if info.IsDir() {
+				foldersList = append(foldersList, filesystem.Folder{
+					Name:         item.Name(),
+					Path:         itemPath,
+					Identifier:   identifier,
+					ParentID:     normalizedPath,
+					LastModified: metadata["last_modified"].(string),
+				})
+			} else {
+				filesList = append(filesList, filesystem.File{
+					Name:         item.Name(),
+					Path:         itemPath,
+					Identifier:   identifier,
+					ParentID:     normalizedPath,
+					Size:         metadata["size"].(int64),
+					LastModified: metadata["last_modified"].(string),
+				})
 			}
-
-			// Send results per batch
-			foldersChan <- foldersList
-			filesChan <- filesList
-			errChan <- nil
-
-			// Clear lists for the next batch
-			foldersList = nil
-			filesList = nil
-
-			// Move to the next batch
-			currentIndex += paginationSize
 		}
+
+		foldersChan <- foldersList
+		filesChan <- filesList
+		errChan <- nil
 	}()
 
 	return foldersChan, filesChan, errChan
 }
 
-// GetFileContents opens a file for reading asynchronously.
+// GetFileContents opens a file asynchronously and returns its reader.
 func (osSvc *OSService) GetFileContents(filePath string) (<-chan io.ReadCloser, <-chan error) {
 	result := make(chan io.ReadCloser, 1)
 	errChan := make(chan error, 1)
@@ -178,7 +157,7 @@ func (osSvc *OSService) GetFileContents(filePath string) (<-chan io.ReadCloser, 
 	return result, errChan
 }
 
-// CreateFolderAsync ensures a folder exists (creates it if needed) asynchronously.
+// CreateFolder creates the folder asynchronously if it doesn't exist.
 func (osSvc *OSService) CreateFolder(folderPath string) <-chan error {
 	result := make(chan error, 1)
 
@@ -203,7 +182,7 @@ func (osSvc *OSService) CreateFolder(folderPath string) <-chan error {
 	return result
 }
 
-// UploadFile streams content asynchronously from `reader` to `filePath`, respecting the overwrite policy.
+// UploadFile writes a file asynchronously, honoring overwrite policy.
 func (osSvc *OSService) UploadFile(filePath string, reader io.Reader, shouldOverWrite func() (bool, error)) <-chan error {
 	result := make(chan error, 1)
 
@@ -257,7 +236,12 @@ func (osSvc *OSService) UploadFile(filePath string, reader io.Reader, shouldOver
 	return result
 }
 
-// NormalizePath ensures consistent path formatting.
+// NormalizePath ensures consistent formatting for a path.
 func (osSvc *OSService) NormalizePath(path string) string {
 	return filepath.Clean(path)
+}
+
+// GetFileIdentifier returns a unique identifier for a file (path for local).
+func (osSvc *OSService) GetFileIdentifier(path string) string {
+	return osSvc.NormalizePath(path)
 }

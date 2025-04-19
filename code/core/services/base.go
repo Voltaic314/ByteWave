@@ -19,15 +19,25 @@ type MigrationRules struct {
 	CleanSlate      bool   `json:"clean_slate"`
 }
 
+type BaseServiceInterface interface {
+	IsDirectory(path string) <-chan bool
+	GetAllItems(folder filesystem.Folder, paginationStream <-chan int) (<-chan []filesystem.Folder, <-chan []filesystem.File, <-chan error)
+	GetFileContents(filePath string) (<-chan io.ReadCloser, <-chan error)
+	CreateFolder(folderPath string) <-chan error
+	UploadFile(filePath string, reader io.Reader, shouldOverWrite func() (bool, error)) <-chan error
+	NormalizePath(path string) string
+	GetFileIdentifier(path string) string
+}
+
 // BaseService holds shared attributes/methods and migration rules.
 type BaseService struct {
 	TotalDiskReads  int
 	TotalDiskWrites int
 	PaginationSize  int
 
-	Rules     MigrationRules // Holds migration rules in memory
-	RulesPath string         // Path to migration_rules.json
-	mu        sync.Mutex     // Prevents race conditions when writing rules
+	Rules     MigrationRules
+	RulesPath string
+	mu        sync.Mutex
 	ctx       context.Context
 	cancel    context.CancelFunc
 }
@@ -53,7 +63,6 @@ func NewBaseService(rulesPath string) (*BaseService, error) {
 	return base, nil
 }
 
-// LoadMigrationRules loads migration settings asynchronously.
 func (b *BaseService) LoadMigrationRules() error {
 	done := make(chan error, 1)
 
@@ -79,7 +88,6 @@ func (b *BaseService) LoadMigrationRules() error {
 			return
 		}
 
-		// Set defaults if fields are missing
 		if b.Rules.Mode == "" {
 			b.Rules.Mode = "copy"
 		}
@@ -98,7 +106,6 @@ func (b *BaseService) LoadMigrationRules() error {
 	}
 }
 
-// SaveMigrationRules writes the in-memory rules back to the JSON file asynchronously.
 func (b *BaseService) SaveMigrationRules() error {
 	done := make(chan error, 1)
 
@@ -124,7 +131,6 @@ func (b *BaseService) SaveMigrationRules() error {
 	}
 }
 
-// Example of modifying a rule dynamically and persisting it.
 func (b *BaseService) SetMode(mode string) error {
 	if mode != "copy" && mode != "move" {
 		return errors.New("invalid mode: must be 'copy' or 'move'")
@@ -137,34 +143,67 @@ func (b *BaseService) SetMode(mode string) error {
 	return b.SaveMigrationRules()
 }
 
-// Stub methods (must be overridden in actual services).
-func (b *BaseService) IsDirectory(path string) (bool, error) {
-	return false, errors.New("IsDirectory not implemented in BaseService")
+// ---- Stub methods (all async stubs to comply with BaseServiceInterface) ----
+
+func (b *BaseService) IsDirectory(path string) <-chan bool {
+	result := make(chan bool, 1)
+	go func() {
+		defer close(result)
+		result <- false
+	}()
+	return result
 }
 
-// GetAllItems is a stub function that must be overridden in actual services.
-func (b *BaseService) GetAllItems(folder filesystem.Folder, paginationStream <-chan int) ([]filesystem.Folder, []filesystem.File, error) {
-	return nil, nil, errors.New("GetAllItems must be implemented in a specific service (e.g., OS, Dropbox, etc.)")
+func (b *BaseService) GetAllItems(folder filesystem.Folder, paginationStream <-chan int) (<-chan []filesystem.Folder, <-chan []filesystem.File, <-chan error) {
+	foldersChan := make(chan []filesystem.Folder, 1)
+	filesChan := make(chan []filesystem.File, 1)
+	errChan := make(chan error, 1)
+
+	go func() {
+		defer close(foldersChan)
+		defer close(filesChan)
+		defer close(errChan)
+		errChan <- errors.New("GetAllItems must be implemented in a specific service")
+	}()
+
+	return foldersChan, filesChan, errChan
 }
 
-func (b *BaseService) GetFileContents(filePath string) (io.ReadCloser, error) {
-	return nil, errors.New("GetFileContents not implemented in BaseService")
+func (b *BaseService) GetFileContents(filePath string) (<-chan io.ReadCloser, <-chan error) {
+	result := make(chan io.ReadCloser, 1)
+	errChan := make(chan error, 1)
+
+	go func() {
+		defer close(result)
+		defer close(errChan)
+		errChan <- errors.New("GetFileContents not implemented")
+	}()
+
+	return result, errChan
 }
 
-func (b *BaseService) CreateFolder(folderPath string) error {
-	return errors.New("CreateFolder not implemented in BaseService")
+func (b *BaseService) CreateFolder(folderPath string) <-chan error {
+	result := make(chan error, 1)
+	go func() {
+		defer close(result)
+		result <- errors.New("CreateFolder not implemented")
+	}()
+	return result
 }
 
-func (b *BaseService) UploadFile(filePath string, reader io.Reader, shouldOverWrite func() (bool, error)) error {
-	return errors.New("UploadFile not implemented in BaseService")
-}
-
-// GetFileIdentifier should be overridden in actual services.
-// It takes a generic metadata map instead of a strict FileInfo struct.
-func (b *BaseService) GetFileIdentifier(path string) string {
-	return ""
+func (b *BaseService) UploadFile(filePath string, reader io.Reader, shouldOverWrite func() (bool, error)) <-chan error {
+	result := make(chan error, 1)
+	go func() {
+		defer close(result)
+		result <- errors.New("UploadFile not implemented")
+	}()
+	return result
 }
 
 func (b *BaseService) NormalizePath(path string) string {
 	return path
+}
+
+func (b *BaseService) GetFileIdentifier(path string) string {
+	return ""
 }
