@@ -27,5 +27,5 @@ require (
 	github.com/apache/arrow/go/v14 v14.0.2 // indirect
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
 	github.com/stretchr/testify v1.10.0 // indirect
-	gonum.org/v1/gonum v0.15.1 // indirect
+	gonum.org/v1/gonum v0.16.0 // indirect
 )

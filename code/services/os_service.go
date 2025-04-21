@@ -6,10 +6,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
-	"github.com/Voltaic314/ByteWave/code/core"
-	"github.com/Voltaic314/ByteWave/code/core/filesystem"
+	"github.com/Voltaic314/ByteWave/code/filesystem"
+	"github.com/Voltaic314/ByteWave/code/logging"
 )
 
 var _ BaseServiceInterface = (*OSService)(nil)
@@ -21,6 +22,7 @@ type OSService struct {
 	PaginationSize  int
 	ctx             context.Context
 	cancel          context.CancelFunc
+	rootPath        string
 }
 
 // NewOSService initializes the OS service with a default pagination size.
@@ -33,6 +35,24 @@ func NewOSService() *OSService {
 	}
 }
 
+func (osSvc *OSService) SetRootPath(path string) {
+	osSvc.rootPath = osSvc.NormalizePath(path)
+}
+
+func (osSvc *OSService) GetRootPath() string {
+	return osSvc.rootPath
+}
+
+func (osSvc *OSService) relativize(path string) string {
+	normalized := osSvc.NormalizePath(path)
+	root := osSvc.GetRootPath()
+	if strings.HasPrefix(normalized, root) {
+		rel := strings.TrimPrefix(normalized, root)
+		return strings.TrimPrefix(rel, "/")
+	}
+	return normalized // fallback
+}
+
 // IsDirectory returns a channel that asynchronously sends whether the given path is a directory.
 func (osSvc *OSService) IsDirectory(path string) <-chan bool {
 	result := make(chan bool, 1)
@@ -41,7 +61,7 @@ func (osSvc *OSService) IsDirectory(path string) <-chan bool {
 		osSvc.TotalDiskReads++
 		info, err := os.Stat(path)
 		if err != nil {
-			core.GlobalLogger.LogMessage("error", "Failed to check directory status", map[string]any{
+			logging.GlobalLogger.LogMessage("error", "Failed to check directory status", map[string]any{
 				"path": path,
 				"err":  err.Error(),
 			})
@@ -79,7 +99,7 @@ func (osSvc *OSService) GetAllItems(folder filesystem.Folder, _ <-chan int) (<-c
 		normalizedPath := osSvc.NormalizePath(folder.Path)
 		entries, err := os.ReadDir(normalizedPath)
 		if err != nil {
-			core.GlobalLogger.LogMessage("error", "Failed to read directory", map[string]any{
+			logging.GlobalLogger.LogMessage("error", "Failed to read directory", map[string]any{
 				"folderPath": folder.Path,
 				"err":        err.Error(),
 			})
@@ -94,7 +114,7 @@ func (osSvc *OSService) GetAllItems(folder filesystem.Folder, _ <-chan int) (<-c
 			itemPath := filepath.Join(normalizedPath, item.Name())
 			info, statErr := os.Stat(itemPath)
 			if statErr != nil {
-				core.GlobalLogger.LogMessage("error", "Failed to stat file/folder", map[string]any{
+				logging.GlobalLogger.LogMessage("error", "Failed to stat file/folder", map[string]any{
 					"itemPath": itemPath,
 					"err":      statErr.Error(),
 				})
@@ -102,22 +122,22 @@ func (osSvc *OSService) GetAllItems(folder filesystem.Folder, _ <-chan int) (<-c
 			}
 
 			metadata := osSvc.ConvertFileInfoToMap(info, itemPath)
-			identifier := metadata["identifier"].(string)
+			identifier := filepath.Clean(strings.ReplaceAll(metadata["identifier"].(string), "/", "\\"))
 
 			if info.IsDir() {
 				foldersList = append(foldersList, filesystem.Folder{
 					Name:         item.Name(),
-					Path:         itemPath,
+					Path:         osSvc.relativize(itemPath),
 					Identifier:   identifier,
-					ParentID:     normalizedPath,
+					ParentID:     osSvc.relativize(normalizedPath),
 					LastModified: metadata["last_modified"].(string),
 				})
 			} else {
 				filesList = append(filesList, filesystem.File{
 					Name:         item.Name(),
-					Path:         itemPath,
+					Path:         osSvc.relativize(itemPath),
 					Identifier:   identifier,
-					ParentID:     normalizedPath,
+					ParentID:     osSvc.relativize(normalizedPath),
 					Size:         metadata["size"].(int64),
 					LastModified: metadata["last_modified"].(string),
 				})
@@ -144,7 +164,7 @@ func (osSvc *OSService) GetFileContents(filePath string) (<-chan io.ReadCloser, 
 		osSvc.TotalDiskReads++
 		file, err := os.Open(filePath)
 		if err != nil {
-			core.GlobalLogger.LogMessage("error", "Failed to open file", map[string]any{
+			logging.GlobalLogger.LogMessage("error", "Failed to open file", map[string]any{
 				"filePath": filePath,
 				"err":      err.Error(),
 			})
@@ -167,7 +187,7 @@ func (osSvc *OSService) CreateFolder(folderPath string) <-chan error {
 
 		if _, err := os.Stat(normalizedPath); os.IsNotExist(err) {
 			if mkErr := os.MkdirAll(normalizedPath, os.ModePerm); mkErr != nil {
-				core.GlobalLogger.LogMessage("error", "Failed to create folder", map[string]any{
+				logging.GlobalLogger.LogMessage("error", "Failed to create folder", map[string]any{
 					"folderPath": folderPath,
 					"err":        mkErr.Error(),
 				})
@@ -192,7 +212,7 @@ func (osSvc *OSService) UploadFile(filePath string, reader io.Reader, shouldOver
 		if _, err := os.Stat(filePath); err == nil {
 			overwrite, policyErr := shouldOverWrite()
 			if policyErr != nil {
-				core.GlobalLogger.LogMessage("error", "Failed to determine overwrite policy", map[string]any{
+				logging.GlobalLogger.LogMessage("error", "Failed to determine overwrite policy", map[string]any{
 					"filePath": filePath,
 					"err":      policyErr.Error(),
 				})
@@ -201,7 +221,7 @@ func (osSvc *OSService) UploadFile(filePath string, reader io.Reader, shouldOver
 			}
 			osSvc.TotalDiskReads++
 			if !overwrite {
-				core.GlobalLogger.LogMessage("info", "File already exists; overwrite disabled", map[string]any{
+				logging.GlobalLogger.LogMessage("info", "File already exists; overwrite disabled", map[string]any{
 					"filePath": filePath,
 				})
 				result <- nil
@@ -211,7 +231,7 @@ func (osSvc *OSService) UploadFile(filePath string, reader io.Reader, shouldOver
 
 		file, err := os.Create(filePath)
 		if err != nil {
-			core.GlobalLogger.LogMessage("error", "Failed to create file", map[string]any{
+			logging.GlobalLogger.LogMessage("error", "Failed to create file", map[string]any{
 				"filePath": filePath,
 				"err":      err.Error(),
 			})
@@ -221,7 +241,7 @@ func (osSvc *OSService) UploadFile(filePath string, reader io.Reader, shouldOver
 		defer file.Close()
 
 		if _, copyErr := io.Copy(file, reader); copyErr != nil {
-			core.GlobalLogger.LogMessage("error", "Failed to write file contents", map[string]any{
+			logging.GlobalLogger.LogMessage("error", "Failed to write file contents", map[string]any{
 				"filePath": filePath,
 				"err":      copyErr.Error(),
 			})
@@ -238,10 +258,10 @@ func (osSvc *OSService) UploadFile(filePath string, reader io.Reader, shouldOver
 
 // NormalizePath ensures consistent formatting for a path.
 func (osSvc *OSService) NormalizePath(path string) string {
-	return filepath.Clean(path)
+	return filepath.ToSlash(filepath.Clean(path))
 }
 
 // GetFileIdentifier returns a unique identifier for a file (path for local).
 func (osSvc *OSService) GetFileIdentifier(path string) string {
-	return osSvc.NormalizePath(path)
+	return filepath.Clean(strings.ReplaceAll(path, "/", "\\"))
 }

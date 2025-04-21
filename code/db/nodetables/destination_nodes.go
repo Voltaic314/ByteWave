@@ -1,6 +1,6 @@
 package nodetables
 
-import "github.com/Voltaic314/ByteWave/code/core/db"
+import "github.com/Voltaic314/ByteWave/code/db"
 
 type DestinationNodesTable struct{}
 
@@ -11,12 +11,14 @@ func (t DestinationNodesTable) Name() string {
 func (t DestinationNodesTable) Schema() string {
 	return `
 		path VARCHAR NOT NULL UNIQUE,
-		identifier VARCHAR,  -- NULLable for filesystems that don't provide IDs
+		name VARCHAR NOT NULL,
+		identifier VARCHAR NOT NULL,
+		parent_id VARCHAR NOT NULL,
 		type VARCHAR NOT NULL CHECK(type IN ('file', 'folder')),
 		level INTEGER NOT NULL,
 		size BIGINT,
 		last_modified TIMESTAMP,
-		traversal_status VARCHAR NOT NULL CHECK(traversal_status IN ('pending', 'successful', 'failed')),
+		traversal_status VARCHAR NOT NULL CHECK(traversal_status IN ('pending', 'queued', 'successful', 'failed')),
 		traversal_attempts INTEGER DEFAULT 0,
 		error_ids VARCHAR DEFAULT NULL,
 		FOREIGN KEY (error_ids) REFERENCES node_errors(id) ON DELETE SET NULL

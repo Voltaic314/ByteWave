@@ -5,7 +5,7 @@ import (
 	"math/rand"
 	"strings"
 
-	"github.com/Voltaic314/ByteWave/code/core"
+	"github.com/Voltaic314/ByteWave/code/logging"
 )
 
 // WorkerState defines the possible states of a worker.
@@ -27,7 +27,7 @@ type WorkerBase struct {
 
 // NewWorkerBase initializes a new WorkerBase with a unique ID.
 func NewWorkerBase(queue *TaskQueue, queueType string) *WorkerBase {
-	core.GlobalLogger.LogMessage("info", "Creating new worker", map[string]any{
+	logging.GlobalLogger.LogMessage("info", "Creating new worker", map[string]any{
 		"queueType": queueType,
 	})
 
@@ -39,7 +39,7 @@ func NewWorkerBase(queue *TaskQueue, queueType string) *WorkerBase {
 	}
 	workerBase.ID = workerBase.GenerateID()
 
-	core.GlobalLogger.LogMessage("info", "Worker base created", map[string]any{
+	logging.GlobalLogger.LogMessage("info", "Worker base created", map[string]any{
 		"workerID":  workerBase.ID,
 		"queueType": queueType,
 		"state":     workerBase.State,
@@ -49,7 +49,7 @@ func NewWorkerBase(queue *TaskQueue, queueType string) *WorkerBase {
 
 // GenerateID generates a random string of 5 alphanumeric characters.
 func (wb *WorkerBase) GenerateID() string {
-	core.GlobalLogger.LogMessage("info", "Generating worker ID", nil)
+	logging.GlobalLogger.LogMessage("info", "Generating worker ID", nil)
 
 	const charset = "abcdefghijklmnopqrstuvwxyz0123456789"
 	var sb strings.Builder
@@ -58,7 +58,7 @@ func (wb *WorkerBase) GenerateID() string {
 	}
 	id := sb.String()
 
-	core.GlobalLogger.LogMessage("info", "Worker ID generated", map[string]any{
+	logging.GlobalLogger.LogMessage("info", "Worker ID generated", map[string]any{
 		"workerID": id,
 	})
 	return id
@@ -67,37 +67,36 @@ func (wb *WorkerBase) GenerateID() string {
 // RunMainLoop is a generic polling loop that can be called by any worker type.
 func (wb *WorkerBase) Run(process func(*Task) error) {
 	for {
-		// core.GlobalLogger.LogMessage("info", "Worker entering polling cycle", map[string]any{
+		// logging.GlobalLogger.LogMessage("info", "Worker entering polling cycle", map[string]any{
 		// 	"workerID":  wb.ID,
 		// 	"queueType": wb.QueueType,
 		// 	"state":     wb.State,
 		// })
 
 		if wb.Queue.State != QueueRunning {
-			core.GlobalLogger.LogMessage("info", "Queue is no longer running, stopping worker", map[string]any{
+			logging.GlobalLogger.LogMessage("info", "Queue is no longer running, stopping worker", map[string]any{
 				"workerID": wb.ID,
 			})
 			return
 		}
 
-		wb.Queue.WaitIfPaused() 
+		wb.Queue.WaitIfPaused()
 
 		// ✅ Lockless check (fast path)
 		if wb.Queue.QueueSize() == 0 {
 			wb.State = WorkerIdle
-			// core.GlobalLogger.LogMessage("info", "Queue empty, worker entering wait state", map[string]any{
+			// logging.GlobalLogger.LogMessage("info", "Queue empty, worker entering wait state", map[string]any{
 			// 	"workerID": wb.ID,
 			// 	"state":    wb.State,
 			// })
 			// This will block until QP calls cond.Broadcast()
-			wb.Queue.WaitForWork() 
+			wb.Queue.WaitForWork()
 			continue
 		}
-		
 
 		task := wb.Queue.PopTask()
 
-		core.GlobalLogger.LogMessage("info", "Worker popped task from queue", map[string]any{
+		logging.GlobalLogger.LogMessage("info", "Worker popped task from queue", map[string]any{
 			"workerID":  wb.ID,
 			"task":      task,
 			"queueType": wb.QueueType,
@@ -108,7 +107,7 @@ func (wb *WorkerBase) Run(process func(*Task) error) {
 			continue // skip sleep - just like my college days...
 		}
 
-		core.GlobalLogger.LogMessage("info", "Worker acquired task", map[string]any{
+		logging.GlobalLogger.LogMessage("info", "Worker acquired task", map[string]any{
 			"workerID": wb.ID,
 			"taskID":   task.ID,
 			"path":     task.GetPath(),
@@ -118,13 +117,13 @@ func (wb *WorkerBase) Run(process func(*Task) error) {
 		wb.TaskReady = false
 
 		if err := process(task); err != nil {
-			core.GlobalLogger.LogMessage("error", "Worker task failed", map[string]any{
+			logging.GlobalLogger.LogMessage("error", "Worker task failed", map[string]any{
 				"workerID": wb.ID,
 				"taskID":   task.ID,
 				"error":    err.Error(),
 			})
 		} else {
-			core.GlobalLogger.LogMessage("info", "Worker completed task", map[string]any{
+			logging.GlobalLogger.LogMessage("info", "Worker completed task", map[string]any{
 				"workerID": wb.ID,
 				"taskID":   task.ID,
 			})

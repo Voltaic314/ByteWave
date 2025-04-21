@@ -3,25 +3,25 @@ package processing
 import (
 	"time"
 
-	"github.com/Voltaic314/ByteWave/code/core"
-	"github.com/Voltaic314/ByteWave/code/core/db"
-	"github.com/Voltaic314/ByteWave/code/core/pv"
-	"github.com/Voltaic314/ByteWave/code/core/services"
+	"github.com/Voltaic314/ByteWave/code/db"
+	"github.com/Voltaic314/ByteWave/code/logging"
+	"github.com/Voltaic314/ByteWave/code/pv"
+	"github.com/Voltaic314/ByteWave/code/services"
 )
 
 // The Boss 😎 - Responsible for setting up QP, queues, and workers
 type Conductor struct {
-	DB           *db.DB
-	QP           *QueuePublisher
+	DB             *db.DB
+	QP             *QueuePublisher
 	retryThreshold int
-	batchSize      int 
+	batchSize      int
 }
 
 // NewConductor initializes with DB config, but defers QP setup
 func NewConductor(dbPath string, retryThreshold, batchSize int) *Conductor {
 	dbInstance, err := db.NewDB(dbPath) // Creates DB connection
 	if err != nil {
-		core.GlobalLogger.LogMessage("error", "Failed to initialize DB", map[string]any{
+		logging.GlobalLogger.LogMessage("error", "Failed to initialize DB", map[string]any{
 			"error": err.Error(),
 		})
 		return nil
@@ -49,7 +49,7 @@ func (c *Conductor) StartTraversal() {
 	pv_obj := pv.NewPathValidator()
 
 	// Add workers (example: 1 worker)
-	for range 1 {
+	for range 2 {
 		tw := &TraverserWorker{
 			WorkerBase: c.AddWorker("src-traversal", "src"),
 			DB:         c.DB,
@@ -57,7 +57,7 @@ func (c *Conductor) StartTraversal() {
 			pv:         pv_obj, // Or load actual rules if available
 		}
 		// register worker to the queue
-		
+
 		go tw.Run(tw.ProcessTraversalTask)
 	}
 
@@ -74,12 +74,12 @@ func (c *Conductor) StartTraversal() {
 	go func() {
 		signalChan, exists := c.QP.TraversalCompleteSignals["src-traversal"]
 		if !exists {
-			core.GlobalLogger.LogMessage("error", "No signal channel found for traversal complete", nil)
+			logging.GlobalLogger.LogMessage("error", "No signal channel found for traversal complete", nil)
 			return
 		}
-	
+
 		for queueName := range signalChan {
-			core.GlobalLogger.LogMessage("info", "Conductor received traversal complete signal", map[string]any{
+			logging.GlobalLogger.LogMessage("info", "Conductor received traversal complete signal", map[string]any{
 				"queue": queueName,
 			})
 			c.TeardownQueue(queueName)
@@ -105,7 +105,7 @@ func (c *Conductor) SetupQueue(name string, queueType QueueType, phase int, srcO
 func (c *Conductor) AddWorker(queueName string, queueType string) *WorkerBase {
 	queue, exists := c.QP.Queues[queueName]
 	if !exists {
-		core.GlobalLogger.LogMessage("error", "Queue not found", map[string]any{
+		logging.GlobalLogger.LogMessage("error", "Queue not found", map[string]any{
 			"queueName": queueName,
 		})
 		return nil
@@ -194,7 +194,7 @@ func (c *Conductor) TeardownQueue(queueName string) {
 	delete(c.QP.ScanModes, queueName)
 	delete(c.QP.QueriesPerPhase, queueName)
 
-	core.GlobalLogger.LogMessage("info", "Queue teardown complete", map[string]any{
+	logging.GlobalLogger.LogMessage("info", "Queue teardown complete", map[string]any{
 		"queueID": queueName,
 	})
 }

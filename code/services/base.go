@@ -8,8 +8,8 @@ import (
 	"os"
 	"sync"
 
-	"github.com/Voltaic314/ByteWave/code/core"
-	"github.com/Voltaic314/ByteWave/code/core/filesystem"
+	"github.com/Voltaic314/ByteWave/code/filesystem"
+	"github.com/Voltaic314/ByteWave/code/logging"
 )
 
 // MigrationRules defines configurable migration settings.
@@ -27,6 +27,8 @@ type BaseServiceInterface interface {
 	UploadFile(filePath string, reader io.Reader, shouldOverWrite func() (bool, error)) <-chan error
 	NormalizePath(path string) string
 	GetFileIdentifier(path string) string
+	SetRootPath(path string)
+	GetRootPath() string
 }
 
 // BaseService holds shared attributes/methods and migration rules.
@@ -40,6 +42,7 @@ type BaseService struct {
 	mu        sync.Mutex
 	ctx       context.Context
 	cancel    context.CancelFunc
+	rootPath  string
 }
 
 // NewBaseService initializes a BaseService, loading migration rules from JSON.
@@ -49,11 +52,12 @@ func NewBaseService(rulesPath string) (*BaseService, error) {
 		RulesPath: rulesPath,
 		ctx:       ctx,
 		cancel:    cancel,
+		rootPath:  "",
 	}
 
 	err := base.LoadMigrationRules()
 	if err != nil {
-		core.GlobalLogger.LogMessage("error", "Failed to load migration rules", map[string]any{
+		logging.GlobalLogger.LogMessage("error", "Failed to load migration rules", map[string]any{
 			"file": rulesPath,
 			"err":  err.Error(),
 		})
@@ -206,4 +210,16 @@ func (b *BaseService) NormalizePath(path string) string {
 
 func (b *BaseService) GetFileIdentifier(path string) string {
 	return ""
+}
+
+func (b *BaseService) SetRootPath(path string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.rootPath = path
+}
+
+func (b *BaseService) GetRootPath() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.rootPath
 }

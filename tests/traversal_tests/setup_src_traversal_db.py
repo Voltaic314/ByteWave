@@ -1,7 +1,6 @@
 import os
 import json
 import duckdb
-from pathlib import Path
 from datetime import datetime
 
 # Paths
@@ -17,9 +16,6 @@ if os.path.exists(db_path):
 with open(json_path, "r") as f:
     path_data = json.load(f)
 
-for item in path_data:
-    item["identifier"] = item["path"]  # 🔁 Set identifier to path
-    item["parent_id"] = str(Path(item["path"]).parent)  # 🧬 Derive parent ID
 
 # Connect to DuckDB
 conn = duckdb.connect(database=db_path)
@@ -28,14 +24,15 @@ conn = duckdb.connect(database=db_path)
 source_nodes_schema = """
 CREATE TABLE IF NOT EXISTS source_nodes (
     path VARCHAR NOT NULL UNIQUE,
+    name VARCHAR NOT NULL,
     identifier VARCHAR NOT NULL,
     parent_id VARCHAR NOT NULL,
-    type VARCHAR NOT NULL CHECK(type IN ('file', 'folder')),
+    type VARCHAR NOT NULL CHECK(type IN ('file', 'folder', 'drive')),
     level INTEGER NOT NULL,
     size BIGINT,
     last_modified TIMESTAMP NOT NULL,
-    traversal_status VARCHAR NOT NULL CHECK(traversal_status IN ('pending', 'successful', 'failed')),
-    upload_status VARCHAR NOT NULL CHECK(upload_status IN ('pending', 'successful', 'failed')),
+    traversal_status VARCHAR NOT NULL CHECK(traversal_status IN ('pending', 'queued', 'successful', 'failed')),
+    upload_status VARCHAR NOT NULL CHECK(upload_status IN ('pending', 'queued', 'successful', 'failed')),
     traversal_attempts INTEGER DEFAULT 0,
     upload_attempts INTEGER DEFAULT 0,
     error_ids VARCHAR DEFAULT NULL
@@ -48,7 +45,7 @@ audit_log_schema = """
 CREATE TABLE IF NOT EXISTS audit_log (
     id BIGINT,
     timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    category VARCHAR NOT NULL CHECK(category IN ('info', 'warning', 'error')),
+    category VARCHAR NOT NULL CHECK(category IN ('trace', 'debug', 'info', 'warning', 'error', 'critical')),
     error_type VARCHAR DEFAULT NULL,
     details JSON DEFAULT NULL,
     message VARCHAR NOT NULL
@@ -59,15 +56,16 @@ conn.execute(audit_log_schema)
 # Insert source_nodes records
 insert_query = """
 INSERT INTO source_nodes (
-    path, identifier, parent_id, type, level, size,
+    path, name, identifier, parent_id, type, level, size,
     last_modified, traversal_status, upload_status,
     traversal_attempts, upload_attempts, error_ids
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 for item in path_data:
     conn.execute(insert_query, (
         item["path"],
+        item["name"],
         item["identifier"],
         item["parent_id"],
         item["type"],

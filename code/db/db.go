@@ -8,7 +8,7 @@ import (
 
 	_ "github.com/marcboeker/go-duckdb"
 
-	"github.com/Voltaic314/ByteWave/code/core/db/writequeue"
+	"github.com/Voltaic314/ByteWave/code/db/writequeue"
 )
 
 type DB struct {
@@ -94,7 +94,7 @@ func (db *DB) WriteBatch(tableQueries map[string][]string, tableParams map[strin
 }
 
 // batchExecute flushes all pending write queries in a single transaction.
-func batchExecute( conn *sql.DB, tableQueries map[string][]string, tableParams map[string][][]any) error {
+func batchExecute(conn *sql.DB, tableQueries map[string][]string, tableParams map[string][][]any) error {
 	if len(tableQueries) == 0 {
 		return nil
 	}

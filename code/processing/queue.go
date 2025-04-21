@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/Voltaic314/ByteWave/code/core"
+	"github.com/Voltaic314/ByteWave/code/logging"
 )
 
 // QueueType defines whether a queue is for traversal or uploading.
@@ -21,7 +21,7 @@ type QueueState string
 const (
 	QueueRunning  QueueState = "running"
 	QueuePaused   QueueState = "paused"
-	QueueComplete QueueState = "complete" 
+	QueueComplete QueueState = "complete"
 )
 
 // TaskQueue manages tasks, workers, and execution settings.
@@ -46,7 +46,7 @@ type TaskQueue struct {
 // NewTaskQueue initializes a new queue for traversal or upload.
 func NewTaskQueue(queueType QueueType, phase int, srcOrDst string, paginationSize int, runningLowChan chan int, runningLowThreshold int) *TaskQueue {
 	queueID := fmt.Sprintf("%s-%s", srcOrDst, queueType)
-	core.GlobalLogger.LogMessage("info", "Creating new task queue", map[string]any{
+	logging.GlobalLogger.LogMessage("info", "Creating new task queue", map[string]any{
 		"queueID":        queueID,
 		"type":           queueType,
 		"phase":          phase,
@@ -71,7 +71,7 @@ func NewTaskQueue(queueType QueueType, phase int, srcOrDst string, paginationSiz
 	}
 	q.cond = sync.NewCond(&q.mu)
 
-	core.GlobalLogger.LogMessage("info", "Task queue created successfully", map[string]any{
+	logging.GlobalLogger.LogMessage("info", "Task queue created successfully", map[string]any{
 		"queueID": queueID,
 	})
 	return q
@@ -94,11 +94,11 @@ func (q *TaskQueue) WaitIfPaused() {
 	defer q.Unlock()
 
 	if q.State == QueuePaused {
-		core.GlobalLogger.LogMessage("info", "Queue is paused, waiting for resume", map[string]any{
+		logging.GlobalLogger.LogMessage("info", "Queue is paused, waiting for resume", map[string]any{
 			"queueID": q.QueueID,
 		})
 		q.cond.Wait()
-		core.GlobalLogger.LogMessage("info", "Queue resumed", map[string]any{
+		logging.GlobalLogger.LogMessage("info", "Queue resumed", map[string]any{
 			"queueID": q.QueueID,
 		})
 	}
@@ -110,7 +110,7 @@ func (q *TaskQueue) CheckAndTriggerQP() {
 	defer q.Unlock()
 
 	if q.QueueSize() <= q.RunningLowThreshold && !q.RunningLowTriggered {
-		core.GlobalLogger.LogMessage("info", "Queue running low, triggering QP", map[string]any{
+		logging.GlobalLogger.LogMessage("info", "Queue running low, triggering QP", map[string]any{
 			"queueID":     q.QueueID,
 			"currentSize": q.QueueSize(),
 			"threshold":   q.RunningLowThreshold,
@@ -125,7 +125,7 @@ func (q *TaskQueue) Pause() {
 	q.Lock()
 	defer q.Unlock()
 
-	core.GlobalLogger.LogMessage("info", "Pausing queue", map[string]any{
+	logging.GlobalLogger.LogMessage("info", "Pausing queue", map[string]any{
 		"queueID": q.QueueID,
 	})
 	q.State = QueuePaused
@@ -136,7 +136,7 @@ func (q *TaskQueue) Resume() {
 	q.Lock()
 	defer q.Unlock()
 
-	core.GlobalLogger.LogMessage("info", "Resuming queue", map[string]any{
+	logging.GlobalLogger.LogMessage("info", "Resuming queue", map[string]any{
 		"queueID": q.QueueID,
 	})
 	q.State = QueueRunning
@@ -145,8 +145,8 @@ func (q *TaskQueue) Resume() {
 
 // AddTask adds a task to the queue.
 func (q *TaskQueue) AddTask(task *Task) {
-	
-	core.GlobalLogger.LogMessage("info", "Adding task to queue", map[string]any{
+
+	logging.GlobalLogger.LogMessage("info", "Adding task to queue", map[string]any{
 		"queueID": q.QueueID,
 		"taskID":  task.ID,
 	})
@@ -157,7 +157,7 @@ func (q *TaskQueue) AddTask(task *Task) {
 
 func (q *TaskQueue) AddTasks(tasks []*Task) {
 
-	core.GlobalLogger.LogMessage("info", "Adding multiple tasks to queue", map[string]any{
+	logging.GlobalLogger.LogMessage("info", "Adding multiple tasks to queue", map[string]any{
 		"queueID":   q.QueueID,
 		"taskCount": len(tasks),
 	})
@@ -174,7 +174,7 @@ func (q *TaskQueue) ResetRunningLowTrigger() {
 	q.Lock()
 	defer q.Unlock()
 
-	core.GlobalLogger.LogMessage("info", "Resetting running low trigger", map[string]any{
+	logging.GlobalLogger.LogMessage("info", "Resetting running low trigger", map[string]any{
 		"queueID": q.QueueID,
 	})
 	q.RunningLowTriggered = false
@@ -200,7 +200,7 @@ func (q *TaskQueue) PopTask() *Task {
 			task.Locked = true
 			// splice: tasks = tasks[:i] + tasks[i+1:]
 			// Sidenote but this is really weird compared to Python's append syntax lol
-			q.tasks = append(q.tasks[:i], q.tasks[i+1:]...) 
+			q.tasks = append(q.tasks[:i], q.tasks[i+1:]...)
 			return task
 		}
 	}
@@ -212,7 +212,7 @@ func (q *TaskQueue) UnlockTask(taskID string) {
 	q.Lock()
 	defer q.Unlock()
 
-	core.GlobalLogger.LogMessage("info", "Unlocking task", map[string]any{
+	logging.GlobalLogger.LogMessage("info", "Unlocking task", map[string]any{
 		"queueID": q.QueueID,
 		"taskID":  taskID,
 	})
@@ -230,7 +230,7 @@ func (q *TaskQueue) QueueSize() int {
 	defer q.Unlock()
 
 	size := len(q.tasks)
-	core.GlobalLogger.LogMessage("info", "Queue size check", map[string]any{
+	logging.GlobalLogger.LogMessage("info", "Queue size check", map[string]any{
 		"queueID": q.QueueID,
 		"size":    size,
 	})
@@ -242,7 +242,7 @@ func (q *TaskQueue) SetPaginationSize(newSize int) {
 	q.Lock()
 	defer q.Unlock()
 
-	core.GlobalLogger.LogMessage("info", "Updating pagination size", map[string]any{
+	logging.GlobalLogger.LogMessage("info", "Updating pagination size", map[string]any{
 		"queueID": q.QueueID,
 		"oldSize": q.PaginationSize,
 		"newSize": newSize,
@@ -268,7 +268,7 @@ func (q *TaskQueue) SetGlobalSetting(key string, value any) {
 	q.Lock()
 	defer q.Unlock()
 
-	core.GlobalLogger.LogMessage("info", "Setting global setting", map[string]any{
+	logging.GlobalLogger.LogMessage("info", "Setting global setting", map[string]any{
 		"queueID": q.QueueID,
 		"key":     key,
 	})
@@ -281,7 +281,7 @@ func (q *TaskQueue) GetGlobalSetting(key string) (any, bool) {
 	defer q.Unlock()
 
 	value, exists := q.GlobalSettings[key]
-	core.GlobalLogger.LogMessage("info", "Getting global setting", map[string]any{
+	logging.GlobalLogger.LogMessage("info", "Getting global setting", map[string]any{
 		"queueID": q.QueueID,
 		"key":     key,
 		"exists":  exists,
@@ -302,7 +302,7 @@ func (q *TaskQueue) AreAllWorkersIdle() bool {
 		}
 	}
 
-	core.GlobalLogger.LogMessage("info", "Checking worker idle status", map[string]any{
+	logging.GlobalLogger.LogMessage("info", "Checking worker idle status", map[string]any{
 		"queueID":     q.QueueID,
 		"allIdle":     allIdle,
 		"workerCount": len(q.workers),
@@ -315,7 +315,7 @@ func (q *TaskQueue) NotifyWorkers() {
 	q.Lock()
 	defer q.Unlock()
 
-	core.GlobalLogger.LogMessage("info", "Notifying workers", map[string]any{
+	logging.GlobalLogger.LogMessage("info", "Notifying workers", map[string]any{
 		"queueID":     q.QueueID,
 		"workerCount": len(q.workers),
 	})
@@ -324,7 +324,7 @@ func (q *TaskQueue) NotifyWorkers() {
 	for _, worker := range q.workers {
 		if worker.State == WorkerIdle {
 			worker.State = WorkerActive
-			core.GlobalLogger.LogMessage("info", "Worker state updated", map[string]any{
+			logging.GlobalLogger.LogMessage("info", "Worker state updated", map[string]any{
 				"queueID":  q.QueueID,
 				"workerID": worker.ID,
 				"state":    worker.State,
@@ -337,14 +337,14 @@ func (q *TaskQueue) NotifyWorkers() {
 
 func (q *TaskQueue) WaitForWork() {
 	q.cond.L.Lock()
-	core.GlobalLogger.LogMessage("info", "Waiting for work", map[string]any{
+	logging.GlobalLogger.LogMessage("info", "Waiting for work", map[string]any{
 		"queueID": q.QueueID,
 	})
 	for len(q.tasks) == 0 && q.State == QueueRunning {
 		q.cond.Wait()
 	}
 	if q.State == QueueComplete {
-		core.GlobalLogger.LogMessage("info", "Queue marked complete, worker should exit", map[string]any{
+		logging.GlobalLogger.LogMessage("info", "Queue marked complete, worker should exit", map[string]any{
 			"queueID": q.QueueID,
 		})
 	}

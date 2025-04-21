@@ -3,8 +3,8 @@ package processing
 import (
 	"fmt"
 
-	"github.com/Voltaic314/ByteWave/code/core"
-	"github.com/Voltaic314/ByteWave/code/core/filesystem"
+	"github.com/Voltaic314/ByteWave/code/filesystem"
+	"github.com/Voltaic314/ByteWave/code/logging"
 )
 
 // TaskType defines the type of work this task is performing.
@@ -25,7 +25,7 @@ type Task struct {
 }
 
 func NewTraversalTask(id string, folder *filesystem.Folder, parentTaskID *string) (*Task, error) {
-	core.GlobalLogger.LogMessage("info", "Creating new traversal task", map[string]any{
+	logging.GlobalLogger.LogMessage("info", "Creating new traversal task", map[string]any{
 		"taskID":     id,
 		"folderPath": folder.Path,
 		"hasParent":  parentTaskID != nil,
@@ -33,7 +33,7 @@ func NewTraversalTask(id string, folder *filesystem.Folder, parentTaskID *string
 
 	// Perform basic validation
 	if folder.Path == "" {
-		core.GlobalLogger.LogMessage("error", "Invalid folder path", map[string]any{
+		logging.GlobalLogger.LogMessage("error", "Invalid folder path", map[string]any{
 			"taskID": id,
 		})
 		return nil, fmt.Errorf("invalid folder: path is empty")
@@ -48,7 +48,7 @@ func NewTraversalTask(id string, folder *filesystem.Folder, parentTaskID *string
 		Locked:       false,
 	}
 
-	core.GlobalLogger.LogMessage("info", "Traversal task created successfully", map[string]any{
+	logging.GlobalLogger.LogMessage("info", "Traversal task created successfully", map[string]any{
 		"taskID":     id,
 		"folderPath": folder.Path,
 	})
@@ -57,7 +57,7 @@ func NewTraversalTask(id string, folder *filesystem.Folder, parentTaskID *string
 
 // NewUploadTask initializes a new upload task (file or folder).
 func NewUploadTask(id string, file *filesystem.File, folder *filesystem.Folder, parentTaskID *string) (*Task, error) {
-	core.GlobalLogger.LogMessage("info", "Creating new upload task", map[string]any{
+	logging.GlobalLogger.LogMessage("info", "Creating new upload task", map[string]any{
 		"taskID":    id,
 		"hasFile":   file != nil,
 		"hasFolder": folder != nil,
@@ -65,7 +65,7 @@ func NewUploadTask(id string, file *filesystem.File, folder *filesystem.Folder, 
 	})
 
 	if file == nil && folder == nil {
-		core.GlobalLogger.LogMessage("error", "Cannot create upload task without file or folder", map[string]any{
+		logging.GlobalLogger.LogMessage("error", "Cannot create upload task without file or folder", map[string]any{
 			"taskID": id,
 		})
 		return nil, fmt.Errorf("cannot create upload task without file or folder")
@@ -80,7 +80,7 @@ func NewUploadTask(id string, file *filesystem.File, folder *filesystem.Folder, 
 		Locked:       false,
 	}
 
-	core.GlobalLogger.LogMessage("info", "Upload task created successfully", map[string]any{
+	logging.GlobalLogger.LogMessage("info", "Upload task created successfully", map[string]any{
 		"taskID": id,
 		"path":   task.GetPath(),
 	})
@@ -88,10 +88,6 @@ func NewUploadTask(id string, file *filesystem.File, folder *filesystem.Folder, 
 }
 
 func (t *Task) GetPath() string {
-	core.GlobalLogger.LogMessage("info", "Getting task path", map[string]any{
-		"taskID": t.ID,
-		"type":   t.Type,
-	})
 
 	if t.Folder != nil {
 		return t.Folder.Path

@@ -5,8 +5,8 @@ import (
 	"time"
 
 	"github.com/Voltaic314/ByteWave/code/cli"
-	"github.com/Voltaic314/ByteWave/code/core"
-	"github.com/Voltaic314/ByteWave/code/core/processing"
+	"github.com/Voltaic314/ByteWave/code/logging"
+	"github.com/Voltaic314/ByteWave/code/processing"
 )
 
 func main() {
@@ -19,17 +19,17 @@ func main() {
 	}
 
 	// Initialize logger (UDP-only for now)
-	core.InitLogger("C:\\Users\\golde\\OneDrive\\Documents\\GitHub\\ByteWave\\settings\\log_settings.json")
+	logging.InitLogger("C:\\Users\\golde\\OneDrive\\Documents\\GitHub\\ByteWave\\settings\\log_settings.json")
 
 	// Give the log terminal a sec to boot up
 	time.Sleep(3 * time.Second)
 
 	// 🔊 DEBUG: Send a test log to verify logger is working
-	core.GlobalLogger.LogMessage("info", "Test log: Logger is alive and ready 🚦", map[string]any{
+	logging.GlobalLogger.LogMessage("info", "Test log: Logger is alive and ready 🚦", map[string]any{
 		"origin": "main.go",
 		"status": "init-complete",
 	})
-	
+
 	// Start the Conductor — now self-contained (handles its own DB + logger)
 	conductor := processing.NewConductor(
 		"C:\\Users\\golde\\OneDrive\\Documents\\GitHub\\ByteWave\\tests\\traversal_tests\\test_src_traversal.db",
