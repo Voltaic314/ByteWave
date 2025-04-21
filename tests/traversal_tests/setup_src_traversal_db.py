@@ -43,10 +43,10 @@ conn.execute(source_nodes_schema)
 # Create audit_log table (same as before)
 audit_log_schema = """
 CREATE TABLE IF NOT EXISTS audit_log (
-    id BIGINT,
+    id VARCHAR PRIMARY KEY, 
+    -- Use a UUID for the primary key
     timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    category VARCHAR NOT NULL CHECK(category IN ('trace', 'debug', 'info', 'warning', 'error', 'critical')),
-    error_type VARCHAR DEFAULT NULL,
+    level VARCHAR NOT NULL CHECK(level IN ('trace', 'debug', 'info', 'warning', 'error', 'critical')),
     details JSON DEFAULT NULL,
     message VARCHAR NOT NULL
 );

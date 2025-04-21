@@ -2,8 +2,7 @@
 package processing
 
 import (
-	"math/rand"
-	"strings"
+	"github.com/google/uuid"
 
 	"github.com/Voltaic314/ByteWave/code/logging"
 )
@@ -44,19 +43,14 @@ func NewWorkerBase(queue *TaskQueue, queueType string) *WorkerBase {
 		"queueType": queueType,
 		"state":     workerBase.State,
 	})
-	return workerBase
-}
-
-// GenerateID generates a random string of 5 alphanumeric characters.
-func (wb *WorkerBase) GenerateID() string {
-	logging.GlobalLogger.LogMessage("info", "Generating worker ID", nil)
-
-	const charset = "abcdefghijklmnopqrstuvwxyz0123456789"
-	var sb strings.Builder
-	for i := 0; i < 5; i++ {
-		sb.WriteByte(charset[rand.Intn(len(charset))])
+		return workerBase
 	}
-	id := sb.String()
+	
+// GenerateID generates a unique identifier using UUID.
+func (wb *WorkerBase) GenerateID() string {
+	logging.GlobalLogger.LogMessage("info", "Generating worker ID using UUID", nil)
+
+	id := uuid.New().String()
 
 	logging.GlobalLogger.LogMessage("info", "Worker ID generated", map[string]any{
 		"workerID": id,
@@ -104,6 +98,8 @@ func (wb *WorkerBase) Run(process func(*Task) error) {
 
 		if task == nil {
 			wb.State = WorkerIdle
+			wb.TaskReady = true
+			wb.Queue.WaitForWork()
 			continue // skip sleep - just like my college days...
 		}
 

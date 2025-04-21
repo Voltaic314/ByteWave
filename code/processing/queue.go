@@ -91,14 +91,19 @@ func (q *TaskQueue) Unlock() {
 // Intended to be called only by workers during task polling.
 func (q *TaskQueue) WaitIfPaused() {
 	q.Lock()
-	defer q.Unlock()
 
 	if q.State == QueuePaused {
+		q.Unlock()
 		logging.GlobalLogger.LogMessage("info", "Queue is paused, waiting for resume", map[string]any{
 			"queueID": q.QueueID,
 		})
 		q.cond.Wait()
 		logging.GlobalLogger.LogMessage("info", "Queue resumed", map[string]any{
+			"queueID": q.QueueID,
+		})
+	} else {
+		q.Unlock()
+		logging.GlobalLogger.LogMessage("info", "Queue is running, no wait needed", map[string]any{
 			"queueID": q.QueueID,
 		})
 	}
@@ -320,17 +325,17 @@ func (q *TaskQueue) NotifyWorkers() {
 		"workerCount": len(q.workers),
 	})
 
-	// Set all idle workers to active
-	for _, worker := range q.workers {
-		if worker.State == WorkerIdle {
-			worker.State = WorkerActive
-			logging.GlobalLogger.LogMessage("info", "Worker state updated", map[string]any{
-				"queueID":  q.QueueID,
-				"workerID": worker.ID,
-				"state":    worker.State,
-			})
-		}
-	}
+	// // Set all idle workers to active
+	// for _, worker := range q.workers {
+	// 	if worker.State == WorkerIdle {
+	// 		worker.State = WorkerActive
+	// 		logging.GlobalLogger.LogMessage("info", "Worker state updated", map[string]any{
+	// 			"queueID":  q.QueueID,
+	// 			"workerID": worker.ID,
+	// 			"state":    worker.State,
+	// 		})
+	// 	}
+	// }
 
 	q.cond.Broadcast()
 }

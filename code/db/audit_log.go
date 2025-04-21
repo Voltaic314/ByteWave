@@ -19,7 +19,7 @@ func (t AuditLogTable) Name() string {
 // Schema returns the DuckDB-compatible schema definition.
 func (t AuditLogTable) Schema() string {
 	return `
-		id VAR CHAR PRIMARY KEY,
+		id VAR CHAR PRIMARY KEY, 
 		-- Use a UUID for the primary key
 		timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 		level VARCHAR NOT NULL CHECK(level IN ('trace', 'debug', 'info', 'warning', 'error', 'critical')),
