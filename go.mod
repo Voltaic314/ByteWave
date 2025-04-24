@@ -5,12 +5,12 @@ go 1.24.2
 
 // main dependencies -- quack quack 🦆
 require github.com/marcboeker/go-duckdb v1.7.0
+require github.com/google/uuid v1.6.0
 
 // Indirect dependencies required for duckdb
 require (
 	github.com/goccy/go-json v0.10.5 // indirect
 	github.com/google/flatbuffers v25.2.10+incompatible // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/klauspost/compress v1.18.0 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.10 // indirect
 	github.com/pierrec/lz4/v4 v4.1.22 // indirect

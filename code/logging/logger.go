@@ -99,8 +99,14 @@ func (l *Logger) LogMessage(level, message string, details map[string]any) {
 	if l.logWQ != nil {
 		detailsJSON, _ := json.Marshal(details)
 		params := []any{entry.Timestamp, level, string(detailsJSON), message}
-		query := `INSERT INTO audit_log (timestamp, level, details, message) VALUES (?, ?, ?, ?)`
-		l.logWQ.AddWriteOperation("audit_log", query, params)
+		query := `INSERT OR IGNORE INTO audit_log (timestamp, level, details, message) VALUES (?, ?, ?, ?)`
+		l.enqueueLog(query, params)
+	}
+}
+
+func (l *Logger) enqueueLog(query string, params []any) {
+	if l.logWQ != nil {
+		l.logWQ.AddWriteOperation("audit_log", "", query, params)
 	}
 }
 

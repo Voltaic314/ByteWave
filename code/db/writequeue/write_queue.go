@@ -7,9 +7,24 @@ import (
 	"time"
 )
 
+// writeOp represents a queued SQL operation.
+type writeOp struct {
+	Path   string
+	Query  string
+	Params []any
+}
+
+type Table interface {
+	Add(path string, op writeOp)
+	Flush()
+	StopTimer()
+	Name() string
+}
+
+// WriteQueue manages multiple WriteQueueTable instances (one per table)
 type WriteQueue struct {
 	mu         sync.Mutex
-	tables     map[string]*WriteQueueTable
+	tables     map[string]Table
 	batchSize  int
 	flushTimer time.Duration
 	ctx        context.Context
@@ -17,12 +32,12 @@ type WriteQueue struct {
 	flushFunc  func(tableQueries map[string][]string, tableParams map[string][][]any) error
 }
 
-// NewQueue initializes a WriteQueue with per-table batching.
+// NewQueue initializes a WriteQueue with per-table batching logic
 func NewQueue(batchSize int, flushTimer time.Duration, flushFunc func(map[string][]string, map[string][][]any) error) *WriteQueue {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &WriteQueue{
-		tables:     make(map[string]*WriteQueueTable),
+		tables:     make(map[string]Table),
 		batchSize:  batchSize,
 		flushTimer: flushTimer,
 		ctx:        ctx,
@@ -31,31 +46,43 @@ func NewQueue(batchSize int, flushTimer time.Duration, flushFunc func(map[string
 	}
 }
 
-// Stop gracefully shuts down all table flush loops.
+// Stop gracefully stops all write queues
 func (wq *WriteQueue) Stop() {
 	wq.cancel()
-
 	wq.mu.Lock()
 	defer wq.mu.Unlock()
+
 	for _, table := range wq.tables {
 		table.StopTimer()
 	}
 }
 
-// AddWriteOperation queues a new operation for a specific table.
-func (wq *WriteQueue) AddWriteOperation(table string, query string, params []any) {
+// AddWriteOperation queues a new operation for a table
+func (wq *WriteQueue) AddWriteOperation(table string, path, query string, params []any) {
+	wq.AddWriteOperationWithPath(table, "", query, params)
+}
+
+// AddWriteOperationWithPath lets node-style tables de-dupe by path
+func (wq *WriteQueue) AddWriteOperationWithPath(table string, path string, query string, params []any) {
 	wq.mu.Lock()
 	t, exists := wq.tables[table]
 	if !exists {
-		t = NewWriteQueueTable(table, wq.batchSize, wq.flushSingleTable)
+		var newTable Table
+		if table == "audit_log" {
+			newTable = NewLogWriteQueueTable(table, wq.batchSize, wq.flushTimer, wq.flushSingleTable)
+		} else {
+			newTable = NewNodeWriteQueueTable(table, wq.batchSize, wq.flushTimer, wq.flushSingleTable)
+		}
+		t = newTable
 		wq.tables[table] = t
 	}
 	wq.mu.Unlock()
 
-	t.Add(writeOp{Query: query, Params: params})
+	op := writeOp{Path: path, Query: query, Params: params}
+	t.Add(path, op)
 }
 
-// flushSingleTable is used by individual WriteQueueTables to flush themselves.
+// flushSingleTable performs a flush for a single table
 func (wq *WriteQueue) flushSingleTable(table string, ops []writeOp) {
 	if len(ops) == 0 {
 		return
@@ -97,24 +124,25 @@ func (wq *WriteQueue) flushSingleTable(table string, ops []writeOp) {
 	}
 }
 
-// FlushTable manually flushes a single table's queue.
+// FlushTable manually flushes a table's queue
 func (wq *WriteQueue) FlushTable(table string) {
 	wq.mu.Lock()
 	t, exists := wq.tables[table]
 	wq.mu.Unlock()
+
 	if exists {
 		t.Flush()
 	}
 }
 
-// FlushTables flushes multiple named tables.
+// FlushTables flushes multiple specific tables
 func (wq *WriteQueue) FlushTables(tables []string) {
 	for _, t := range tables {
 		wq.FlushTable(t)
 	}
 }
 
-// FlushAll flushes all registered tables.
+// FlushAll flushes every table
 func (wq *WriteQueue) FlushAll() {
 	wq.mu.Lock()
 	names := make([]string, 0, len(wq.tables))

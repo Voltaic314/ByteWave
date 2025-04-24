@@ -55,7 +55,7 @@ conn.execute(audit_log_schema)
 
 # Insert source_nodes records
 insert_query = """
-INSERT INTO source_nodes (
+INSERT OR IGNORE INTO source_nodes (
     path, name, identifier, parent_id, type, level, size,
     last_modified, traversal_status, upload_status,
     traversal_attempts, upload_attempts, error_ids

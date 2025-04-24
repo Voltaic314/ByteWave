@@ -15,7 +15,7 @@ type DB struct {
 	conn   *sql.DB
 	ctx    context.Context
 	cancel context.CancelFunc
-	wqMap  map[string]*writequeue.WriteQueue // ✅ Separate queue per table
+	wqMap  map[string]*writequeue.WriteQueue
 }
 
 // NewDB initializes the DuckDB connection without any write queues.
@@ -37,7 +37,6 @@ func NewDB(dbPath string) (*DB, error) {
 
 // InitWriteQueueTable initializes a write queue for a specific table.
 func (db *DB) InitWriteQueueTable(table string, batchSize int, flushInterval time.Duration) {
-	// TODO: Add overwrite logic (drop if already exists?)
 	wq := writequeue.NewQueue(batchSize, flushInterval, func(tableQueries map[string][]string, tableParams map[string][][]any) error {
 		return batchExecute(db.conn, tableQueries, tableParams)
 	})
@@ -70,9 +69,17 @@ func (db *DB) Write(query string, params ...any) error {
 }
 
 // QueueWrite adds an insert/update to the async write queue.
+// If the table is "audit_log", path is empty string.
 func (db *DB) QueueWrite(tableName string, query string, params ...any) {
 	if wq, ok := db.wqMap[tableName]; ok {
-		go wq.AddWriteOperation(tableName, query, params)
+		go wq.AddWriteOperation(tableName, "", query, params)
+	}
+}
+
+// QueueWriteWithPath adds a write op with path, used for node-style updates.
+func (db *DB) QueueWriteWithPath(tableName string, path string, query string, params ...any) {
+	if wq, ok := db.wqMap[tableName]; ok {
+		go wq.AddWriteOperation(tableName, path, query, params)
 	}
 }
 
@@ -91,6 +98,14 @@ func (db *DB) DropTable(tableName string) error {
 // WriteBatch exposes batchExecute for use by external modules (e.g., logger).
 func (db *DB) WriteBatch(tableQueries map[string][]string, tableParams map[string][][]any) error {
 	return batchExecute(db.conn, tableQueries, tableParams)
+}
+
+// GetWriteQueue returns the write queue for a given table.
+func (db *DB) GetWriteQueue(table string) *writequeue.WriteQueue {
+	if wq, ok := db.wqMap[table]; ok {
+		return wq
+	}
+	return nil
 }
 
 // batchExecute flushes all pending write queries in a single transaction.

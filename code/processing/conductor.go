@@ -40,7 +40,7 @@ func (c *Conductor) StartTraversal() {
 
 	// Setup queues
 	name := "src-traversal"
-	c.SetupQueue(name, TraversalQueueType, 0, "src", 100)
+	c.SetupQueue(name, TraversalQueueType, 0, "src", 1000)
 	c.QP.TraversalCompleteSignals[name] = make(chan string, 1)
 
 	c.DB.InitWriteQueueTable("source_nodes", 10, 5*time.Second)
@@ -49,7 +49,7 @@ func (c *Conductor) StartTraversal() {
 	pv_obj := pv.NewPathValidator()
 
 	// Add workers (example: 1 worker)
-	for range 2 {
+	for range 1 {
 		tw := &TraverserWorker{
 			WorkerBase: c.AddWorker("src-traversal", "src"),
 			DB:         c.DB,

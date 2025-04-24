@@ -76,13 +76,6 @@ func (tw *TraverserWorker) ProcessTraversalTask(task *Task) error {
 		"path":     task.GetPath(),
 	})
 
-	// Increment attempt counter right away since we're attempting it
-	table := "source_nodes"
-	if tw.QueueType == "dst" {
-		table = "destination_nodes"
-	}
-	tw.DB.QueueWrite(table, `UPDATE `+table+` SET traversal_attempts = traversal_attempts + 1 WHERE path = ?`, task.Folder.Path)
-
 	// Validate path
 	if !tw.pv.IsValidPath(task.Folder.Path) {
 		logging.GlobalLogger.LogMessage("error", "Invalid path for traversal", map[string]any{
@@ -154,7 +147,7 @@ func (tw *TraverserWorker) LogTraversalSuccess(task *Task, files []filesystem.Fi
 
 	// Create inserts for all the files found in the traversal
 	for _, file := range files {
-		tw.DB.QueueWrite(table, `INSERT INTO `+table+` (
+		tw.DB.QueueWrite(table, `INSERT OR IGNORE INTO `+table+` (
 			path, name, identifier, parent_id, type, level, size, last_modified,
 			traversal_status, upload_status, traversal_attempts, upload_attempts, error_ids
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -174,7 +167,7 @@ func (tw *TraverserWorker) LogTraversalSuccess(task *Task, files []filesystem.Fi
 
 	// Create inserts for all the folders found in the traversal
 	for _, folder := range folders {
-		tw.DB.QueueWrite(table, `INSERT INTO `+table+` (
+		tw.DB.QueueWrite(table, `INSERT OR IGNORE INTO `+table+` (
 			path, name, identifier, parent_id, type, level, size, last_modified,
 			traversal_status, upload_status, traversal_attempts, upload_attempts, error_ids
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -193,7 +186,7 @@ func (tw *TraverserWorker) LogTraversalSuccess(task *Task, files []filesystem.Fi
 	}
 
 	// Mark the parent folder (this task's folder) as successful
-	tw.DB.QueueWrite(table, `UPDATE `+table+` SET traversal_status = 'successful' WHERE path = ?`, task.Folder.Path)
+	tw.DB.QueueWrite(table, `UPDATE `+table+` SET traversal_status = 'successful', traversal_attempts = traversal_attempts + 1 WHERE path = ?`, task.Folder.Path)
 
 	logging.GlobalLogger.LogMessage("info", "Traversal success logged to DB", map[string]any{
 		"path":       task.Folder.Path,
@@ -217,7 +210,7 @@ func (tw *TraverserWorker) LogTraversalFailure(task *Task, errorMsg string) {
 		table = "destination_nodes"
 	}
 
-	tw.DB.QueueWrite(table, `UPDATE `+table+` SET traversal_status = 'failed', traversal_attempts = traversal_attempts + 1 WHERE path = ?`, task.Folder.Path)
+	tw.DB.QueueWrite(table, `UPDATE `+table+` SET traversal_status = 'failed', traversal_attempts = traversal_attempts + 1, last_error = ? WHERE path = ?`, errorMsg, task.Folder.Path)
 
 	logging.GlobalLogger.LogMessage("info", "Traversal failure logged to DB", map[string]any{
 		"workerID": tw.ID,

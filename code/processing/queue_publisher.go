@@ -155,7 +155,7 @@ func (qp *QueuePublisher) PublishTasks(queueName string) {
 	qp.Mutex.Unlock()
 
 	tasks := qp.FetchTasksFromDB(table, queue.Type, currentLevel, lastPath, queueName)
-
+	
 	if len(tasks) <= 0 {
 		if qp.checkTraversalComplete(queueName, len(tasks)) {
 			if ch, ok := qp.TraversalCompleteSignals[queueName]; ok {
@@ -233,7 +233,7 @@ func (qp *QueuePublisher) checkTraversalComplete(queueName string, queryResultSi
 		"queryResultSize": queryResultSize,
 		"queriesPerPhase": qp.QueriesPerPhase[queueName],
 	})
-	if queryResultSize == 0 && qp.QueriesPerPhase[queueName] <= 1 {
+	if queryResultSize == 0 && qp.QueriesPerPhase[queueName] <= 1 && qp.QueueLevels[queueName] != 0 {
 		logging.GlobalLogger.LogMessage("info", "Traversal complete — all phases exhausted", map[string]any{
 			"queue": queueName,
 		})
@@ -259,7 +259,7 @@ func (qp *QueuePublisher) startPolling(queueName string) {
 	controller = &PollingController{
 		IsPolling:  true,
 		CancelFunc: cancel,
-		Interval:   2 * time.Second,
+		Interval:   100 * time.Millisecond,
 	}
 	controller.Mutex = sync.Mutex{}
 	qp.PollingControllers[queueName] = controller
@@ -442,6 +442,17 @@ func (qp *QueuePublisher) runTaskQuery(table, query string, params []any, curren
 			}
 		}
 	}
+
+	// Force a flush to the WQ of the table
+	wq := qp.DB.GetWriteQueue(table)
+	if wq != nil {
+		wq.FlushTable(table)
+	} else {
+		logging.GlobalLogger.LogMessage("error", "WriteQueue not found", map[string]any{
+			"table": table,
+		})
+	}
+
 	return tasks
 }
 
