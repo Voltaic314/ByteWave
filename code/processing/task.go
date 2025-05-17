@@ -25,11 +25,6 @@ type Task struct {
 }
 
 func NewTraversalTask(id string, folder *filesystem.Folder, parentTaskID *string) (*Task, error) {
-	logging.GlobalLogger.LogMessage("info", "Creating new traversal task", map[string]any{
-		"taskID":     id,
-		"folderPath": folder.Path,
-		"hasParent":  parentTaskID != nil,
-	})
 
 	// Perform basic validation
 	if folder.Path == "" {
@@ -48,10 +43,6 @@ func NewTraversalTask(id string, folder *filesystem.Folder, parentTaskID *string
 		Locked:       false,
 	}
 
-	logging.GlobalLogger.LogMessage("info", "Traversal task created successfully", map[string]any{
-		"taskID":     id,
-		"folderPath": folder.Path,
-	})
 	return task, nil
 }
 

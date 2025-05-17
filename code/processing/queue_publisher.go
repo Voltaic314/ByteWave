@@ -3,7 +3,6 @@ package processing
 import (
 	"context"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -72,6 +71,21 @@ func NewQueuePublisher(db *db.DB, retryThreshold, batchSize int) *QueuePublisher
 		QueriesPerPhase:          make(map[string]int), // queueName -> queryCount
 		TraversalCompleteSignals: make(map[string]chan string),
 		ScanModes:                make(map[string]scanMode),
+	}
+}
+
+func (qp *QueuePublisher) FlushTable(table string) {
+	qp.Mutex.Lock()
+	defer qp.Mutex.Unlock()
+
+	wq := qp.DB.GetWriteQueue(table)
+
+	if  wq != nil {
+		wq.FlushTable(table)
+	} else {
+		logging.GlobalLogger.LogMessage("error", "WriteQueue not found", map[string]any{
+			"table": table,
+		})
 	}
 }
 
@@ -153,6 +167,10 @@ func (qp *QueuePublisher) PublishTasks(queueName string) {
 		lastPath = qp.LastPathCursors[queueName]
 	}
 	qp.Mutex.Unlock()
+
+	// force a flush in the WQ before trying to fetch anything
+	// TODO: This should be done in the DB layer probably, not here. But I'll fix it later.
+	qp.FlushTable(table)
 
 	tasks := qp.FetchTasksFromDB(table, queue.Type, currentLevel, lastPath, queueName)
 	
@@ -297,6 +315,7 @@ func (qp *QueuePublisher) startPolling(queueName string) {
 						if ch, ok := qp.TraversalCompleteSignals[queueName]; ok {
 							ch <- queueName
 						}
+						qp.FlushTable(queueName)
 						return
 					}
 					qp.advancePhase(queueName)
@@ -424,34 +443,11 @@ func (qp *QueuePublisher) runTaskQuery(table, query string, params []any, curren
 			if err == nil {
 				tasks = append(tasks, task)
 			}
-		} else if nodeType == "file" {
-			file := &filesystem.File{
-				Name:         name,
-				Path:         normalizedPath,
-				ParentID:     parentID,
-				Identifier:   identifier,
-				LastModified: lastModified,
-				Size:         0,
-				Level:        currentLevel,
-			}
-			if strings.Contains(strings.ToLower(queueName), "traversal") {
-				task, err := NewUploadTask(normalizedPath, file, nil, &file.ParentID)
-				if err == nil {
-					tasks = append(tasks, task)
-				}
-			}
-		}
+		} 
 	}
 
 	// Force a flush to the WQ of the table
-	wq := qp.DB.GetWriteQueue(table)
-	if wq != nil {
-		wq.FlushTable(table)
-	} else {
-		logging.GlobalLogger.LogMessage("error", "WriteQueue not found", map[string]any{
-			"table": table,
-		})
-	}
+	qp.FlushTable(table)
 
 	return tasks
 }

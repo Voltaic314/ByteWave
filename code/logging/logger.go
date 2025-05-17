@@ -41,9 +41,6 @@ func (l *Logger) RegisterDB(dbInstance *db.DB) {
 	l.logWQ = writequeue.NewQueue(
 		l.batchSize,
 		l.batchDelay,
-		func(tableQueries map[string][]string, tableParams map[string][][]any) error {
-			return dbInstance.WriteBatch(tableQueries, tableParams)
-		},
 	)
 	fmt.Println("✅ Logger connected to DB and write queue activated.")
 }

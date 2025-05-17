@@ -24,20 +24,19 @@ type WriteQueueTableInterface interface {
 // NodeWriteQueueTable manages deduplicated writes by path
 type NodeWriteQueueTable struct {
 	BaseWriteQueueTable
-	queue     map[string][]writeOp // keyed by path
-	flushFunc func(table string, ops []writeOp)
+	queue map[string][]writeOp // keyed by path
+
 }
 
 // LogWriteQueueTable is used for insert-only audit log-style tables
 type LogWriteQueueTable struct {
 	BaseWriteQueueTable
-	queue     []writeOp
-	flushFunc func(table string, ops []writeOp)
+	queue []writeOp
 }
 
 // --- Constructors ---
 
-func NewNodeWriteQueueTable(name string, batchSize int, flushTimer time.Duration, flushFunc func(string, []writeOp)) *NodeWriteQueueTable {
+func NewNodeWriteQueueTable(name string, batchSize int, flushTimer time.Duration) *NodeWriteQueueTable {
 	t := &NodeWriteQueueTable{
 		BaseWriteQueueTable: BaseWriteQueueTable{
 			name:           name,
@@ -47,14 +46,13 @@ func NewNodeWriteQueueTable(name string, batchSize int, flushTimer time.Duration
 			resetTimerChan: make(chan struct{}),
 			stopChan:       make(chan struct{}),
 		},
-		queue:     make(map[string][]writeOp),
-		flushFunc: flushFunc,
+		queue: make(map[string][]writeOp),
 	}
 	go t.startFlushTimer()
 	return t
 }
 
-func NewLogWriteQueueTable(name string, batchSize int, flushTimer time.Duration, flushFunc func(string, []writeOp)) *LogWriteQueueTable {
+func NewLogWriteQueueTable(name string, batchSize int, flushTimer time.Duration) *LogWriteQueueTable {
 	t := &LogWriteQueueTable{
 		BaseWriteQueueTable: BaseWriteQueueTable{
 			name:           name,
@@ -64,8 +62,7 @@ func NewLogWriteQueueTable(name string, batchSize int, flushTimer time.Duration,
 			resetTimerChan: make(chan struct{}),
 			stopChan:       make(chan struct{}),
 		},
-		queue:     []writeOp{},
-		flushFunc: flushFunc,
+		queue: []writeOp{},
 	}
 	go t.startFlushTimer()
 	return t
@@ -80,43 +77,75 @@ func (t *NodeWriteQueueTable) Name() string {
 func (t *NodeWriteQueueTable) Add(path string, op writeOp) {
 	t.mu.Lock()
 	t.queue[path] = append(t.queue[path], op)
+	t.mu.Unlock()
 
 	if len(t.queue) >= t.batchSize {
-		snapshot := t.drainBatch()
-		t.mu.Unlock()
-		t.flushFunc(t.name, snapshot)
-		return
+		t.Flush()
 	}
-	t.mu.Unlock()
 }
 
-func (t *NodeWriteQueueTable) Flush() {
+func (t *NodeWriteQueueTable) Flush() []Batch {
 	t.mu.Lock()
-	snapshot := t.drainBatch()
+	if len(t.queue) == 0 {
+		t.mu.Unlock()
+		return nil
+	}
+	// snapshot the keys
+	keys := make([]string, 0, len(t.queue))
+	for p := range t.queue {
+		keys = append(keys, p)
+	}
 	t.mu.Unlock()
-	if len(snapshot) > 0 {
-		t.flushFunc(t.name, snapshot)
+
+	var all []Batch
+	// drain round-by-round
+	for {
+		round := t.drainRound(keys)
+		if len(round) == 0 {
+			break
+		}
+		all = append(all, round...)
 	}
 	select {
 	case t.resetTimerChan <- struct{}{}:
 	case <-t.stopChan:
 	default:
 	}
+	return all
 }
 
-func (t *NodeWriteQueueTable) drainBatch() []writeOp {
-	result := make([]writeOp, 0)
-	for path, ops := range t.queue {
-		if len(ops) > 0 {
-			result = append(result, ops[0])
-			t.queue[path] = ops[1:]
-			if len(t.queue[path]) == 0 {
-				delete(t.queue, path)
-			}
+// drainRound pops exactly one op per path, groups by opType,
+// and returns a slice of Batch in arbitrary opType order.
+func (t *NodeWriteQueueTable) drainRound(keys []string) []Batch {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	byType := make(map[string][]writeOp)
+	for _, p := range keys {
+		ops, ok := t.queue[p]
+		if !ok || len(ops) == 0 {
+			continue
+		}
+		first := ops[0]
+		byType[first.opType] = append(byType[first.opType], first)
+		t.queue[p] = ops[1:]
+		if len(t.queue[p]) == 0 {
+			delete(t.queue, p)
 		}
 	}
+
 	t.lastFlushed = time.Now()
-	return result
+
+	// build Batch slices
+	out := make([]Batch, 0, len(byType))
+	for typ, ops := range byType {
+		out = append(out, Batch{
+			Table:  t.name,
+			OpType: typ,
+			Ops:    ops,
+		})
+	}
+	return out
 }
 
 func (t *NodeWriteQueueTable) startFlushTimer() {
@@ -144,37 +173,39 @@ func (t *LogWriteQueueTable) Name() string {
 	return t.name
 }
 
-func (t *LogWriteQueueTable) Add(_ string, op writeOp) {
+func (t *LogWriteQueueTable) Add(_ string, op writeOp) []Batch {
 	t.mu.Lock()
 	t.queue = append(t.queue, op)
 
 	if len(t.queue) >= t.batchSize {
-		snapshot := t.queue
-		t.queue = nil
-		t.lastFlushed = time.Now()
 		t.mu.Unlock()
-		t.flushFunc(t.name, snapshot)
-		return
+		batches := t.Flush()
+		return batches
 	}
 	t.mu.Unlock()
+	return []Batch{}
 }
 
-func (t *LogWriteQueueTable) Flush() {
+func (t *LogWriteQueueTable) Flush() []Batch {
 	t.mu.Lock()
-	snapshot := t.queue
+	batchOps := t.queue
 	t.queue = nil
-	t.lastFlushed = time.Now()
 	t.mu.Unlock()
 
-	if len(snapshot) > 0 {
-		t.flushFunc(t.name, snapshot)
+	if len(batchOps) == 0 {
+		return nil
 	}
-
+	t.lastFlushed = time.Now()
 	select {
 	case t.resetTimerChan <- struct{}{}:
 	case <-t.stopChan:
 	default:
 	}
+	return []Batch{{
+		Table:  t.name,
+		OpType: "insert", // logs are always inserts
+		Ops:    batchOps,
+	}}
 }
 
 func (t *LogWriteQueueTable) startFlushTimer() {
