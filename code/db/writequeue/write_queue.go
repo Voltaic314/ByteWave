@@ -4,34 +4,14 @@ import (
 	"context"
 	"sync"
 	"time"
+
+	"github.com/Voltaic314/ByteWave/code/types/db"
 )
-
-// writeOp represents a queued SQL operation.
-type writeOp struct {
-	Path   string
-	Query  string
-	Params []any
-	opType string // "insert", "update", "delete"
-}
-
-// Batch is one multi-op group, in the exact order you should execute them.
-type Batch struct {
-	Table  string
-	OpType string
-	Ops    []writeOp
-}
-
-type Table interface {
-	Add(path string, op writeOp)
-	Flush() []Batch // returns all batches ready to write
-	StopTimer()
-	Name() string
-}
 
 // WriteQueue manages multiple WriteQueueTable instances (one per table)
 type WriteQueue struct {
 	mu         sync.Mutex
-	tables     map[string]Table
+	tables     map[string]db.Table
 	batchSize  int
 	flushTimer time.Duration
 	ctx        context.Context
@@ -43,7 +23,7 @@ func NewQueue(batchSize int, flushTimer time.Duration) *WriteQueue {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &WriteQueue{
-		tables:     make(map[string]Table),
+		tables:     make(map[string]db.Table),
 		batchSize:  batchSize,
 		flushTimer: flushTimer,
 		ctx:        ctx,
@@ -65,7 +45,7 @@ func (wq *WriteQueue) Stop() {
 // AddWriteOperation queues a new operation and returns any ready-to-write batches.
 func (wq *WriteQueue) AddWriteOperation(
 	tableName, _, query string, params []any, opType string,
-) []Batch {
+) []db.Batch {
 	return wq.AddWriteOperationWithPath(tableName, "", query, params, opType)
 }
 
@@ -74,7 +54,7 @@ func (wq *WriteQueue) AddWriteOperationWithPath(
 	tableName, path, query string,
 	params []any,
 	opType string,
-) []Batch {
+) []db.Batch {
 	wq.mu.Lock()
 	tbl, exists := wq.tables[tableName]
 	if !exists {
@@ -87,12 +67,12 @@ func (wq *WriteQueue) AddWriteOperationWithPath(
 	}
 	wq.mu.Unlock()
 
-	tbl.Add(path, writeOp{Path: path, Query: query, Params: params, opType: opType})
-	return wq.FlushTable(tableName)
+	tbl.Add(path, db.WriteOp{Path: path, Query: query, Params: params, OpType: opType})
+	return tbl.Flush() // This will now only flush if ready
 }
 
 // FlushTable manually flushes a table's queue and returns its batches.
-func (wq *WriteQueue) FlushTable(tableName string) []Batch {
+func (wq *WriteQueue) FlushTable(tableName string) []db.Batch {
 	wq.mu.Lock()
 	tbl, exists := wq.tables[tableName]
 	wq.mu.Unlock()
@@ -110,7 +90,7 @@ func (wq *WriteQueue) FlushTables(tables []string) {
 }
 
 // FlushAll flushes every table and returns a map from table name → its ordered Batches.
-func (wq *WriteQueue) FlushAll() map[string][]Batch {
+func (wq *WriteQueue) FlushAll() map[string][]db.Batch {
 	wq.mu.Lock()
 	names := make([]string, 0, len(wq.tables))
 	for name := range wq.tables {
@@ -118,7 +98,7 @@ func (wq *WriteQueue) FlushAll() map[string][]Batch {
 	}
 	wq.mu.Unlock()
 
-	result := make(map[string][]Batch, len(names))
+	result := make(map[string][]db.Batch, len(names))
 	for _, name := range names {
 		batches := wq.FlushTable(name)
 		if len(batches) > 0 {

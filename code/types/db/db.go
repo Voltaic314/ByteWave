@@ -2,7 +2,10 @@
 // This package contains types used for database operations and data structures.
 package db
 
-import "time"
+import (
+	"sync"
+	"time"
+)
 
 // DB represents the main database connection and configuration
 type DB struct {
@@ -37,13 +40,15 @@ type Table interface {
 
 // BaseWriteQueueTable provides shared fields for write queue tables
 type BaseWriteQueueTable struct {
-	Mu             interface{} // sync.Mutex
-	Name           string
+	Mu             *sync.Mutex
+	TableName      string
 	LastFlushed    time.Time
 	BatchSize      int
 	FlushTimer     time.Duration
 	ResetTimerChan chan struct{}
 	StopChan       chan struct{}
+	ReadyToWrite   bool // indicates if queue is ready to be flushed
+	IsWriting      bool // prevents concurrent flushes
 }
 
 // WriteQueueTableInterface defines methods for write queue tables
