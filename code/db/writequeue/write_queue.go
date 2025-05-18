@@ -64,7 +64,7 @@ func (wq *WriteQueue) Stop() {
 
 // AddWriteOperation queues a new operation and returns any ready-to-write batches.
 func (wq *WriteQueue) AddWriteOperation(
-	tableName, query string, params []any, opType string,
+	tableName, _, query string, params []any, opType string,
 ) []Batch {
 	return wq.AddWriteOperationWithPath(tableName, "", query, params, opType)
 }

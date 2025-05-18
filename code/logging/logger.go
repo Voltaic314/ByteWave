@@ -103,7 +103,7 @@ func (l *Logger) LogMessage(level, message string, details map[string]any) {
 
 func (l *Logger) enqueueLog(query string, params []any) {
 	if l.logWQ != nil {
-		l.logWQ.AddWriteOperation("audit_log", "", query, params)
+		l.logWQ.AddWriteOperation("audit_log", "", query, params, "insert")
 	}
 }
 

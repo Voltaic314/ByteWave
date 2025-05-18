@@ -173,17 +173,16 @@ func (t *LogWriteQueueTable) Name() string {
 	return t.name
 }
 
-func (t *LogWriteQueueTable) Add(_ string, op writeOp) []Batch {
+func (t *LogWriteQueueTable) Add(_ string, op writeOp) {
 	t.mu.Lock()
 	t.queue = append(t.queue, op)
 
 	if len(t.queue) >= t.batchSize {
 		t.mu.Unlock()
-		batches := t.Flush()
-		return batches
+		t.Flush()
+		return
 	}
 	t.mu.Unlock()
-	return []Batch{}
 }
 
 func (t *LogWriteQueueTable) Flush() []Batch {
