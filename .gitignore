@@ -83,3 +83,4 @@ __pycache__/
 # ignore the .vscode folder
 .vscode/
 tests/traversal_tests/test_src_traversal.db.wal
+set_up_env.ps1

@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/Voltaic314/ByteWave/code/cli"
+	"github.com/Voltaic314/ByteWave/code/db"
 	"github.com/Voltaic314/ByteWave/code/logging"
 	"github.com/Voltaic314/ByteWave/code/processing"
 )
@@ -42,7 +43,7 @@ func main() {
 		return
 	}
 
-	conductor.DB.InitWriteQueueTable("audit_log", 10, 5*time.Second)
+	conductor.DB.InitWriteQueue("audit_log", db.LogWriteQueue, 10, 5*time.Second)
 	conductor.StartTraversal()
 
 	// Keep main alive so everything can run

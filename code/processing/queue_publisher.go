@@ -2,6 +2,7 @@ package processing
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"sync"
 	"time"
@@ -80,8 +81,13 @@ func (qp *QueuePublisher) FlushTable(table string) {
 
 	wq := qp.DB.GetWriteQueue(table)
 
-	if  wq != nil {
-		wq.FlushTable(table)
+	if wq != nil {
+		fmt.Println("Flushing table", table)
+		batches := wq.Flush()
+		if len(batches) > 0 {
+			fmt.Println("Executing", len(batches), "batches")
+			qp.DB.ExecuteBatchCommands(batches)
+		}
 	} else {
 		logging.GlobalLogger.LogMessage("error", "WriteQueue not found", map[string]any{
 			"table": table,
@@ -173,7 +179,7 @@ func (qp *QueuePublisher) PublishTasks(queueName string) {
 	qp.FlushTable(table)
 
 	tasks := qp.FetchTasksFromDB(table, queue.Type, currentLevel, lastPath, queueName)
-	
+
 	if len(tasks) <= 0 {
 		if qp.checkTraversalComplete(queueName, len(tasks)) {
 			if ch, ok := qp.TraversalCompleteSignals[queueName]; ok {
@@ -443,7 +449,7 @@ func (qp *QueuePublisher) runTaskQuery(table, query string, params []any, curren
 			if err == nil {
 				tasks = append(tasks, task)
 			}
-		} 
+		}
 	}
 
 	// Force a flush to the WQ of the table

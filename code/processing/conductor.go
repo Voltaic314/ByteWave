@@ -43,7 +43,7 @@ func (c *Conductor) StartTraversal() {
 	c.SetupQueue(name, TraversalQueueType, 0, "src", 1000)
 	c.QP.TraversalCompleteSignals[name] = make(chan string, 1)
 
-	c.DB.InitWriteQueueTable("source_nodes", 10, 5*time.Second)
+	c.DB.InitWriteQueue("source_nodes", db.NodeWriteQueue, 10, 5*time.Second)
 
 	var os_svc services.BaseServiceInterface = services.NewOSService()
 	pv_obj := pv.NewPathValidator()

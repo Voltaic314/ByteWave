@@ -8,15 +8,14 @@ import (
 	"os"
 	"time"
 
-	"github.com/Voltaic314/ByteWave/code/db/writequeue"
 	"github.com/Voltaic314/ByteWave/code/db"
-	"github.com/Voltaic314/ByteWave/code/logging/types"
+	"github.com/Voltaic314/ByteWave/code/types/logging"
 )
 
 type Logger struct {
 	logLevel   string
 	udpConn    *net.UDPConn
-	logWQ      *writequeue.WriteQueue
+	logWQ      *db.WriteQueue
 	batchSize  int
 	batchDelay time.Duration
 	ctx        context.Context
@@ -38,7 +37,9 @@ func InitLogger(configPath string) {
 }
 
 func (l *Logger) RegisterDB(dbInstance *db.DB) {
-	l.logWQ = writequeue.NewQueue(
+	l.logWQ = db.NewWriteQueue(
+		"audit_log",
+		db.LogWriteQueue,
 		l.batchSize,
 		l.batchDelay,
 	)
@@ -77,7 +78,7 @@ func (l *Logger) LogMessage(level, message string, details map[string]any) {
 	if !l.shouldLog(level) {
 		return
 	}
-	entry := types.LogEntry{
+	entry := logging.LogEntry{
 		Timestamp: time.Now(),
 		Level:     level,
 		Message:   message,
@@ -103,7 +104,12 @@ func (l *Logger) LogMessage(level, message string, details map[string]any) {
 
 func (l *Logger) enqueueLog(query string, params []any) {
 	if l.logWQ != nil {
-		l.logWQ.AddWriteOperation("audit_log", "", query, params, "insert")
+		l.logWQ.Add("", db.WriteOp{
+			Path:   "",
+			Query:  query,
+			Params: params,
+			OpType: "insert",
+		})
 	}
 }
 
@@ -114,7 +120,7 @@ func (l *Logger) shouldLog(level string) bool {
 
 func (l *Logger) Stop() {
 	if l.logWQ != nil {
-		l.logWQ.FlushAll()
+		l.logWQ.Flush()
 		l.logWQ.Stop()
 	}
 	if l.udpConn != nil {

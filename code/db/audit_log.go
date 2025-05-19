@@ -5,7 +5,7 @@ import (
 	"log"
 	"time"
 
-	"github.com/Voltaic314/ByteWave/code/logging/types" // Import the types package for LogEntry
+	"github.com/Voltaic314/ByteWave/code/types/logging" // Import the types package for LogEntry
 )
 
 // AuditLogTable defines the schema for the "audit_log" table.
@@ -34,7 +34,7 @@ func (t AuditLogTable) Init(db *DB) error {
 }
 
 // WriteLog inserts a log entry into the audit log table asynchronously.
-func (db *DB) WriteLog(entry types.LogEntry) {
+func (db *DB) WriteLog(entry logging.LogEntry) {
 	go func() {
 		query := `
 			INSERT INTO audit_log (timestamp, level, details, message)
@@ -46,7 +46,7 @@ func (db *DB) WriteLog(entry types.LogEntry) {
 
 // LogError logs an error with details and a retry count asynchronously.
 func (db *DB) LogError(errorType, message string, details *string, retryCount int) {
-	go db.WriteLog(types.LogEntry{
+	go db.WriteLog(logging.LogEntry{
 		Level:    "error",
 		Details: func() map[string]any {
 			if details != nil {
@@ -60,7 +60,7 @@ func (db *DB) LogError(errorType, message string, details *string, retryCount in
 
 // LogWarning logs a warning message with optional details asynchronously.
 func (db *DB) LogWarning(message string, details *string) {
-	go db.WriteLog(types.LogEntry{
+	go db.WriteLog(logging.LogEntry{
 		Level:   "warning",
 		Details: func() map[string]any {
 			if details != nil {
@@ -74,7 +74,7 @@ func (db *DB) LogWarning(message string, details *string) {
 
 // LogInfo logs an informational message asynchronously.
 func (db *DB) LogInfo(message string) {
-	go db.WriteLog(types.LogEntry{
+	go db.WriteLog(logging.LogEntry{
 		Level:   "info",
 		Message: message,
 	})
