@@ -47,7 +47,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
     -- Use a UUID for the primary key
     timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     level VARCHAR NOT NULL CHECK(level IN ('trace', 'debug', 'info', 'warning', 'error', 'critical')),
-    details JSON DEFAULT NULL,
+    details VARCHAR DEFAULT NULL,
     message VARCHAR NOT NULL
 );
 """

@@ -3,7 +3,6 @@ package db
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"log"
 	"time"
 
@@ -41,25 +40,29 @@ func NewDB(dbPath string) (*DB, error) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	return &DB{
+	db := &DB{
 		conn:   conn,
 		ctx:    ctx,
 		cancel: cancel,
 		wqMap:  make(map[string]*WriteQueue),
-	}, nil
+	}
+
+	return db, nil
 }
 
 // InitWriteQueue initializes a write queue for a specific table.
 func (db *DB) InitWriteQueue(table string, queueType WriteQueueType, batchSize int, flushInterval time.Duration) {
 	wq := NewWriteQueue(table, queueType, batchSize, flushInterval)
 	db.wqMap[table] = wq
+	// Start a listener for this new queue
+	go db.startQueueListener(table, wq)
 }
 
 // Close shuts down all write queues and DB connection.
 func (db *DB) Close() {
 	for tableName, wq := range db.wqMap {
 		// 1. Get all pending batches for this table
-		batches := wq.Flush()
+		batches := wq.Flush(true)
 		// 2. Execute each batch
 		for _, b := range batches {
 			// build queries + params
@@ -76,8 +79,6 @@ func (db *DB) Close() {
 				log.Printf("Error flushing %s on Close(): %v", tableName, err)
 			}
 		}
-		// finally stop its timer
-		wq.Stop()
 	}
 
 	db.cancel()
@@ -89,7 +90,9 @@ func (db *DB) Close() {
 // Query runs a read query after flushing pending writes for the given table.
 func (db *DB) Query(table string, query string, params ...any) (*sql.Rows, error) {
 	if wq, ok := db.wqMap[table]; ok {
-		batches := wq.Flush()
+
+		// if we want to read from a table that has pending writes, we need to flush them first to make sure we query all of the data
+		batches := wq.Flush(true)
 		for _, b := range batches {
 			// same execution logic as in Close()
 			qs := make([]string, len(b.Ops))
@@ -199,7 +202,6 @@ func batchExecute(conn *sql.DB, tableQueries map[string][]string, tableParams ma
 	var failedQueries []string
 
 	for table, queries := range tableQueries {
-		fmt.Printf("Executing %d queries for table %s. First query: %s\n", len(queries), table, queries[0])
 		params := tableParams[table]
 		for i, query := range queries {
 			_, err := tx.Exec(query, params[i]...)
@@ -231,6 +233,45 @@ func (db *DB) ExecuteBatchCommands(batches []Batch) {
 
 		if err := db.WriteBatch(tableQueries, tableParams); err != nil {
 			log.Printf("Error executing batch for table %s: %v", b.Table, err)
+		}
+	}
+}
+
+func (db *DB) startQueueListener(tableName string, queue *WriteQueue) {
+	timer := time.NewTimer(queue.GetFlushInterval())
+	defer timer.Stop()
+
+	for {
+		select {
+		case <-timer.C:
+			db.processQueueBatch(tableName, queue)
+			timer.Reset(queue.GetFlushInterval())
+		case <-db.ctx.Done():
+			return
+		}
+	}
+}
+
+func (db *DB) processQueueBatch(tableName string, queue *WriteQueue) {
+	if !queue.IsReadyToWrite() {
+		return
+	}
+
+	batches := queue.Flush()
+	if len(batches) == 0 {
+		return
+	}
+
+	for _, b := range batches {
+		qs := make([]string, len(b.Ops))
+		ps := make([][]any, len(b.Ops))
+		for i, op := range b.Ops {
+			qs[i] = op.Query
+			ps[i] = op.Params
+		}
+
+		if err := batchExecute(db.conn, map[string][]string{tableName: qs}, map[string][][]any{tableName: ps}); err != nil {
+			log.Printf("Error executing batch for table %s: %v", tableName, err)
 		}
 	}
 }

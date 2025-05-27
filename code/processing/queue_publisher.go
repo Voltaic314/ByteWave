@@ -2,7 +2,6 @@ package processing
 
 import (
 	"context"
-	"fmt"
 	"path/filepath"
 	"sync"
 	"time"
@@ -82,10 +81,8 @@ func (qp *QueuePublisher) FlushTable(table string) {
 	wq := qp.DB.GetWriteQueue(table)
 
 	if wq != nil {
-		fmt.Println("Flushing table", table)
-		batches := wq.Flush()
+		batches := wq.Flush(true)
 		if len(batches) > 0 {
-			fmt.Println("Executing", len(batches), "batches")
 			qp.DB.ExecuteBatchCommands(batches)
 		}
 	} else {
@@ -451,9 +448,6 @@ func (qp *QueuePublisher) runTaskQuery(table, query string, params []any, curren
 			}
 		}
 	}
-
-	// Force a flush to the WQ of the table
-	qp.FlushTable(table)
 
 	return tasks
 }

@@ -37,12 +37,11 @@ func InitLogger(configPath string) {
 }
 
 func (l *Logger) RegisterDB(dbInstance *db.DB) {
-	l.logWQ = db.NewWriteQueue(
-		"audit_log",
-		db.LogWriteQueue,
-		l.batchSize,
-		l.batchDelay,
-	)
+	l.logWQ = dbInstance.GetWriteQueue("audit_log")
+	if l.logWQ == nil {
+		dbInstance.InitWriteQueue("audit_log", db.LogWriteQueue, l.batchSize, l.batchDelay)
+		l.logWQ = dbInstance.GetWriteQueue("audit_log")
+	}
 	fmt.Println("✅ Logger connected to DB and write queue activated.")
 }
 
@@ -97,7 +96,7 @@ func (l *Logger) LogMessage(level, message string, details map[string]any) {
 	if l.logWQ != nil {
 		detailsJSON, _ := json.Marshal(details)
 		params := []any{entry.Timestamp, level, string(detailsJSON), message}
-		query := `INSERT OR IGNORE INTO audit_log (timestamp, level, details, message) VALUES (?, ?, ?, ?)`
+		query := `INSERT INTO audit_log (timestamp, level, details, message) VALUES (?, ?, ?, ?)`
 		l.enqueueLog(query, params)
 	}
 }
@@ -120,8 +119,7 @@ func (l *Logger) shouldLog(level string) bool {
 
 func (l *Logger) Stop() {
 	if l.logWQ != nil {
-		l.logWQ.Flush()
-		l.logWQ.Stop()
+		l.logWQ.Flush(true)
 	}
 	if l.udpConn != nil {
 		l.udpConn.Close()

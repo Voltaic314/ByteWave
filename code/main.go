@@ -43,7 +43,13 @@ func main() {
 		return
 	}
 
-	conductor.DB.InitWriteQueue("audit_log", db.LogWriteQueue, 10, 5*time.Second)
+	// Initialize write queues before starting traversal
+	conductor.DB.InitWriteQueue("audit_log", db.LogWriteQueue, 50, 5*time.Second)
+	conductor.DB.InitWriteQueue("source_nodes", db.NodeWriteQueue, 100, 5*time.Second)
+
+	// Register the logger with the DB
+	logging.GlobalLogger.RegisterDB(conductor.DB)
+
 	conductor.StartTraversal()
 
 	// Keep main alive so everything can run

@@ -15,34 +15,28 @@ const (
 
 // WriteQueue manages write operations for a single table
 type WriteQueue struct {
-	mu             sync.Mutex
-	tableName      string
-	queueType      WriteQueueType
-	queue          map[string][]WriteOp // keyed by path for node tables
-	logQueue       []WriteOp            // flat list for log tables
-	lastFlushed    time.Time
-	batchSize      int
-	flushTimer     time.Duration
-	resetTimerChan chan struct{}
-	stopChan       chan struct{}
-	readyToWrite   bool // indicates if queue is ready to be flushed
-	isWriting      bool // prevents concurrent flushes
+	mu           sync.Mutex
+	tableName    string
+	queueType    WriteQueueType
+	queue        map[string][]WriteOp // keyed by path for node tables
+	logQueue     []WriteOp            // flat list for log tables
+	lastFlushed  time.Time
+	batchSize    int
+	flushTimer   time.Duration // now just used to store the interval
+	readyToWrite bool          // indicates if queue is ready to be flushed
+	isWriting    bool          // prevents concurrent flushes
 }
 
 // NewWriteQueue creates a new write queue for a specific table
 func NewWriteQueue(tableName string, queueType WriteQueueType, batchSize int, flushTimer time.Duration) *WriteQueue {
-	wq := &WriteQueue{
-		tableName:      tableName,
-		queueType:      queueType,
-		queue:          make(map[string][]WriteOp),
-		lastFlushed:    time.Now(),
-		batchSize:      batchSize,
-		flushTimer:     flushTimer,
-		resetTimerChan: make(chan struct{}),
-		stopChan:       make(chan struct{}),
+	return &WriteQueue{
+		tableName:   tableName,
+		queueType:   queueType,
+		queue:       make(map[string][]WriteOp),
+		lastFlushed: time.Now(),
+		batchSize:   batchSize,
+		flushTimer:  flushTimer,
 	}
-	go wq.startFlushTimer()
-	return wq
 }
 
 // Add queues a new operation
@@ -63,15 +57,41 @@ func (wq *WriteQueue) Add(path string, op WriteOp) {
 	}
 }
 
-// Flush processes all queued operations and returns the batches
-func (wq *WriteQueue) Flush() []Batch {
+// IsReadyToWrite returns whether the queue is ready to be flushed
+func (wq *WriteQueue) IsReadyToWrite() bool {
 	wq.mu.Lock()
-	if !wq.readyToWrite || wq.isWriting {
+	defer wq.mu.Unlock()
+	return wq.readyToWrite
+}
+
+// GetFlushInterval returns the current flush interval
+func (wq *WriteQueue) GetFlushInterval() time.Duration {
+	return wq.flushTimer
+}
+
+// SetFlushInterval allows changing the flush interval
+func (wq *WriteQueue) SetFlushInterval(interval time.Duration) {
+	wq.mu.Lock()
+	wq.flushTimer = interval
+	wq.mu.Unlock()
+}
+
+// Flush processes all queued operations and returns the batches
+func (wq *WriteQueue) Flush(force ...bool) []Batch {
+	wq.mu.Lock()
+	// If we're already writing, don't flush
+	if wq.isWriting {
+		wq.mu.Unlock()
+		return nil
+	}
+	// If we're not forcing a flush and there are not enough operations to write, don't flush
+	shouldForce := len(force) > 0 && force[0]
+	if !shouldForce && !wq.readyToWrite {
 		wq.mu.Unlock()
 		return nil
 	}
 	wq.isWriting = true
-	wq.readyToWrite = false
+	wq.readyToWrite = false // Reset ready state after flush
 	wq.mu.Unlock()
 
 	if wq.queueType == LogWriteQueue {
@@ -104,7 +124,8 @@ func (wq *WriteQueue) flushLogQueue() []Batch {
 	wq.isWriting = false
 	wq.mu.Unlock()
 
-	return []Batch{batch}
+	batches := []Batch{batch}
+	return batches
 }
 
 func (wq *WriteQueue) flushNodeQueue() []Batch {
@@ -131,15 +152,10 @@ func (wq *WriteQueue) flushNodeQueue() []Batch {
 		all = append(all, round...)
 	}
 
-	select {
-	case wq.resetTimerChan <- struct{}{}:
-	case <-wq.stopChan:
-	default:
-	}
-
 	wq.mu.Lock()
 	wq.isWriting = false
 	wq.mu.Unlock()
+
 	return all
 }
 
@@ -174,32 +190,4 @@ func (wq *WriteQueue) drainRound(keys []string) []Batch {
 		})
 	}
 	return out
-}
-
-func (wq *WriteQueue) startFlushTimer() {
-	timer := time.NewTimer(wq.flushTimer)
-	for {
-		select {
-		case <-timer.C:
-			wq.mu.Lock()
-			wq.readyToWrite = true
-			wq.mu.Unlock()
-			timer.Reset(wq.flushTimer)
-		case <-wq.resetTimerChan:
-			if !timer.Stop() {
-				<-timer.C
-			}
-			timer.Reset(wq.flushTimer)
-		case <-wq.stopChan:
-			if !timer.Stop() {
-				<-timer.C
-			}
-			return
-		}
-	}
-}
-
-// Stop stops the write queue and its timer
-func (wq *WriteQueue) Stop() {
-	close(wq.stopChan)
 }
