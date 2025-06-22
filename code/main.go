@@ -35,7 +35,7 @@ func main() {
 	conductor := processing.NewConductor(
 		"C:\\Users\\golde\\OneDrive\\Documents\\GitHub\\ByteWave\\tests\\traversal_tests\\test_src_traversal.db",
 		3,  // retry threshold
-		10, // batch size
+		1000, // batch size
 	)
 
 	if conductor == nil {

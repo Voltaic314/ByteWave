@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"time"
+	"github.com/google/uuid"
 
 	"github.com/Voltaic314/ByteWave/code/db"
 	"github.com/Voltaic314/ByteWave/code/types/logging"
@@ -95,8 +96,8 @@ func (l *Logger) LogMessage(level, message string, details map[string]any) {
 	// Queue to DB
 	if l.logWQ != nil {
 		detailsJSON, _ := json.Marshal(details)
-		params := []any{entry.Timestamp, level, string(detailsJSON), message}
-		query := `INSERT INTO audit_log (timestamp, level, details, message) VALUES (?, ?, ?, ?)`
+		params := []any{uuid.New().String(), entry.Timestamp, level, string(detailsJSON), message}
+		query := `INSERT INTO audit_log (id, timestamp, level, details, message) VALUES (?, ?, ?, ?, ?)`
 		l.enqueueLog(query, params)
 	}
 }
