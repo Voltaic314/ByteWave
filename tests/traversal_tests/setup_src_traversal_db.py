@@ -47,6 +47,12 @@ CREATE TABLE IF NOT EXISTS audit_log (
     -- Use a UUID for the primary key
     timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     level VARCHAR NOT NULL CHECK(level IN ('trace', 'debug', 'info', 'warning', 'error', 'critical')),
+    entity VARCHAR DEFAULT NULL,
+    -- Entity type: 'worker', 'user', 'system', 'QP', 'Conductor', 'API', 'cloud storage service', etc.
+    entity_id VARCHAR DEFAULT NULL,
+    -- Unique identifier for the entity (worker ID, service ID, etc.)
+    path VARCHAR DEFAULT NULL,
+    -- Optional path for task-related logs
     details VARCHAR DEFAULT NULL,
     message VARCHAR NOT NULL
 );

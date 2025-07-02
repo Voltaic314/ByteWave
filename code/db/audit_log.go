@@ -3,7 +3,6 @@ package db
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/Voltaic314/ByteWave/code/types/logging" // Import the types package for LogEntry
@@ -20,10 +19,16 @@ func (t AuditLogTable) Name() string {
 // Schema returns the DuckDB-compatible schema definition.
 func (t AuditLogTable) Schema() string {
 	return `
-		id VAR CHAR PRIMARY KEY, 
+		id VARCHAR PRIMARY KEY, 
 		-- Use a UUID for the primary key
 		timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 		level VARCHAR NOT NULL CHECK(level IN ('trace', 'debug', 'info', 'warning', 'error', 'critical')),
+		entity VARCHAR DEFAULT NULL,
+		-- Entity type: 'worker', 'user', 'system', 'QP', 'Conductor', 'API', 'cloud storage service', etc.
+		entity_id VARCHAR DEFAULT NULL,
+		-- Unique identifier for the entity (worker ID, service ID, etc.)
+		path VARCHAR DEFAULT NULL,
+		-- Optional path for task-related logs
 		details VARCHAR DEFAULT NULL,
 		message VARCHAR NOT NULL
 	`
@@ -84,7 +89,6 @@ func (db *DB) WriteLog(entry logging.LogEntry) {
 		// Sanitize the details JSON
 		detailsJSON, err := sanitizeJSON(entry.Details)
 		if err != nil {
-			log.Printf("Error sanitizing log details: %v", err)
 			detailsJSON = "null"
 		}
 
@@ -134,6 +138,5 @@ func (db *DB) CleanOldLogs(retentionPeriod time.Duration) {
 		days := int(retentionPeriod.Hours() / 24)
 		query := fmt.Sprintf(`DELETE FROM audit_log WHERE timestamp < NOW() - INTERVAL '%d days'`, days)
 		db.QueueWrite("audit_log", query)
-		log.Printf("Deleted logs older than %d days", days)
 	}()
 }

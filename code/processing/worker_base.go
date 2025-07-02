@@ -26,7 +26,7 @@ type WorkerBase struct {
 
 // NewWorkerBase initializes a new WorkerBase with a unique ID.
 func NewWorkerBase(queue *TaskQueue, queueType string) *WorkerBase {
-	logging.GlobalLogger.LogMessage("info", "Creating new worker", map[string]any{
+	logging.GlobalLogger.LogSystem("info", "worker", "Creating new worker", map[string]any{
 		"queueType": queueType,
 	})
 
@@ -38,23 +38,20 @@ func NewWorkerBase(queue *TaskQueue, queueType string) *WorkerBase {
 	}
 	workerBase.ID = workerBase.GenerateID()
 
-	logging.GlobalLogger.LogMessage("info", "Worker base created", map[string]any{
-		"workerID":  workerBase.ID,
+	logging.GlobalLogger.LogWorker("info", workerBase.ID, "", "Worker base created", map[string]any{
 		"queueType": queueType,
 		"state":     workerBase.State,
 	})
-		return workerBase
-	}
-	
+	return workerBase
+}
+
 // GenerateID generates a unique identifier using UUID.
 func (wb *WorkerBase) GenerateID() string {
-	logging.GlobalLogger.LogMessage("info", "Generating worker ID using UUID", nil)
+	logging.GlobalLogger.LogSystem("info", "worker", "Generating worker ID using UUID", nil)
 
 	id := uuid.New().String()
 
-	logging.GlobalLogger.LogMessage("info", "Worker ID generated", map[string]any{
-		"workerID": id,
-	})
+	logging.GlobalLogger.LogWorker("info", id, "", "Worker ID generated", nil)
 	return id
 }
 
@@ -68,9 +65,7 @@ func (wb *WorkerBase) Run(process func(*Task) error) {
 		// })
 
 		if wb.Queue.State != QueueRunning {
-			logging.GlobalLogger.LogMessage("info", "Queue is no longer running, stopping worker", map[string]any{
-				"workerID": wb.ID,
-			})
+			logging.GlobalLogger.LogWorker("info", wb.ID, "", "Queue is no longer running, stopping worker", nil)
 			return
 		}
 
@@ -79,6 +74,8 @@ func (wb *WorkerBase) Run(process func(*Task) error) {
 		// ✅ Lockless check (fast path)
 		if wb.Queue.QueueSize() == 0 {
 			wb.State = WorkerIdle
+			// 🆕 NEW: Signal that worker is idle and may need more tasks
+			wb.Queue.SignalWorkerIdle()
 			// logging.GlobalLogger.LogMessage("info", "Queue empty, worker entering wait state", map[string]any{
 			// 	"workerID": wb.ID,
 			// 	"state":    wb.State,
@@ -90,39 +87,38 @@ func (wb *WorkerBase) Run(process func(*Task) error) {
 
 		task := wb.Queue.PopTask()
 
-		logging.GlobalLogger.LogMessage("info", "Worker popped task from queue", map[string]any{
-			"workerID":  wb.ID,
-			"task":      task,
+		logging.GlobalLogger.LogWorker("info", wb.ID, task.GetPath(), "Worker popped task from queue", map[string]any{
 			"queueType": wb.QueueType,
 		})
 
 		if task == nil {
 			wb.State = WorkerIdle
 			wb.TaskReady = true
+			// 🆕 NEW: Signal that worker is idle and may need more tasks
+			wb.Queue.SignalWorkerIdle()
 			wb.Queue.WaitForWork()
 			continue // skip sleep - just like my college days...
 		}
 
-		logging.GlobalLogger.LogMessage("info", "Worker acquired task", map[string]any{
-			"workerID": wb.ID,
-			"taskID":   task.ID,
-			"path":     task.GetPath(),
+		logging.GlobalLogger.LogWorker("info", wb.ID, task.GetPath(), "Worker acquired task", map[string]any{
+			"taskID": task.ID,
 		})
 
 		wb.State = WorkerActive
 		wb.TaskReady = false
 
 		if err := process(task); err != nil {
-			logging.GlobalLogger.LogMessage("error", "Worker task failed", map[string]any{
-				"workerID": wb.ID,
-				"taskID":   task.ID,
-				"error":    err.Error(),
+			logging.GlobalLogger.LogWorker("error", wb.ID, task.GetPath(), "Worker task failed", map[string]any{
+				"taskID": task.ID,
+				"error":  err.Error(),
 			})
 		} else {
-			logging.GlobalLogger.LogMessage("info", "Worker completed task", map[string]any{
-				"workerID": wb.ID,
-				"taskID":   task.ID,
+			logging.GlobalLogger.LogWorker("info", wb.ID, task.GetPath(), "Worker completed task", map[string]any{
+				"taskID": task.ID,
 			})
 		}
+
+		// Remove task from in-progress list (whether successful or failed)
+		wb.Queue.RemoveInProgressTask(task.ID)
 	}
 }

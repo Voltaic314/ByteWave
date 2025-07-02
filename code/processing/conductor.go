@@ -62,7 +62,7 @@ func (c *Conductor) StartTraversal() {
 	// Start QP listening loop
 	c.StartAll()
 
-	time.Sleep(100 * time.Millisecond) // Give QP a moment to initialize
+	time.Sleep(25 * time.Millisecond) // Give QP a moment to initialize
 
 	// kick start the first phase manually
 	c.QP.PhaseUpdated <- 0
@@ -167,6 +167,15 @@ func (c *Conductor) TeardownQueue(queueName string) {
 		}
 		controller.Mutex.Unlock()
 		delete(c.QP.PollingControllers, queueName)
+	}
+
+	// 🆕 NEW: Close all channels to stop goroutines
+	close(queue.IdleChan)
+	close(queue.StopChan)
+
+	// Close running low channel to stop that goroutine
+	if runningLowChan, exists := c.QP.RunningLowChans[queueName]; exists {
+		close(runningLowChan)
 	}
 
 	// Remove idle workers

@@ -3,23 +3,17 @@ package db
 import (
 	"sync"
 	"time"
-)
 
-// WriteQueueType determines how the queue handles operations
-type WriteQueueType int
-
-const (
-	NodeWriteQueue WriteQueueType = iota // For node tables with path-based batching
-	LogWriteQueue                        // For log tables with simple insert operations
+	typesdb "github.com/Voltaic314/ByteWave/code/types/db"
 )
 
 // WriteQueue manages write operations for a single table
 type WriteQueue struct {
 	mu           sync.Mutex
 	tableName    string
-	queueType    WriteQueueType
-	queue        map[string][]WriteOp // keyed by path for node tables
-	logQueue     []WriteOp            // flat list for log tables
+	queueType    typesdb.WriteQueueType
+	queue        map[string][]typesdb.WriteOp // keyed by path for node tables
+	logQueue     []typesdb.WriteOp            // flat list for log tables
 	lastFlushed  time.Time
 	batchSize    int
 	flushTimer   time.Duration // now just used to store the interval
@@ -28,11 +22,11 @@ type WriteQueue struct {
 }
 
 // NewWriteQueue creates a new write queue for a specific table
-func NewWriteQueue(tableName string, queueType WriteQueueType, batchSize int, flushTimer time.Duration) *WriteQueue {
+func NewWriteQueue(tableName string, queueType typesdb.WriteQueueType, batchSize int, flushTimer time.Duration) *WriteQueue {
 	return &WriteQueue{
 		tableName:   tableName,
 		queueType:   queueType,
-		queue:       make(map[string][]WriteOp),
+		queue:       make(map[string][]typesdb.WriteOp),
 		lastFlushed: time.Now(),
 		batchSize:   batchSize,
 		flushTimer:  flushTimer,
@@ -40,11 +34,11 @@ func NewWriteQueue(tableName string, queueType WriteQueueType, batchSize int, fl
 }
 
 // Add queues a new operation
-func (wq *WriteQueue) Add(path string, op WriteOp) {
+func (wq *WriteQueue) Add(path string, op typesdb.WriteOp) {
 	wq.mu.Lock()
 	defer wq.mu.Unlock()
 
-	if wq.queueType == LogWriteQueue {
+	if wq.queueType == typesdb.LogWriteQueue {
 		wq.logQueue = append(wq.logQueue, op)
 		if len(wq.logQueue) >= wq.batchSize {
 			wq.readyToWrite = true
@@ -77,7 +71,7 @@ func (wq *WriteQueue) SetFlushInterval(interval time.Duration) {
 }
 
 // Flush processes all queued operations and returns the batches
-func (wq *WriteQueue) Flush(force ...bool) []Batch {
+func (wq *WriteQueue) Flush(force ...bool) []typesdb.Batch {
 	wq.mu.Lock()
 	// If we're already writing, don't flush
 	if wq.isWriting {
@@ -94,13 +88,13 @@ func (wq *WriteQueue) Flush(force ...bool) []Batch {
 	wq.readyToWrite = false // Reset ready state after flush
 	wq.mu.Unlock()
 
-	if wq.queueType == LogWriteQueue {
+	if wq.queueType == typesdb.LogWriteQueue {
 		return wq.flushLogQueue()
 	}
 	return wq.flushNodeQueue()
 }
 
-func (wq *WriteQueue) flushLogQueue() []Batch {
+func (wq *WriteQueue) flushLogQueue() []typesdb.Batch {
 	wq.mu.Lock()
 	if len(wq.logQueue) == 0 {
 		wq.isWriting = false
@@ -112,10 +106,10 @@ func (wq *WriteQueue) flushLogQueue() []Batch {
 	wq.mu.Unlock()
 
 	// Create a single batch for all operations
-	batch := Batch{
+	batch := typesdb.Batch{
 		Table:  wq.tableName,
 		OpType: "insert",
-		Ops:    make([]WriteOp, len(queue)),
+		Ops:    make([]typesdb.WriteOp, len(queue)),
 	}
 	copy(batch.Ops, queue)
 
@@ -124,11 +118,11 @@ func (wq *WriteQueue) flushLogQueue() []Batch {
 	wq.isWriting = false
 	wq.mu.Unlock()
 
-	batches := []Batch{batch}
+	batches := []typesdb.Batch{batch}
 	return batches
 }
 
-func (wq *WriteQueue) flushNodeQueue() []Batch {
+func (wq *WriteQueue) flushNodeQueue() []typesdb.Batch {
 	if len(wq.queue) == 0 {
 		wq.mu.Lock()
 		wq.isWriting = false
@@ -142,7 +136,7 @@ func (wq *WriteQueue) flushNodeQueue() []Batch {
 		keys = append(keys, p)
 	}
 
-	var all []Batch
+	var all []typesdb.Batch
 	// drain round-by-round
 	for {
 		round := wq.drainRound(keys)
@@ -159,12 +153,22 @@ func (wq *WriteQueue) flushNodeQueue() []Batch {
 	return all
 }
 
-// drainRound processes one operation per path, grouped by operation type
-func (wq *WriteQueue) drainRound(keys []string) []Batch {
+/*
+drainRound processes one operation per path, grouped by operation type
+
+NOTE: This complex path-based batching logic was originally designed to prevent
+write conflicts when multiple operations could target the same path concurrently.
+With the new phase-based traversal design, each path is only written to once
+per phase, making this logic technically redundant. However, we keep it as
+defensive programming - it provides an extra safety layer and doesn't hurt
+performance too much. If you ever need to support concurrent writes to the
+same path again, this logic is already in place.
+*/
+func (wq *WriteQueue) drainRound(keys []string) []typesdb.Batch {
 	wq.mu.Lock()
 	defer wq.mu.Unlock()
 
-	byType := make(map[string][]WriteOp)
+	byType := make(map[string][]typesdb.WriteOp)
 	for _, p := range keys {
 		ops, ok := wq.queue[p]
 		if !ok || len(ops) == 0 {
@@ -181,9 +185,9 @@ func (wq *WriteQueue) drainRound(keys []string) []Batch {
 	wq.lastFlushed = time.Now()
 
 	// build Batch slices
-	out := make([]Batch, 0, len(byType))
+	out := make([]typesdb.Batch, 0, len(byType))
 	for typ, ops := range byType {
-		out = append(out, Batch{
+		out = append(out, typesdb.Batch{
 			Table:  wq.tableName,
 			OpType: typ,
 			Ops:    ops,

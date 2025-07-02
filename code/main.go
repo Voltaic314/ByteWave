@@ -5,9 +5,9 @@ import (
 	"time"
 
 	"github.com/Voltaic314/ByteWave/code/cli"
-	"github.com/Voltaic314/ByteWave/code/db"
 	"github.com/Voltaic314/ByteWave/code/logging"
 	"github.com/Voltaic314/ByteWave/code/processing"
+	typesdb "github.com/Voltaic314/ByteWave/code/types/db"
 )
 
 func main() {
@@ -34,7 +34,7 @@ func main() {
 	// Start the Conductor — now self-contained (handles its own DB + logger)
 	conductor := processing.NewConductor(
 		"C:\\Users\\golde\\OneDrive\\Documents\\GitHub\\ByteWave\\tests\\traversal_tests\\test_src_traversal.db",
-		3,  // retry threshold
+		3,    // retry threshold
 		1000, // batch size
 	)
 
@@ -44,16 +44,34 @@ func main() {
 	}
 
 	// Initialize write queues before starting traversal
-	conductor.DB.InitWriteQueue("audit_log", db.LogWriteQueue, 50, 5*time.Second)
-	conductor.DB.InitWriteQueue("source_nodes", db.NodeWriteQueue, 100, 5*time.Second)
+	conductor.DB.InitWriteQueue("audit_log", typesdb.LogWriteQueue, 50, 5*time.Second)
+	conductor.DB.InitWriteQueue("source_nodes", typesdb.NodeWriteQueue, 100, 5*time.Second)
 
 	// Register the logger with the DB
 	logging.GlobalLogger.RegisterDB(conductor.DB)
 
-	conductor.StartTraversal()
+	// Start timing the traversal
+	startTime := time.Now()
+	fmt.Printf("🚀 Starting traversal at %s\n", startTime.Format("15:04:05"))
 
-	// Keep main alive so everything can run
+	go conductor.StartTraversal()
+
+	// Keep main alive until all traversals are complete (blocking)
 	for {
-		time.Sleep(1 * time.Second)
+		time.Sleep(50 * time.Millisecond)
+
+		// Check if all queues have been torn down (traversal complete)
+		if len(conductor.QP.Queues) == 0 {
+			endTime := time.Now()
+			duration := endTime.Sub(startTime)
+			fmt.Printf("✅ All traversals complete! ByteWave shutting down...\n")
+			fmt.Printf("⏱️  Total traversal time: %v\n", duration)
+			break
+		}
 	}
+
+	// Clean shutdown
+	conductor.DB.Close()
+	logging.GlobalLogger.Stop()
+	fmt.Println("🛑 ByteWave shutdown complete.")
 }

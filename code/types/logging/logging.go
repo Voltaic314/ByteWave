@@ -7,9 +7,12 @@ import (
 
 // LogEntry represents a structured log entry.
 type LogEntry struct {
-	Timestamp time.Time     `json:"timestamp"`
-	Level     string        `json:"level"`
-	Message   string        `json:"message"`
+	Timestamp time.Time      `json:"timestamp"`
+	Level     string         `json:"level"`
+	Entity    string         `json:"entity,omitempty"`    // Entity type: 'worker', 'QP', 'system', etc.
+	EntityID  string         `json:"entity_id,omitempty"` // Unique identifier for the entity
+	Path      string         `json:"path,omitempty"`      // Optional path for task-related logs
+	Message   string         `json:"message"`
 	Details   map[string]any `json:"details,omitempty"` // Optional details
 }
 
@@ -22,7 +25,7 @@ type MigrationError struct {
 // NewMigrationError creates a new MigrationError with a generated UUID for the ID.
 func NewMigrationError(taskID, errorMsg string) MigrationError {
 	return MigrationError{
-		TaskID:    taskID,
-		ErrorMsg:  errorMsg,
+		TaskID:   taskID,
+		ErrorMsg: errorMsg,
 	}
 }

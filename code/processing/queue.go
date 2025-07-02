@@ -31,6 +31,7 @@ type TaskQueue struct {
 	Phase               int            // Current phase
 	SrcOrDst            string         // "src" or "dst"
 	tasks               []*Task        // List of tasks
+	inProgressTasks     []*Task        // Tasks currently being processed by workers
 	workers             []*WorkerBase  // Managed by Conductor
 	mu                  sync.Mutex     // Mutex for concurrent access
 	PaginationSize      int            // Pagination width for folder content listing
@@ -41,6 +42,9 @@ type TaskQueue struct {
 	RunningLowChan      chan int       // Unique channel per queue for RunningLow signals
 	RunningLowTriggered bool           // Prevents duplicate RunningLow signals
 	RunningLowThreshold int            // Threshold for triggering RunningLow signals
+	IdleChan            chan int       // Channel for idle signals
+	IdleTriggered       bool           // Prevents duplicate idle signals
+	StopChan            chan struct{}  // Channel to signal goroutines to stop
 }
 
 // NewTaskQueue initializes a new queue for traversal or upload.
@@ -60,6 +64,7 @@ func NewTaskQueue(queueType QueueType, phase int, srcOrDst string, paginationSiz
 		Phase:               phase,
 		SrcOrDst:            srcOrDst,
 		tasks:               []*Task{},
+		inProgressTasks:     []*Task{},
 		workers:             []*WorkerBase{},
 		PaginationSize:      paginationSize,
 		PaginationChan:      make(chan int, 1),
@@ -68,6 +73,9 @@ func NewTaskQueue(queueType QueueType, phase int, srcOrDst string, paginationSiz
 		RunningLowChan:      runningLowChan,
 		RunningLowTriggered: false,
 		RunningLowThreshold: runningLowThreshold,
+		IdleChan:            make(chan int, 1),
+		IdleTriggered:       false,
+		StopChan:            make(chan struct{}),
 	}
 	q.cond = sync.NewCond(&q.mu)
 
@@ -123,6 +131,35 @@ func (q *TaskQueue) CheckAndTriggerQP() {
 		q.RunningLowTriggered = true
 		q.RunningLowChan <- q.Phase
 	}
+}
+
+// SignalWorkerIdle signals that a worker has gone idle and may need more tasks
+func (q *TaskQueue) SignalWorkerIdle() {
+	q.Lock()
+	defer q.Unlock()
+
+	// Only signal if we haven't already and queue is empty
+	if !q.IdleTriggered && len(q.tasks) == 0 {
+		logging.GlobalLogger.LogMessage("info", "Worker idle signal triggered", map[string]any{
+			"queueID": q.QueueID,
+		})
+		q.IdleTriggered = true
+		select {
+		case q.IdleChan <- q.Phase:
+		default:
+		}
+	}
+}
+
+// ResetIdleTrigger is called by QP when new tasks are added
+func (q *TaskQueue) ResetIdleTrigger() {
+	q.Lock()
+	defer q.Unlock()
+
+	logging.GlobalLogger.LogMessage("info", "Resetting idle trigger", map[string]any{
+		"queueID": q.QueueID,
+	})
+	q.IdleTriggered = false
 }
 
 // Pause the queue (workers will stop picking up tasks)
@@ -206,6 +243,16 @@ func (q *TaskQueue) PopTask() *Task {
 			// splice: tasks = tasks[:i] + tasks[i+1:]
 			// Sidenote but this is really weird compared to Python's append syntax lol
 			q.tasks = append(q.tasks[:i], q.tasks[i+1:]...)
+
+			// Add to in-progress list
+			q.inProgressTasks = append(q.inProgressTasks, task)
+
+			logging.GlobalLogger.LogMessage("info", "Task popped and added to in-progress", map[string]any{
+				"queueID": q.QueueID,
+				"taskID":  task.ID,
+				"path":    task.GetPath(),
+			})
+
 			return task
 		}
 	}
@@ -354,4 +401,101 @@ func (q *TaskQueue) WaitForWork() {
 		})
 	}
 	q.cond.L.Unlock()
+}
+
+// TrackedPaths returns a map of paths currently in the queue and optionally in-progress
+func (q *TaskQueue) TrackedPaths(includeInProgress bool) map[string]bool {
+	q.Lock()
+	defer q.Unlock()
+
+	tracked := make(map[string]bool)
+
+	// Add all queued task paths
+	for _, task := range q.tasks {
+		if path := task.GetPath(); path != "" {
+			tracked[path] = true
+		}
+	}
+
+	// Optionally add in-progress paths (tasks that have been popped but not completed)
+	if includeInProgress {
+		for _, task := range q.inProgressTasks {
+			if path := task.GetPath(); path != "" {
+				tracked[path] = true
+			}
+		}
+	}
+
+	logging.GlobalLogger.LogMessage("info", "Tracked paths retrieved", map[string]any{
+		"queueID":           q.QueueID,
+		"includeInProgress": includeInProgress,
+		"trackedCount":      len(tracked),
+		"queuedCount":       len(q.tasks),
+		"inProgressCount":   len(q.inProgressTasks),
+	})
+
+	return tracked
+}
+
+// AddInProgressTask adds a task to the in-progress list
+func (q *TaskQueue) AddInProgressTask(task *Task) {
+	q.Lock()
+	defer q.Unlock()
+
+	q.inProgressTasks = append(q.inProgressTasks, task)
+
+	logging.GlobalLogger.LogMessage("info", "Task added to in-progress", map[string]any{
+		"queueID": q.QueueID,
+		"taskID":  task.ID,
+		"path":    task.GetPath(),
+	})
+}
+
+// RemoveInProgressTask removes a task from the in-progress list
+func (q *TaskQueue) RemoveInProgressTask(taskID string) {
+	q.Lock()
+	defer q.Unlock()
+
+	for i, task := range q.inProgressTasks {
+		if task.ID == taskID {
+			// Remove from slice
+			q.inProgressTasks = append(q.inProgressTasks[:i], q.inProgressTasks[i+1:]...)
+
+			logging.GlobalLogger.LogMessage("info", "Task removed from in-progress", map[string]any{
+				"queueID": q.QueueID,
+				"taskID":  taskID,
+				"path":    task.GetPath(),
+			})
+			return
+		}
+	}
+
+	logging.GlobalLogger.LogMessage("warning", "Task not found in in-progress list", map[string]any{
+		"queueID": q.QueueID,
+		"taskID":  taskID,
+	})
+}
+
+// GetAllTaskPaths returns all paths from both queued and in-progress tasks
+func (q *TaskQueue) GetAllTaskPaths() []string {
+	q.Lock()
+	defer q.Unlock()
+
+	paths := make([]string, 0, len(q.tasks)+len(q.inProgressTasks))
+
+	// Add queued task paths
+	for _, task := range q.tasks {
+		if path := task.GetPath(); path != "" {
+			paths = append(paths, path)
+		}
+	}
+
+	// Add in-progress task paths
+	for _, task := range q.inProgressTasks {
+		if path := task.GetPath(); path != "" {
+			paths = append(paths, path)
+		}
+	}
+
+	return paths
 }

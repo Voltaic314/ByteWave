@@ -7,16 +7,17 @@ import (
 	"net"
 	"os"
 	"time"
+
 	"github.com/google/uuid"
 
-	"github.com/Voltaic314/ByteWave/code/db"
+	"github.com/Voltaic314/ByteWave/code/types/db"
 	"github.com/Voltaic314/ByteWave/code/types/logging"
 )
 
 type Logger struct {
 	logLevel   string
 	udpConn    *net.UDPConn
-	logWQ      *db.WriteQueue
+	logWQ      db.WriteQueueInterface
 	batchSize  int
 	batchDelay time.Duration
 	ctx        context.Context
@@ -37,7 +38,7 @@ func InitLogger(configPath string) {
 	fmt.Println("✅ Logger initialized in UDP-only mode.")
 }
 
-func (l *Logger) RegisterDB(dbInstance *db.DB) {
+func (l *Logger) RegisterDB(dbInstance db.DBInterface) {
 	l.logWQ = dbInstance.GetWriteQueue("audit_log")
 	if l.logWQ == nil {
 		dbInstance.InitWriteQueue("audit_log", db.LogWriteQueue, l.batchSize, l.batchDelay)
@@ -75,12 +76,45 @@ func (l *Logger) connectToUDP() {
 }
 
 func (l *Logger) LogMessage(level, message string, details map[string]any) {
+	l.logWithEntity(level, "", "", "", message, details)
+}
+
+// LogMessageWithEntity logs a message with entity information
+func (l *Logger) LogMessageWithEntity(level, entity, entityID, path, message string, details map[string]any) {
+	l.logWithEntity(level, entity, entityID, path, message, details)
+}
+
+// LogWorker logs a message from a worker
+func (l *Logger) LogWorker(level, workerID, path, message string, details map[string]any) {
+	l.logWithEntity(level, "worker", workerID, path, message, details)
+}
+
+// LogQP logs a message from QueuePublisher
+func (l *Logger) LogQP(level, queueName, path, message string, details map[string]any) {
+	l.logWithEntity(level, "QP", queueName, path, message, details)
+}
+
+// LogSystem logs a system-level message
+func (l *Logger) LogSystem(level, component, message string, details map[string]any) {
+	l.logWithEntity(level, "system", component, "", message, details)
+}
+
+// LogAPI logs a message from API interactions
+func (l *Logger) LogAPI(level, serviceID, path, message string, details map[string]any) {
+	l.logWithEntity(level, "API", serviceID, path, message, details)
+}
+
+// logWithEntity is the internal method that handles the actual logging
+func (l *Logger) logWithEntity(level, entity, entityID, path, message string, details map[string]any) {
 	if !l.shouldLog(level) {
 		return
 	}
 	entry := logging.LogEntry{
 		Timestamp: time.Now(),
 		Level:     level,
+		Entity:    entity,
+		EntityID:  entityID,
+		Path:      path,
 		Message:   message,
 		Details:   details,
 	}
@@ -96,8 +130,8 @@ func (l *Logger) LogMessage(level, message string, details map[string]any) {
 	// Queue to DB
 	if l.logWQ != nil {
 		detailsJSON, _ := json.Marshal(details)
-		params := []any{uuid.New().String(), entry.Timestamp, level, string(detailsJSON), message}
-		query := `INSERT INTO audit_log (id, timestamp, level, details, message) VALUES (?, ?, ?, ?, ?)`
+		params := []any{uuid.New().String(), entry.Timestamp, level, entry.Entity, entry.EntityID, entry.Path, string(detailsJSON), message}
+		query := `INSERT INTO audit_log (id, timestamp, level, entity, entity_id, path, details, message) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
 		l.enqueueLog(query, params)
 	}
 }

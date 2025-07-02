@@ -15,6 +15,14 @@ type DB struct {
 	WQMap  map[string]interface{} // map[string]*writequeue.WriteQueue
 }
 
+// WriteQueueType determines how the queue handles operations
+type WriteQueueType int
+
+const (
+	NodeWriteQueue WriteQueueType = iota // For node tables with path-based batching
+	LogWriteQueue                        // For log tables with simple insert operations
+)
+
 // WriteOp represents a queued SQL operation
 type WriteOp struct {
 	Path   string
@@ -55,4 +63,19 @@ type BaseWriteQueueTable struct {
 type WriteQueueTableInterface interface {
 	Flush()
 	StopTimer()
+}
+
+// WriteQueueInterface defines methods for write queue operations
+type WriteQueueInterface interface {
+	Add(path string, op WriteOp)
+	Flush(force ...bool) []Batch
+	IsReadyToWrite() bool
+	GetFlushInterval() time.Duration
+	SetFlushInterval(interval time.Duration)
+}
+
+// DBInterface defines methods for database operations
+type DBInterface interface {
+	GetWriteQueue(table string) WriteQueueInterface
+	InitWriteQueue(table string, queueType WriteQueueType, batchSize int, flushInterval time.Duration)
 }
