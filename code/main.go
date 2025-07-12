@@ -1,3 +1,14 @@
+/*
+ByteWave — Free and Open Source File Migration Tool
+Licensed under the ByteWave License v1.0
+See LICENSE.md for full terms.
+
+You may use, modify, and distribute this software freely for internal or 
+service-based commercial purposes, but resale as a stand-alone software product 
+is prohibited. Attribution to the ByteWave Project is required in all 
+public-facing deployments.
+*/
+
 package main
 
 import (
@@ -12,6 +23,8 @@ import (
 
 func main() {
 	fmt.Println("🚀 ByteWave is starting up...")
+
+	fmt.Println("🔖 Licensed under the ByteWave License v1.0 — see LICENSE.txt or visit https://bytewave.stream/license")
 
 	// Spawn UDP log viewer
 	err := cli.SpawnReceiverTerminal()
