@@ -17,6 +17,7 @@ import (
 
 	"github.com/Voltaic314/ByteWave/code/cli"
 	"github.com/Voltaic314/ByteWave/code/logging"
+	"github.com/Voltaic314/ByteWave/code/signals"
 	"github.com/Voltaic314/ByteWave/code/processing"
 	typesdb "github.com/Voltaic314/ByteWave/code/types/db"
 )
@@ -43,6 +44,8 @@ func main() {
 		"origin": "main.go",
 		"status": "init-complete",
 	})
+
+	signals.InitSignalRouter()
 
 	// Start the Conductor — now self-contained (handles its own DB + logger)
 	conductor := processing.NewConductor(

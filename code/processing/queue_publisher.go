@@ -2,6 +2,7 @@ package processing
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -10,6 +11,7 @@ import (
 	"github.com/Voltaic314/ByteWave/code/db"
 	"github.com/Voltaic314/ByteWave/code/filesystem"
 	"github.com/Voltaic314/ByteWave/code/logging"
+	"github.com/Voltaic314/ByteWave/code/signals"
 )
 
 // -----------------------------------------------------------------------------
@@ -32,22 +34,17 @@ type PollingController struct {
 
 // QueuePublisher manages multiple queues dynamically.
 type QueuePublisher struct {
-	DB                       *db.DB
-	Queues                   map[string]*TaskQueue
-	QueueLevels              map[string]int
-	QueueBoardChans          map[string]chan int
-	PublishSignals           map[string]chan bool
-	PhaseUpdated             chan int
-	Mutex                    sync.Mutex
-	Running                  bool
-	LastPathCursors          map[string]string
-	RetryThreshold           int
-	BatchSize                int
-	RunningLowChans          map[string]chan int
-	PollingControllers       map[string]*PollingController
-	QueriesPerPhase          map[string]int         // queueName -> queryCount
-	TraversalCompleteSignals map[string]chan string // queueName -> signal
-	ScanModes                map[string]scanMode    // queueName -> scanMode
+	DB                 *db.DB
+	Queues             map[string]*TaskQueue
+	QueueLevels        map[string]int
+	Mutex              sync.Mutex
+	Running            bool
+	LastPathCursors    map[string]string
+	RetryThreshold     int
+	BatchSize          int
+	PollingControllers map[string]*PollingController
+	QueriesPerPhase    map[string]int      // queueName -> queryCount
+	ScanModes          map[string]scanMode // queueName -> scanMode
 }
 
 func NewQueuePublisher(db *db.DB, retryThreshold, batchSize int) *QueuePublisher {
@@ -57,21 +54,16 @@ func NewQueuePublisher(db *db.DB, retryThreshold, batchSize int) *QueuePublisher
 	})
 
 	return &QueuePublisher{
-		DB:                       db,
-		Queues:                   make(map[string]*TaskQueue),
-		QueueLevels:              make(map[string]int),
-		QueueBoardChans:          make(map[string]chan int),
-		PublishSignals:           make(map[string]chan bool),
-		PhaseUpdated:             make(chan int, 1),
-		Running:                  false,
-		LastPathCursors:          make(map[string]string),
-		RetryThreshold:           retryThreshold,
-		BatchSize:                batchSize,
-		RunningLowChans:          make(map[string]chan int),
-		PollingControllers:       make(map[string]*PollingController),
-		QueriesPerPhase:          make(map[string]int), // queueName -> queryCount
-		TraversalCompleteSignals: make(map[string]chan string),
-		ScanModes:                make(map[string]scanMode),
+		DB:                 db,
+		Queues:             make(map[string]*TaskQueue),
+		QueueLevels:        make(map[string]int),
+		Running:            false,
+		LastPathCursors:    make(map[string]string),
+		RetryThreshold:     retryThreshold,
+		BatchSize:          batchSize,
+		PollingControllers: make(map[string]*PollingController),
+		QueriesPerPhase:    make(map[string]int), // queueName -> queryCount
+		ScanModes:          make(map[string]scanMode),
 	}
 }
 
@@ -109,8 +101,16 @@ func (qp *QueuePublisher) StartListening() {
 	logging.GlobalLogger.LogSystem("info", "QP", "Starting QueuePublisher listening loop", nil)
 	qp.Running = true
 
-	for qp.Running {
-		level := <-qp.PhaseUpdated
+	// Subscribe to phase updates using SignalRouter
+	signals.GlobalSR.On("qp:phase_updated", func(sig signals.Signal) {
+		level, ok := sig.Payload.(int)
+		if !ok {
+			logging.GlobalLogger.LogSystem("error", "QP", "Invalid data type in phase_updated signal", map[string]any{
+				"payload_type": fmt.Sprintf("%T", sig.Payload),
+				"payload":      sig.Payload,
+			})
+			return
+		}
 
 		logging.GlobalLogger.LogSystem("info", "QP", "Phase updated", map[string]any{
 			"newLevel": level,
@@ -121,53 +121,57 @@ func (qp *QueuePublisher) StartListening() {
 			qp.ScanModes[name] = firstPass
 			qp.PublishTasks(name)
 
-			qp.Mutex.Lock()
-			signalChan := qp.RunningLowChans[name]
-			qp.Mutex.Unlock()
-
-			go func(queueName string, signalChan chan int) {
-				for phase := range signalChan {
-					qp.Mutex.Lock()
-					queue, exists := qp.Queues[queueName]
-					qp.Mutex.Unlock()
-
-					if !exists || queue.State != QueueRunning {
-						continue
-					}
-
-					qp.QueueLevels[queueName] = phase
-					qp.ScanModes[queueName] = firstPass
-					qp.PublishTasks(queueName)
-					queue.ResetRunningLowTrigger()
-				}
-			}(name, signalChan)
-
-			// 🆕 NEW: Listen for idle signals from workers
-			qp.Mutex.Lock()
-			idleChan := qp.Queues[name].IdleChan
-			qp.Mutex.Unlock()
-
-			go func(queueName string, idleChan chan int) {
-				for phase := range idleChan {
-					qp.Mutex.Lock()
-					queue, exists := qp.Queues[queueName]
-					qp.Mutex.Unlock()
-
-					if !exists || queue.State != QueueRunning {
-						continue
-					}
-
-					logging.GlobalLogger.LogQP("info", queueName, "", "Received idle signal from worker", map[string]any{
-						"phase": phase,
+			signals.GlobalSR.On("qp:running_low:"+name, func(sig signals.Signal) {
+				phase, ok := sig.Payload.(int)
+				if !ok {
+					logging.GlobalLogger.LogSystem("error", "QP", "Invalid data for running_low signal", map[string]any{
+						"queue": name, "data": sig.Payload,
 					})
-
-					// Check if we need to publish more tasks
-					if queue.QueueSize() == 0 {
-						qp.PublishTasks(queueName)
-					}
-					queue.ResetIdleTrigger()
+					return
 				}
-			}(name, idleChan)
+
+				qp.Mutex.Lock()
+				queue, exists := qp.Queues[name]
+				qp.Mutex.Unlock()
+
+				if !exists || queue.State != QueueRunning {
+					return
+				}
+
+				qp.QueueLevels[name] = phase
+				qp.ScanModes[name] = firstPass
+				qp.PublishTasks(name)
+				queue.ResetRunningLowTrigger()
+			})
+
+			// Listen for idle signals from workers
+			signals.GlobalSR.On("qp:idle:"+name, func(sig signals.Signal) {
+				phase, ok := sig.Payload.(int)
+				if !ok {
+					logging.GlobalLogger.LogSystem("error", "QP", "Invalid data for idle signal", map[string]any{
+						"queue": name, "data": sig.Payload,
+					})
+					return
+				}
+
+				qp.Mutex.Lock()
+				queue, exists := qp.Queues[name]
+				qp.Mutex.Unlock()
+
+				if !exists || queue.State != QueueRunning {
+					return
+				}
+
+				logging.GlobalLogger.LogQP("info", name, "", "Received idle signal from worker", map[string]any{
+					"phase": phase,
+				})
+
+				// Check if we need to publish more tasks
+				if queue.QueueSize() == 0 {
+					qp.PublishTasks(name)
+				}
+				queue.ResetIdleTrigger()
+			})
 
 			go func(queueName string) {
 				for {
@@ -194,6 +198,11 @@ func (qp *QueuePublisher) StartListening() {
 				}
 			}(name)
 		}
+	})
+
+	// Keep the main loop running
+	for qp.Running {
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 
@@ -244,9 +253,10 @@ func (qp *QueuePublisher) PublishTasks(queueName string) {
 
 	if len(tasks) <= 0 {
 		if qp.checkTraversalComplete(queueName, len(tasks)) {
-			if ch, ok := qp.TraversalCompleteSignals[queueName]; ok {
-				ch <- queueName
-			}
+			signals.GlobalSR.Publish(signals.Signal{
+				Topic:   "qp:traversal_complete:" + queueName,
+				Payload: queueName,
+			})
 			return
 		}
 	}
@@ -295,7 +305,10 @@ func (qp *QueuePublisher) advancePhase(queueName string) {
 		"phase": queue.Phase,
 	})
 
-	qp.PhaseUpdated <- queue.Phase
+	signals.GlobalSR.Publish(signals.Signal{
+		Topic:   "qp:phase_updated",
+		Payload: queue.Phase,
+	})
 }
 
 func (qp *QueuePublisher) checkTraversalComplete(queueName string, queryResultSize int) bool {
@@ -439,9 +452,10 @@ func (qp *QueuePublisher) startPolling(queueName string) {
 						qp.FlushTable(table)
 
 						// Send completion signal AFTER flushing
-						if ch, ok := qp.TraversalCompleteSignals[queueName]; ok {
-							ch <- queueName
-						}
+						signals.GlobalSR.Publish(signals.Signal{
+							Topic:   "qp:traversal_complete:" + queueName,
+							Payload: queueName,
+						})
 
 						// Exit immediately to prevent further operations
 						return
