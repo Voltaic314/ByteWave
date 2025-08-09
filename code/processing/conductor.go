@@ -48,7 +48,7 @@ func (c *Conductor) StartTraversal() {
 	pv_obj := pv.NewPathValidator()
 
 	// Add workers (example: 1 worker)
-	for range 1 {
+	for range 10 {
 		tw := &TraverserWorker{
 			WorkerBase: c.AddWorker("src-traversal", "src"),
 			DB:         c.DB,

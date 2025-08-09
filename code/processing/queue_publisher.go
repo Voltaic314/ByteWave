@@ -34,17 +34,21 @@ type PollingController struct {
 
 // QueuePublisher manages multiple queues dynamically.
 type QueuePublisher struct {
-	DB                 *db.DB
-	Queues             map[string]*TaskQueue
-	QueueLevels        map[string]int
-	Mutex              sync.Mutex
-	Running            bool
-	LastPathCursors    map[string]string
+	DB              *db.DB
+	Queues          map[string]*TaskQueue
+	QueueLevels     map[string]int
+	Mutex           sync.Mutex
+	Running         bool
+	LastPathCursors map[string]string
+	// LastDBPaths stores the last raw DB path fetched per queue for stable cursoring
+	LastDBPaths        map[string]string
 	RetryThreshold     int
 	BatchSize          int
 	PollingControllers map[string]*PollingController
 	QueriesPerPhase    map[string]int      // queueName -> queryCount
 	ScanModes          map[string]scanMode // queueName -> scanMode
+	// HandlersInstalled ensures per-queue handlers/goroutines are registered once
+	HandlersInstalled map[string]bool
 }
 
 func NewQueuePublisher(db *db.DB, retryThreshold, batchSize int) *QueuePublisher {
@@ -59,11 +63,13 @@ func NewQueuePublisher(db *db.DB, retryThreshold, batchSize int) *QueuePublisher
 		QueueLevels:        make(map[string]int),
 		Running:            false,
 		LastPathCursors:    make(map[string]string),
+		LastDBPaths:        make(map[string]string),
 		RetryThreshold:     retryThreshold,
 		BatchSize:          batchSize,
 		PollingControllers: make(map[string]*PollingController),
 		QueriesPerPhase:    make(map[string]int), // queueName -> queryCount
 		ScanModes:          make(map[string]scanMode),
+		HandlersInstalled:  make(map[string]bool),
 	}
 }
 
@@ -121,61 +127,17 @@ func (qp *QueuePublisher) StartListening() {
 			qp.ScanModes[name] = firstPass
 			qp.PublishTasks(name)
 
-			signals.GlobalSR.On("qp:running_low:"+name, func(sig signals.Signal) {
-				phase, ok := sig.Payload.(int)
-				if !ok {
-					logging.GlobalLogger.LogSystem("error", "QP", "Invalid data for running_low signal", map[string]any{
-						"queue": name, "data": sig.Payload,
-					})
-					return
-				}
-
-				qp.Mutex.Lock()
-				queue, exists := qp.Queues[name]
-				qp.Mutex.Unlock()
-
-				if !exists || queue.State != QueueRunning {
-					return
-				}
-
-				qp.QueueLevels[name] = phase
-				qp.ScanModes[name] = firstPass
-				qp.PublishTasks(name)
-				queue.ResetRunningLowTrigger()
-			})
-
-			// Listen for idle signals from workers
-			signals.GlobalSR.On("qp:idle:"+name, func(sig signals.Signal) {
-				phase, ok := sig.Payload.(int)
-				if !ok {
-					logging.GlobalLogger.LogSystem("error", "QP", "Invalid data for idle signal", map[string]any{
-						"queue": name, "data": sig.Payload,
-					})
-					return
-				}
-
-				qp.Mutex.Lock()
-				queue, exists := qp.Queues[name]
-				qp.Mutex.Unlock()
-
-				if !exists || queue.State != QueueRunning {
-					return
-				}
-
-				logging.GlobalLogger.LogQP("info", name, "", "Received idle signal from worker", map[string]any{
-					"phase": phase,
-				})
-
-				// Check if we need to publish more tasks
-				if queue.QueueSize() == 0 {
-					qp.PublishTasks(name)
-				}
-				queue.ResetIdleTrigger()
-			})
-
-			go func(queueName string) {
-				for {
-					time.Sleep(3 * time.Second)
+			// Install per-queue handlers and refresher only once
+			if !qp.HandlersInstalled[name] {
+				queueName := name
+				signals.GlobalSR.On("qp:running_low:"+queueName, func(sig signals.Signal) {
+					phase, ok := sig.Payload.(int)
+					if !ok {
+						logging.GlobalLogger.LogSystem("error", "QP", "Invalid data for running_low signal", map[string]any{
+							"queue": queueName, "data": sig.Payload,
+						})
+						return
+					}
 
 					qp.Mutex.Lock()
 					queue, exists := qp.Queues[queueName]
@@ -185,18 +147,68 @@ func (qp *QueuePublisher) StartListening() {
 						return
 					}
 
-					// Check if we should stop
-					select {
-					case <-queue.StopChan:
+					qp.QueueLevels[queueName] = phase
+					qp.ScanModes[queueName] = firstPass
+					qp.PublishTasks(queueName)
+					queue.ResetRunningLowTrigger()
+				})
+
+				// Listen for idle signals from workers
+				signals.GlobalSR.On("qp:idle:"+queueName, func(sig signals.Signal) {
+					phase, ok := sig.Payload.(int)
+					if !ok {
+						logging.GlobalLogger.LogSystem("error", "QP", "Invalid data for idle signal", map[string]any{
+							"queue": queueName, "data": sig.Payload,
+						})
 						return
-					default:
 					}
 
-					if queue.QueueSize() < queue.RunningLowThreshold {
+					qp.Mutex.Lock()
+					queue, exists := qp.Queues[queueName]
+					qp.Mutex.Unlock()
+
+					if !exists || queue.State != QueueRunning {
+						return
+					}
+
+					logging.GlobalLogger.LogQP("info", queueName, "", "Received idle signal from worker", map[string]any{
+						"phase": phase,
+					})
+
+					// Check if we need to publish more tasks
+					if queue.QueueSize() == 0 {
 						qp.PublishTasks(queueName)
 					}
-				}
-			}(name)
+					queue.ResetIdleTrigger()
+				})
+
+				go func(queueName string) {
+					for {
+						time.Sleep(3 * time.Second)
+
+						qp.Mutex.Lock()
+						queue, exists := qp.Queues[queueName]
+						qp.Mutex.Unlock()
+
+						if !exists || queue.State != QueueRunning {
+							return
+						}
+
+						// Check if we should stop
+						select {
+						case <-queue.StopChan:
+							return
+						default:
+						}
+
+						if queue.QueueSize() < queue.RunningLowThreshold {
+							qp.PublishTasks(queueName)
+						}
+					}
+				}(queueName)
+
+				qp.HandlersInstalled[name] = true
+			}
 		}
 	})
 
@@ -267,7 +279,12 @@ func (qp *QueuePublisher) PublishTasks(queueName string) {
 		queue.ResetIdleTrigger()
 		qp.QueriesPerPhase[queueName]++
 		if mode == firstPass {
-			qp.LastPathCursors[queueName] = tasks[len(tasks)-1].GetPath()
+			if lastRaw, ok := qp.LastDBPaths[queueName]; ok && lastRaw != "" {
+				qp.LastPathCursors[queueName] = lastRaw
+			} else if len(tasks) > 0 {
+				// Fallback to task path if we don't have a recorded raw DB path yet
+				qp.LastPathCursors[queueName] = tasks[len(tasks)-1].GetPath()
+			}
 		}
 	}
 
@@ -437,40 +454,91 @@ func (qp *QueuePublisher) startPolling(queueName string) {
 					return
 				}
 
-				shouldAdvance := false
 				if qp.isRoundComplete(queue) {
-					// First advance to the next phase
+					// Flush and verify no pending rows at current level before advancing
+					table := "source_nodes"
+					if queue.Type == UploadQueueType {
+						table = "destination_nodes"
+					}
+					qp.FlushTable(table)
+
+					if qp.hasPendingAtLevel(queueName, queue.Phase) {
+						// Still work to publish at this level
+						qp.PublishTasks(queueName)
+						continue
+					}
+
+					// Safe to advance
 					qp.advancePhase(queueName)
 
 					// Then check if the new phase has no tasks (traversal complete)
 					if qp.checkTraversalComplete(queueName, 0) {
-						// Flush the correct table, not the queue name
-						table := "source_nodes"
-						if queue.Type == UploadQueueType {
-							table = "destination_nodes"
-						}
 						qp.FlushTable(table)
-
-						// Send completion signal AFTER flushing
 						signals.GlobalSR.Publish(signals.Signal{
 							Topic:   "qp:traversal_complete:" + queueName,
 							Payload: queueName,
 						})
-
 						// Exit immediately to prevent further operations
 						return
 					}
-					return
-				}
-
-				if shouldAdvance {
-					qp.advancePhase(queueName)
 					return
 				}
 				qp.PublishTasks(queueName)
 			}
 		}
 	}()
+}
+
+// hasPendingAtLevel checks if there are any pending rows at the specified level for the queue's table
+func (qp *QueuePublisher) hasPendingAtLevel(queueName string, level int) bool {
+	qp.Mutex.Lock()
+	queue, exists := qp.Queues[queueName]
+	qp.Mutex.Unlock()
+	if !exists {
+		return false
+	}
+
+	table := "source_nodes"
+	statusColumn := "traversal_status"
+	if queue.Type == UploadQueueType {
+		table = "destination_nodes"
+		statusColumn = "upload_status"
+	}
+
+	// Ensure pending writes are flushed before checking
+	qp.FlushTable(table)
+
+	query := `SELECT COUNT(*) FROM ` + table + ` WHERE ` + statusColumn + ` = 'pending' AND level = ?`
+	rows, err := qp.DB.Query(table, query, level)
+	if err != nil {
+		logging.GlobalLogger.LogMessage("error", "hasPendingAtLevel query failed", map[string]any{
+			"queue": queueName,
+			"level": level,
+			"error": err.Error(),
+		})
+		// Be conservative: assume pending exists so we don't advance too early
+		return true
+	}
+	defer rows.Close()
+
+	var count int
+	if rows.Next() {
+		if err := rows.Scan(&count); err != nil {
+			logging.GlobalLogger.LogMessage("error", "hasPendingAtLevel scan failed", map[string]any{
+				"queue": queueName,
+				"level": level,
+				"error": err.Error(),
+			})
+			return true
+		}
+	}
+
+	logging.GlobalLogger.LogMessage("info", "hasPendingAtLevel result", map[string]any{
+		"queue":   queueName,
+		"level":   level,
+		"pending": count,
+	})
+	return count > 0
 }
 
 func (qp *QueuePublisher) FetchTasksFromDB(table string, queueType QueueType, currentLevel int, lastSeenPath string, queueName string) []*Task {
@@ -591,6 +659,11 @@ func (qp *QueuePublisher) runTaskQuery(table, query string, params []any, curren
 			})
 			continue
 		}
+
+		// Record last raw DB path for stable cursor updates
+		qp.Mutex.Lock()
+		qp.LastDBPaths[queueName] = path
+		qp.Mutex.Unlock()
 
 		normalizedPath := filepath.ToSlash(path)
 
