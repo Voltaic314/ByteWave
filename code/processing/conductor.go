@@ -1,12 +1,14 @@
 package processing
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/Voltaic314/ByteWave/code/db"
 	"github.com/Voltaic314/ByteWave/code/logging"
 	"github.com/Voltaic314/ByteWave/code/pv"
 	"github.com/Voltaic314/ByteWave/code/services"
+	"github.com/Voltaic314/ByteWave/code/signals"
 )
 
 // The Boss 😎 - Responsible for setting up QP, queues, and workers
@@ -41,13 +43,12 @@ func (c *Conductor) StartTraversal() {
 	// Setup queues
 	name := "src-traversal"
 	c.SetupQueue(name, TraversalQueueType, 0, "src", 1000)
-	c.QP.TraversalCompleteSignals[name] = make(chan string, 1)
 
 	var os_svc services.BaseServiceInterface = services.NewOSService()
 	pv_obj := pv.NewPathValidator()
 
 	// Add workers (example: 1 worker)
-	for range 1 {
+	for range 10 {
 		tw := &TraverserWorker{
 			WorkerBase: c.AddWorker("src-traversal", "src"),
 			DB:         c.DB,
@@ -65,37 +66,37 @@ func (c *Conductor) StartTraversal() {
 	time.Sleep(25 * time.Millisecond) // Give QP a moment to initialize
 
 	// kick start the first phase manually
-	c.QP.PhaseUpdated <- 0
+	signals.GlobalSR.Publish(signals.Signal{
+		Topic:   "qp:phase_updated",
+		Payload: 0,
+	})
 
 	// Listen for traversal complete signals
 	// This is a separate goroutine to handle traversal completion signals
-	go func() {
-		signalChan, exists := c.QP.TraversalCompleteSignals["src-traversal"]
-		if !exists {
-			logging.GlobalLogger.LogMessage("error", "No signal channel found for traversal complete", nil)
+	signals.GlobalSR.On("qp:traversal_complete:src-traversal", func(sig signals.Signal) {
+		queueName, ok := sig.Payload.(string)
+		if !ok {
+			logging.GlobalLogger.LogSystem("error", "Conductor", "Invalid traversal.complete payload", map[string]any{
+				"payload_type": fmt.Sprintf("%T", sig.Payload),
+			})
 			return
 		}
 
-		for queueName := range signalChan {
-			logging.GlobalLogger.LogMessage("info", "Conductor received traversal complete signal", map[string]any{
-				"queue": queueName,
-			})
-			c.TeardownQueue(queueName)
-		}
-	}()
+		logging.GlobalLogger.LogSystem("info", "Conductor", "Traversal complete received", map[string]any{
+			"queue": queueName,
+		})
+
+		c.TeardownQueue(queueName)
+	})
 }
 
 // SetupQueue initializes a queue and registers it with QP
 func (c *Conductor) SetupQueue(name string, queueType QueueType, phase int, srcOrDst string, paginationSize int) {
-	runningLowChan := make(chan int, 1)
 	RunningLowThreshold := 100
-	queue := NewTaskQueue(queueType, phase, srcOrDst, paginationSize, runningLowChan, RunningLowThreshold)
+	queue := NewTaskQueue(queueType, phase, srcOrDst, paginationSize, RunningLowThreshold)
 
 	c.QP.Queues[name] = queue
 	c.QP.QueueLevels[name] = phase
-	c.QP.QueueBoardChans[name] = make(chan int, 1)
-	c.QP.PublishSignals[name] = make(chan bool, 1)
-	c.QP.RunningLowChans[name] = runningLowChan
 	c.QP.LastPathCursors[name] = "" // 🆕 Add path-based cursor for this queue
 }
 
@@ -169,14 +170,10 @@ func (c *Conductor) TeardownQueue(queueName string) {
 		delete(c.QP.PollingControllers, queueName)
 	}
 
-	// 🆕 NEW: Close all channels to stop goroutines
-	close(queue.IdleChan)
+	// Close StopChan to signal goroutines to stop
 	close(queue.StopChan)
 
-	// Close running low channel to stop that goroutine
-	if runningLowChan, exists := c.QP.RunningLowChans[queueName]; exists {
-		close(runningLowChan)
-	}
+	// SignalRouter handles cleanup for signal-based communication
 
 	// Remove idle workers
 	queue.mu.Lock()
@@ -194,10 +191,7 @@ func (c *Conductor) TeardownQueue(queueName string) {
 	// Delete from all QP maps
 	delete(c.QP.Queues, queueName)
 	delete(c.QP.QueueLevels, queueName)
-	delete(c.QP.QueueBoardChans, queueName)
-	delete(c.QP.PublishSignals, queueName)
 	delete(c.QP.LastPathCursors, queueName)
-	delete(c.QP.RunningLowChans, queueName)
 	delete(c.QP.ScanModes, queueName)
 	delete(c.QP.QueriesPerPhase, queueName)
 

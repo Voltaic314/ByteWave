@@ -87,10 +87,6 @@ func (wb *WorkerBase) Run(process func(*Task) error) {
 
 		task := wb.Queue.PopTask()
 
-		logging.GlobalLogger.LogWorker("info", wb.ID, task.GetPath(), "Worker popped task from queue", map[string]any{
-			"queueType": wb.QueueType,
-		})
-
 		if task == nil {
 			wb.State = WorkerIdle
 			wb.TaskReady = true
@@ -99,6 +95,10 @@ func (wb *WorkerBase) Run(process func(*Task) error) {
 			wb.Queue.WaitForWork()
 			continue // skip sleep - just like my college days...
 		}
+
+		logging.GlobalLogger.LogWorker("info", wb.ID, task.GetPath(), "Worker popped task from queue", map[string]any{
+			"queueType": wb.QueueType,
+		})
 
 		logging.GlobalLogger.LogWorker("info", wb.ID, task.GetPath(), "Worker acquired task", map[string]any{
 			"taskID": task.ID,

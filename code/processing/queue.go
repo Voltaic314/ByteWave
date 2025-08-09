@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	"github.com/Voltaic314/ByteWave/code/logging"
+	"github.com/Voltaic314/ByteWave/code/signals"
 )
 
 // QueueType defines whether a queue is for traversal or uploading.
@@ -39,16 +40,15 @@ type TaskQueue struct {
 	GlobalSettings      map[string]any // Stores global settings
 	State               QueueState     // Tracks if the queue is running or paused
 	cond                *sync.Cond     // Queue-specific condition variable
-	RunningLowChan      chan int       // Unique channel per queue for RunningLow signals
+	SignalTopicBase     string         // e.g. "src-traversal"
 	RunningLowTriggered bool           // Prevents duplicate RunningLow signals
 	RunningLowThreshold int            // Threshold for triggering RunningLow signals
-	IdleChan            chan int       // Channel for idle signals
 	IdleTriggered       bool           // Prevents duplicate idle signals
 	StopChan            chan struct{}  // Channel to signal goroutines to stop
 }
 
 // NewTaskQueue initializes a new queue for traversal or upload.
-func NewTaskQueue(queueType QueueType, phase int, srcOrDst string, paginationSize int, runningLowChan chan int, runningLowThreshold int) *TaskQueue {
+func NewTaskQueue(queueType QueueType, phase int, srcOrDst string, paginationSize int, runningLowThreshold int) *TaskQueue {
 	queueID := fmt.Sprintf("%s-%s", srcOrDst, queueType)
 	logging.GlobalLogger.LogMessage("info", "Creating new task queue", map[string]any{
 		"queueID":        queueID,
@@ -70,10 +70,9 @@ func NewTaskQueue(queueType QueueType, phase int, srcOrDst string, paginationSiz
 		PaginationChan:      make(chan int, 1),
 		GlobalSettings:      make(map[string]any),
 		State:               QueueRunning,
-		RunningLowChan:      runningLowChan,
+		SignalTopicBase:     queueID,
 		RunningLowTriggered: false,
 		RunningLowThreshold: runningLowThreshold,
-		IdleChan:            make(chan int, 1),
 		IdleTriggered:       false,
 		StopChan:            make(chan struct{}),
 	}
@@ -129,7 +128,10 @@ func (q *TaskQueue) CheckAndTriggerQP() {
 			"threshold":   q.RunningLowThreshold,
 		})
 		q.RunningLowTriggered = true
-		q.RunningLowChan <- q.Phase
+		signals.GlobalSR.Publish(signals.Signal{
+			Topic:   fmt.Sprintf("qp:running_low:%s", q.SignalTopicBase),
+			Payload: q.Phase,
+		})
 	}
 }
 
@@ -144,10 +146,10 @@ func (q *TaskQueue) SignalWorkerIdle() {
 			"queueID": q.QueueID,
 		})
 		q.IdleTriggered = true
-		select {
-		case q.IdleChan <- q.Phase:
-		default:
-		}
+		signals.GlobalSR.Publish(signals.Signal{
+			Topic:   fmt.Sprintf("qp:idle:%s", q.SignalTopicBase),
+			Payload: q.Phase,
+		})
 	}
 }
 
@@ -230,10 +232,10 @@ func (q *TaskQueue) PopTask() *Task {
 	// Running‑low trigger (unchanged)
 	if len(q.tasks) < q.RunningLowThreshold && !q.RunningLowTriggered {
 		q.RunningLowTriggered = true
-		select {
-		case q.RunningLowChan <- q.Phase:
-		default:
-		}
+		signals.GlobalSR.Publish(signals.Signal{
+			Topic:   fmt.Sprintf("qp:running_low:%s", q.SignalTopicBase),
+			Payload: q.Phase,
+		})
 	}
 
 	// Find first unlocked task, remove it from slice, return it

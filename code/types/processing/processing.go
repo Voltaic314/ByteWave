@@ -65,7 +65,7 @@ type TaskQueue struct {
 	GlobalSettings      map[string]any
 	State               QueueState
 	Cond                *sync.Cond
-	RunningLowChan      chan int
+	SignalTopicBase     string
 	RunningLowTriggered bool
 	RunningLowThreshold int
 }
@@ -89,22 +89,17 @@ type PollingController struct {
 
 // QueuePublisher manages multiple queues dynamically
 type QueuePublisher struct {
-	DB                       interface{} // *db.DB
-	Queues                   map[string]*TaskQueue
-	QueueLevels              map[string]int
-	QueueBoardChans          map[string]chan int
-	PublishSignals           map[string]chan bool
-	PhaseUpdated             chan int
-	Mutex                    sync.Mutex
-	Running                  bool
-	LastPathCursors          map[string]string
-	RetryThreshold           int
-	BatchSize                int
-	RunningLowChans          map[string]chan int
-	PollingControllers       map[string]*PollingController
-	QueriesPerPhase          map[string]int
-	TraversalCompleteSignals map[string]chan string
-	ScanModes                map[string]int // scanMode
+	DB                 interface{} // *db.DB
+	Queues             map[string]*TaskQueue
+	QueueLevels        map[string]int
+	Mutex              sync.Mutex
+	Running            bool
+	LastPathCursors    map[string]string
+	RetryThreshold     int
+	BatchSize          int
+	PollingControllers map[string]*PollingController
+	QueriesPerPhase    map[string]int
+	ScanModes          map[string]int // scanMode
 }
 
 // Conductor manages the overall processing system
