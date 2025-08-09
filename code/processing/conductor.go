@@ -47,8 +47,9 @@ func (c *Conductor) StartTraversal() {
 	var os_svc services.BaseServiceInterface = services.NewOSService()
 	pv_obj := pv.NewPathValidator()
 
-	// Add workers (example: 1 worker)
-	for range 10 {
+	// Create the workers and assign them to the queue! 🤖
+	num_of_workers := 10
+	for range num_of_workers {
 		tw := &TraverserWorker{
 			WorkerBase: c.AddWorker("src-traversal", "src"),
 			DB:         c.DB,

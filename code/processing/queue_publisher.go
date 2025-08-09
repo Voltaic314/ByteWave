@@ -122,13 +122,26 @@ func (qp *QueuePublisher) StartListening() {
 			"newLevel": level,
 		})
 
-		for name := range qp.Queues {
+		// Snapshot queue names under lock to avoid concurrent map iteration
+		qp.Mutex.Lock()
+		names := make([]string, 0, len(qp.Queues))
+		for n := range qp.Queues {
+			names = append(names, n)
+		}
+		qp.Mutex.Unlock()
+
+		for _, name := range names {
+			qp.Mutex.Lock()
 			qp.QueueLevels[name] = level
 			qp.ScanModes[name] = firstPass
+			qp.Mutex.Unlock()
 			qp.PublishTasks(name)
 
 			// Install per-queue handlers and refresher only once
-			if !qp.HandlersInstalled[name] {
+			qp.Mutex.Lock()
+			needInstall := !qp.HandlersInstalled[name]
+			qp.Mutex.Unlock()
+			if needInstall {
 				queueName := name
 				signals.GlobalSR.On("qp:running_low:"+queueName, func(sig signals.Signal) {
 					phase, ok := sig.Payload.(int)
@@ -147,8 +160,10 @@ func (qp *QueuePublisher) StartListening() {
 						return
 					}
 
+					qp.Mutex.Lock()
 					qp.QueueLevels[queueName] = phase
 					qp.ScanModes[queueName] = firstPass
+					qp.Mutex.Unlock()
 					qp.PublishTasks(queueName)
 					queue.ResetRunningLowTrigger()
 				})
@@ -207,7 +222,9 @@ func (qp *QueuePublisher) StartListening() {
 					}
 				}(queueName)
 
+				qp.Mutex.Lock()
 				qp.HandlersInstalled[name] = true
+				qp.Mutex.Unlock()
 			}
 		}
 	})
@@ -236,7 +253,6 @@ func (qp *QueuePublisher) PublishTasks(queueName string) {
 	qp.Mutex.Lock()
 	mode := qp.ScanModes[queueName]
 	currentLevel := qp.QueueLevels[queueName]
-
 	var lastPath string
 	if mode == firstPass {
 		lastPath = qp.LastPathCursors[queueName]

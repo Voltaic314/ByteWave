@@ -123,18 +123,18 @@ func (wq *WriteQueue) flushLogQueue() []typesdb.Batch {
 }
 
 func (wq *WriteQueue) flushNodeQueue() []typesdb.Batch {
+	wq.mu.Lock()
 	if len(wq.queue) == 0 {
-		wq.mu.Lock()
 		wq.isWriting = false
 		wq.mu.Unlock()
 		return nil
 	}
-
-	// snapshot the keys
+	// snapshot the keys under lock to avoid concurrent map iteration
 	keys := make([]string, 0, len(wq.queue))
 	for p := range wq.queue {
 		keys = append(keys, p)
 	}
+	wq.mu.Unlock()
 
 	var all []typesdb.Batch
 	// drain round-by-round
