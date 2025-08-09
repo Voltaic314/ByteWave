@@ -33,9 +33,15 @@ type SignalRouter struct {
 
 // TopicHub manages subscribers for a specific topic
 type TopicHub struct {
-	Input       chan Signal   // Channel for incoming signals
-	Subscribers []chan Signal // List of subscriber channels
-	Mu          sync.RWMutex  // Mutex for subscriber list access
+	Input       chan Signal  // Channel for incoming signals
+	Subscribers []Subscriber // Subscribers with identity
+	Mu          sync.RWMutex // Mutex for subscriber list access
+}
+
+// Subscriber represents a registered consumer with identity for ack aggregation
+type Subscriber struct {
+	Mailbox chan Signal // Delivery channel
+	ActorID string      // Stable identity for deduplicating acks
 }
 
 // SignalHandler is a function type for processing signals

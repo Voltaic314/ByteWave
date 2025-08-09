@@ -33,8 +33,13 @@ type SignalRouter struct {
 
 type topicHub struct {
 	input       chan Signal
-	subscribers []chan Signal
+	subscribers []subscriber
 	mu          sync.RWMutex
+}
+
+type subscriber struct {
+	mailbox chan Signal
+	actorID string
 }
 
 var GlobalSR *SignalRouter
@@ -54,7 +59,7 @@ func (sr *SignalRouter) Subscribe(topic string, mailbox chan Signal) {
 	if !exists {
 		hub = &topicHub{
 			input:       make(chan Signal, 64),
-			subscribers: []chan Signal{},
+			subscribers: make([]subscriber, 0),
 		}
 		sr.topics[topic] = hub
 		go hub.runFanOut(topic)
@@ -63,7 +68,7 @@ func (sr *SignalRouter) Subscribe(topic string, mailbox chan Signal) {
 
 	hub.mu.Lock()
 	defer hub.mu.Unlock()
-	hub.subscribers = append(hub.subscribers, mailbox)
+	hub.subscribers = append(hub.subscribers, subscriber{mailbox: mailbox, actorID: uuid.New().String()})
 	logging.GlobalLogger.LogSystem("trace", "SignalRouter", fmt.Sprintf("Subscribed mailbox to topic: %s", topic), map[string]any{
 		"mailbox_size": cap(mailbox),
 	})
@@ -147,22 +152,22 @@ func (sr *SignalRouter) PublishWithAck(sig Signal, timeout time.Duration) error 
 func (hub *topicHub) runFanOut(topic string) {
 	for sig := range hub.input {
 		hub.mu.RLock()
-		subs := make([]chan Signal, len(hub.subscribers))
+		subs := make([]subscriber, len(hub.subscribers))
 		copy(subs, hub.subscribers)
 		hub.mu.RUnlock()
 
-		if sig.AckMode == AckAny || sig.AckMode == AckAll {
-			go handleAcks(sig, subs)
-		}
+		// Build and deliver per-subscriber signals
+		var acks []ackEntry
 
-		for i, mailbox := range subs {
+		for i, s := range subs {
 			sigToSend := sig
 			if sig.AckMode != AckNone {
-				sigToSend.Ack = make(chan struct{})
+				sigToSend.Ack = make(chan struct{}, 1) // one-shot
+				acks = append(acks, ackEntry{id: s.actorID, ch: sigToSend.Ack})
 			}
 
 			select {
-			case mailbox <- sigToSend:
+			case s.mailbox <- sigToSend:
 				logging.GlobalLogger.LogSystem("trace", "SignalRouter", "Signal delivered to subscriber", map[string]any{
 					"topic":    topic,
 					"id":       sig.ID,
@@ -175,6 +180,11 @@ func (hub *topicHub) runFanOut(topic string) {
 					"subIndex": i,
 				})
 			}
+		}
+
+		// Aggregate acknowledgments when required
+		if sig.AckMode == AckAny || sig.AckMode == AckAll {
+			go aggregateAcks(sig, acks)
 		}
 	}
 }
@@ -203,50 +213,53 @@ func (sr *SignalRouter) On(topic string, handler func(Signal), async ...bool) {
 	}()
 }
 
-func handleAcks(sig Signal, subs []chan Signal) {
-	switch sig.AckMode {
-	case AckAny:
-		for i, ch := range subs {
-			go func(c chan Signal, idx int) {
-				select {
-				case <-sig.Ack:
-					// already acknowledged
-				case <-c:
-					select {
-					case sig.Ack <- struct{}{}:
-						logging.GlobalLogger.LogSystem("trace", "SignalRouter", "AckAny fulfilled", map[string]any{
-							"topic":    sig.Topic,
-							"id":       sig.ID,
-							"subIndex": idx,
-						})
-					default:
-					}
-				}
-			}(ch, i)
-		}
-	case AckAll:
-		var wg sync.WaitGroup
-		wg.Add(len(subs))
+type ackEntry struct {
+	id string
+	ch chan struct{}
+}
 
-		for i, ch := range subs {
-			go func(c chan Signal, idx int) {
-				defer wg.Done()
-				<-c
-				logging.GlobalLogger.LogSystem("trace", "SignalRouter", "AckAll partial ack received", map[string]any{
-					"topic":    sig.Topic,
-					"id":       sig.ID,
-					"subIndex": idx,
-				})
-			}(ch, i)
-		}
+func aggregateAcks(root Signal, acks []ackEntry) {
+	if root.AckMode == AckNone || len(acks) == 0 {
+		return
+	}
 
+	target := 1
+	if root.AckMode == AckAll {
+		target = len(acks)
+	}
+
+	seen := make(map[string]struct{}, len(acks))
+	done := make(chan string, len(acks))
+
+	for _, a := range acks {
+		a := a
 		go func() {
-			wg.Wait()
-			sig.Ack <- struct{}{}
-			logging.GlobalLogger.LogSystem("debug", "SignalRouter", "AckAll completed", map[string]any{
-				"topic": sig.Topic,
-				"id":    sig.ID,
-			})
+			<-a.ch
+			done <- a.id
 		}()
 	}
+
+	remaining := target
+	for remaining > 0 {
+		id := <-done
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		remaining--
+	}
+
+	if root.Ack != nil {
+		select {
+		case root.Ack <- struct{}{}:
+		default:
+		}
+	}
+
+	logging.GlobalLogger.LogSystem("debug", "SignalRouter", "Ack aggregation completed", map[string]any{
+		"topic":  root.Topic,
+		"id":     root.ID,
+		"mode":   root.AckMode,
+		"needed": target,
+	})
 }
