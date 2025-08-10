@@ -418,9 +418,8 @@ func (qp *QueuePublisher) PublishDestinationTasks(queueName string) {
 	for _, dstFolder := range dstFolders {
 		expectedSrcChildren, expectedSrcFiles := qp.fetchExpectedSourceChildren(dstFolder.Path)
 
-		// Create destination traversal task with expected source children
-		taskID := fmt.Sprintf("dst-%d-%s", currentLevel, dstFolder.Identifier)
-		dstTask, err := NewDstTraversalTask(taskID, dstFolder, nil, expectedSrcChildren, expectedSrcFiles)
+		// Create destination traversal task with expected source children (use identifier as task ID)
+		dstTask, err := NewDstTraversalTask(dstFolder.Identifier, dstFolder, nil, expectedSrcChildren, expectedSrcFiles)
 		if err != nil {
 			logging.GlobalLogger.LogQP("error", queueName, dstFolder.Path, "Failed to create destination task", map[string]any{
 				"error": err.Error(),
@@ -483,13 +482,16 @@ func (qp *QueuePublisher) fetchDestinationFolders(level int) []*filesystem.Folde
 
 // fetchExpectedSourceChildren queries the source table for expected children of the given path
 func (qp *QueuePublisher) fetchExpectedSourceChildren(dstPath string) ([]*filesystem.Folder, []*filesystem.File) {
-	// Query source table for children of this path
+	// Convert destination path to equivalent source path for cross-table join
+	srcPath := qp.convertPathBetweenRoots(dstPath, "dst-traversal", "src-traversal")
+
+	// Query source table for children of this equivalent path
 	query := `SELECT path, name, identifier, parent_id, type, last_modified, size
 	          FROM source_nodes 
 	          WHERE parent_id = ?
 	          ORDER BY type, name`
 
-	rows, err := qp.DB.Query("source_nodes", query, dstPath)
+	rows, err := qp.DB.Query("source_nodes", query, srcPath)
 	if err != nil {
 		logging.GlobalLogger.LogSystem("error", "QP", "Failed to query expected source children", map[string]any{
 			"error": err.Error(),
@@ -538,7 +540,7 @@ func (qp *QueuePublisher) fetchExpectedSourceChildren(dstPath string) ([]*filesy
 	return expectedFolders, expectedFiles
 }
 
-// discoverAndSetRootPath finds the root folder (level 0) for the given table and stores it
+// discoverAndSetRootPath finds the root folder from the dedicated root table and stores it
 func (qp *QueuePublisher) discoverAndSetRootPath(queueName string, table string) error {
 	qp.Mutex.Lock()
 	// Check if root path is already discovered for this queue
@@ -548,14 +550,24 @@ func (qp *QueuePublisher) discoverAndSetRootPath(queueName string, table string)
 	}
 	qp.Mutex.Unlock()
 
-	// Query for the root folder (level 0)
-	query := `SELECT path FROM ` + table + ` WHERE level = 0 AND type = 'folder' LIMIT 1`
-	rows, err := qp.DB.Query(table, query)
+	// Determine the root table based on the node table
+	var rootTable string
+	if table == "source_nodes" {
+		rootTable = "source_root"
+	} else if table == "destination_nodes" {
+		rootTable = "destination_root"
+	} else {
+		return fmt.Errorf("unknown table %s for root discovery", table)
+	}
+
+	// Query the dedicated root table
+	query := `SELECT path FROM ` + rootTable + ` LIMIT 1`
+	rows, err := qp.DB.Query(rootTable, query)
 	if err != nil {
 		logging.GlobalLogger.LogSystem("error", "QP", "Failed to discover root path", map[string]any{
-			"error": err.Error(),
-			"table": table,
-			"queue": queueName,
+			"error":     err.Error(),
+			"rootTable": rootTable,
+			"queue":     queueName,
 		})
 		return err
 	}
@@ -565,14 +577,14 @@ func (qp *QueuePublisher) discoverAndSetRootPath(queueName string, table string)
 	if rows.Next() {
 		if err := rows.Scan(&rootPath); err != nil {
 			logging.GlobalLogger.LogSystem("error", "QP", "Failed to scan root path", map[string]any{
-				"error": err.Error(),
-				"table": table,
-				"queue": queueName,
+				"error":     err.Error(),
+				"rootTable": rootTable,
+				"queue":     queueName,
 			})
 			return err
 		}
 	} else {
-		return fmt.Errorf("no root folder (level 0) found in table %s", table)
+		return fmt.Errorf("no root found in table %s", rootTable)
 	}
 
 	// Store the discovered root path
@@ -581,41 +593,152 @@ func (qp *QueuePublisher) discoverAndSetRootPath(queueName string, table string)
 	qp.Mutex.Unlock()
 
 	logging.GlobalLogger.LogSystem("info", "QP", "Discovered root path for queue", map[string]any{
-		"queue":    queueName,
-		"rootPath": rootPath,
-		"table":    table,
+		"queue":     queueName,
+		"rootPath":  rootPath,
+		"rootTable": rootTable,
 	})
 
 	return nil
 }
 
-// normalizePathForJoin converts an absolute path to a root-relative path for cross-table joins
-func (qp *QueuePublisher) normalizePathForJoin(queueName, absolutePath string) string {
+// normalizePathForJoin converts paths from OS service to database format
+// In the new model, OS service provides absolute paths via identifiers,
+// but we store relative paths in the database starting with "/"
+func (qp *QueuePublisher) normalizePathForJoin(queueName, pathFromOSService string) string {
 	qp.Mutex.Lock()
 	rootPath, exists := qp.RootPaths[queueName]
 	qp.Mutex.Unlock()
 
 	if !exists || rootPath == "" {
-		// Fallback: return the absolute path if no root is known
-		return absolutePath
+		// If no root known, assume it's already relative
+		if !strings.HasPrefix(pathFromOSService, "/") {
+			return "/" + pathFromOSService
+		}
+		return pathFromOSService
 	}
 
 	// If this is the root path itself, return "/"
-	if absolutePath == rootPath {
+	if pathFromOSService == rootPath {
 		return "/"
 	}
 
 	// Remove the root prefix and ensure it starts with "/"
-	if strings.HasPrefix(absolutePath, rootPath) {
-		relativePath := strings.TrimPrefix(absolutePath, rootPath)
-		if !strings.HasPrefix(relativePath, "/") {
-			relativePath = "/" + relativePath
+	if strings.HasPrefix(pathFromOSService, rootPath) {
+		relativePath := strings.TrimPrefix(pathFromOSService, rootPath)
+		// Handle both / and \ path separators
+		relativePath = strings.TrimPrefix(relativePath, "/")
+		relativePath = strings.TrimPrefix(relativePath, "\\")
+		if relativePath == "" {
+			return "/"
 		}
-		return relativePath
+		return "/" + strings.ReplaceAll(relativePath, "\\", "/")
 	}
 
-	// Fallback: return absolute path if it doesn't match the root
-	return absolutePath
+	// If path doesn't match root, assume it's already relative
+	if !strings.HasPrefix(pathFromOSService, "/") {
+		return "/" + pathFromOSService
+	}
+	return pathFromOSService
+}
+
+// convertPathBetweenRoots converts a path from one queue's root system to another queue's root system
+func (qp *QueuePublisher) convertPathBetweenRoots(fromPath, fromQueueName, toQueueName string) string {
+	qp.Mutex.Lock()
+	fromRoot, fromExists := qp.RootPaths[fromQueueName]
+	toRoot, toExists := qp.RootPaths[toQueueName]
+	qp.Mutex.Unlock()
+
+	if !fromExists || !toExists {
+		// Fallback: assume paths are equivalent if roots not known
+		return fromPath
+	}
+
+	// Extract the relative portion from the fromPath
+	var relativePart string
+	if fromPath == fromRoot {
+		// This is the root itself
+		relativePart = ""
+	} else if strings.HasPrefix(fromPath, fromRoot) {
+		// Extract relative portion
+		relativePart = strings.TrimPrefix(fromPath, fromRoot)
+		// Remove leading slash if present
+		relativePart = strings.TrimPrefix(relativePart, "/")
+		relativePart = strings.TrimPrefix(relativePart, "\\")
+	} else {
+		// Path doesn't match expected root, return as-is
+		return fromPath
+	}
+
+	// Construct equivalent path in target root system
+	if relativePart == "" {
+		// This maps to the target root
+		return toRoot
+	}
+
+	// Combine target root with relative part
+	return filepath.Join(toRoot, relativePart)
+}
+
+// createRootTask creates the initial root task from the root table for level 0
+func (qp *QueuePublisher) createRootTask(queueName string, table string) ([]Task, error) {
+	// Determine the root table based on the node table
+	var rootTable string
+	if table == "source_nodes" {
+		rootTable = "source_root"
+	} else if table == "destination_nodes" {
+		rootTable = "destination_root"
+	} else {
+		return nil, fmt.Errorf("unknown table %s for root task creation", table)
+	}
+
+	// Query the root table for root information
+	query := `SELECT path, name, identifier, last_modified FROM ` + rootTable + ` LIMIT 1`
+	rows, err := qp.DB.Query(rootTable, query)
+	if err != nil {
+		logging.GlobalLogger.LogSystem("error", "QP", "Failed to query root table", map[string]any{
+			"error":     err.Error(),
+			"rootTable": rootTable,
+			"queue":     queueName,
+		})
+		return nil, err
+	}
+	defer rows.Close()
+
+	if rows.Next() {
+		var rootPath, name, identifier, lastModified string
+		if err := rows.Scan(&rootPath, &name, &identifier, &lastModified); err != nil {
+			logging.GlobalLogger.LogSystem("error", "QP", "Failed to scan root data", map[string]any{
+				"error": err.Error(),
+				"queue": queueName,
+			})
+			return nil, err
+		}
+
+		// Create root task with path="/" and absolute identifier for OS service
+		folder := &filesystem.Folder{
+			Name:         name,
+			Path:         "/",        // Always "/" for root in the new model
+			ParentID:     "",         // Root has no parent
+			Identifier:   identifier, // Keep absolute path for OS service
+			LastModified: lastModified,
+			Level:        0,
+		}
+
+		task, err := NewSrcTraversalTask(identifier, folder, nil)
+		if err != nil {
+			return nil, err
+		}
+
+		logging.GlobalLogger.LogSystem("info", "QP", "Created root task", map[string]any{
+			"queue":      queueName,
+			"path":       "/",
+			"identifier": identifier,
+		})
+
+		return []Task{task}, nil
+	}
+
+	return nil, fmt.Errorf("no root found in table %s", rootTable)
 }
 
 func (qp *QueuePublisher) PublishTasks(queueName string) {
@@ -650,10 +773,22 @@ func (qp *QueuePublisher) PublishTasks(queueName string) {
 	}
 	qp.Mutex.Unlock()
 
-	// force a flush in the WQ before trying to fetch anything
-	qp.FlushTable(table)
+	var tasks []Task
+	var err error
 
-	tasks := qp.FetchTasksFromDB(table, queue.Type, currentLevel, lastPath, queueName)
+	// Handle level 0 specially - create root task from root table
+	if currentLevel == 0 && mode == firstPass && lastPath == "" {
+		tasks, err = qp.createRootTask(queueName, table)
+		if err != nil {
+			logging.GlobalLogger.LogQP("error", queueName, "", "Failed to create root task", map[string]any{
+				"error": err.Error(),
+			})
+			return
+		}
+	} else {
+		// Normal task fetching from node tables (level 1+)
+		tasks = qp.FetchTasksFromDB(table, queue.Type, currentLevel, lastPath, queueName)
+	}
 
 	if len(tasks) > 0 {
 		logging.GlobalLogger.LogQP("debug", queueName, "", "Tasks fetched from DB", map[string]any{
@@ -662,25 +797,7 @@ func (qp *QueuePublisher) PublishTasks(queueName string) {
 			"level":        currentLevel,
 			"lastSeenPath": lastPath,
 		})
-	} else {
-		logging.GlobalLogger.LogQP("debug", queueName, "", "No tasks fetched from DB", map[string]any{
-			"scanMode":     mode,
-			"level":        currentLevel,
-			"lastSeenPath": lastPath,
-		})
-	}
 
-	if len(tasks) <= 0 {
-		if qp.checkTraversalComplete(queueName, len(tasks)) {
-			signals.GlobalSR.Publish(signals.Signal{
-				Topic:   "qp:traversal_complete:" + queueName,
-				Payload: queueName,
-			})
-			return
-		}
-	}
-
-	if len(tasks) > 0 {
 		queue.AddTasks(tasks)
 		// 🆕 NEW: Reset idle trigger when new tasks are added
 		queue.ResetIdleTrigger()
@@ -688,22 +805,35 @@ func (qp *QueuePublisher) PublishTasks(queueName string) {
 		if mode == firstPass {
 			if lastRaw, ok := qp.LastDBPaths[queueName]; ok && lastRaw != "" {
 				qp.LastPathCursors[queueName] = lastRaw
-			} else if len(tasks) > 0 {
+			} else {
 				// Fallback to task path if we don't have a recorded raw DB path yet
 				qp.LastPathCursors[queueName] = tasks[len(tasks)-1].GetPath()
 			}
 		}
-	}
 
-	// Switch to retry mode only if first pass is truly exhausted
-	// (got zero tasks, not just a small batch)
-	if mode == firstPass && len(tasks) == 0 {
-		qp.ScanModes[queueName] = retryPass
-	}
+		// Start polling if short batch
+		if len(tasks) < qp.BatchSize {
+			qp.startPolling(queueName)
+			// Switch to retry mode only if we were already in firstPass and got less than full batch
+			// Don't switch if we just advanced phases and are starting fresh
+			if mode == firstPass {
+				qp.ScanModes[queueName] = retryPass
+			}
+		}
+	} else {
+		logging.GlobalLogger.LogQP("debug", queueName, "", "No tasks fetched from DB", map[string]any{
+			"scanMode":     mode,
+			"level":        currentLevel,
+			"lastSeenPath": lastPath,
+		})
 
-	// Start polling if short or empty batch
-	if len(tasks) < qp.BatchSize {
+		// Always start polling if no tasks
 		qp.startPolling(queueName)
+		// Switch to retry mode only if we were already in firstPass and found no tasks
+		// Don't switch if we just advanced phases and are starting fresh
+		if mode == firstPass {
+			qp.ScanModes[queueName] = retryPass
+		}
 	}
 }
 
@@ -714,6 +844,12 @@ func (qp *QueuePublisher) isRoundComplete(queue *TaskQueue) bool {
 		"allWorkersIdle": queue.AreAllWorkersIdle(),
 		"state":          queue.State,
 	})
+	if queue.Type == TraversalQueueType && queue.SrcOrDst == "src" {
+		qp.DB.ForceFlushTable("source_nodes")
+	} else if queue.Type == UploadQueueType && queue.SrcOrDst == "dst" {
+		qp.DB.ForceFlushTable("destination_nodes")
+		qp.DB.ForceFlushTable("source_nodes")
+	}
 	return queue.QueueSize() == 0 && queue.AreAllWorkersIdle() && queue.State == QueueRunning
 }
 
@@ -722,7 +858,7 @@ func (qp *QueuePublisher) advancePhase(queueName string) {
 	queue.Phase++
 	qp.QueueLevels[queueName] = queue.Phase
 	qp.LastPathCursors[queueName] = ""
-	qp.ScanModes[queueName] = firstPass
+	qp.ScanModes[queueName] = firstPass // Ensure new phase starts with firstPass
 	qp.QueriesPerPhase[queueName] = 0
 
 	logging.GlobalLogger.LogMessage("info", "Advancing to next phase", map[string]any{
@@ -758,8 +894,9 @@ func (qp *QueuePublisher) checkTraversalComplete(queueName string, queryResultSi
 		"currentLevel":    currentLevel,
 	})
 
-	// Only check for completion if we're not at level 0 and got no results
-	if queryResultSize == 0 && currentLevel != 0 {
+	// Only check for completion if we didn't get any tasks this round
+	// Allow completion check regardless of scan mode when advancing phases
+	if queryResultSize == 0 && qp.QueriesPerPhase[queueName] <= 0 {
 		// Check if there are any pending tasks at the current level in the database
 		table := "source_nodes"
 		if queue.Type == UploadQueueType {
@@ -770,9 +907,6 @@ func (qp *QueuePublisher) checkTraversalComplete(queueName string, queryResultSi
 		if queue.Type == UploadQueueType {
 			statusColumn = "upload_status"
 		}
-
-		// Force flush the write queue to ensure all pending inserts are committed
-		qp.FlushTable(table)
 
 		// Query to check if there are any pending tasks at current level OR higher levels
 		checkQuery := `SELECT COUNT(*) FROM ` + table + ` WHERE ` + statusColumn + ` = 'pending' AND level >= ?`
@@ -995,6 +1129,7 @@ func (qp *QueuePublisher) FetchTasksFromDB(table string, queueType QueueType, cu
 			query += ` AND path > ?`
 			params = append(params, lastSeenPath)
 		}
+		qp.Mutex.Unlock()
 	} else { // retryPass
 		query += statusColumn + ` = 'failed'
 		          AND ` + retryColumn + ` < ?
@@ -1029,9 +1164,7 @@ func (qp *QueuePublisher) FetchTasksFromDB(table string, queueType QueueType, cu
 				})
 			}
 		}
-		qp.Mutex.Lock()
 	}
-	qp.Mutex.Unlock()
 
 	if onlyFolders {
 		query += ` AND type = 'folder'`
@@ -1043,10 +1176,11 @@ func (qp *QueuePublisher) FetchTasksFromDB(table string, queueType QueueType, cu
 	params = append(params, qp.BatchSize)
 
 	// Debug log the query
-	// logging.GlobalLogger.LogMessage("info", "Executing query", map[string]any{
-	// 	"query":  query,
-	// 	"params": params,
-	// })
+	logging.GlobalLogger.LogMessage("info", "Executing query", map[string]any{
+		"query":    query,
+		"params":   params,
+		"scanMode": qp.ScanModes[queueName],
+	})
 
 	return qp.runTaskQuery(table, query, params, currentLevel, queueName)
 }
@@ -1077,12 +1211,13 @@ func (qp *QueuePublisher) runTaskQuery(table, query string, params []any, curren
 			continue
 		}
 
-		// Record last raw DB path for stable cursor updates
-		qp.Mutex.Lock()
-		qp.LastDBPaths[queueName] = path
-		qp.Mutex.Unlock()
-
+		// Paths from DB are now consistently relative, just normalize slashes
 		normalizedPath := filepath.ToSlash(path)
+
+		// Record path for stable cursor updates (paths are already in correct relative format)
+		qp.Mutex.Lock()
+		qp.LastDBPaths[queueName] = normalizedPath
+		qp.Mutex.Unlock()
 
 		if nodeType == "folder" {
 			folder := &filesystem.Folder{
@@ -1093,7 +1228,7 @@ func (qp *QueuePublisher) runTaskQuery(table, query string, params []any, curren
 				LastModified: lastModified,
 				Level:        currentLevel,
 			}
-			task, err := NewSrcTraversalTask(normalizedPath, folder, &folder.ParentID)
+			task, err := NewSrcTraversalTask(identifier, folder, &folder.ParentID)
 			if err == nil {
 				tasks = append(tasks, task)
 			}

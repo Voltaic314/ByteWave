@@ -96,7 +96,7 @@ func (osSvc *OSService) GetAllItems(folder filesystem.Folder, _ <-chan int) (<-c
 		defer close(errChan)
 
 		osSvc.TotalDiskReads++
-		normalizedPath := osSvc.NormalizePath(folder.Path)
+		normalizedPath := osSvc.NormalizePath(folder.Identifier)
 		entries, err := os.ReadDir(normalizedPath)
 		if err != nil {
 			logging.GlobalLogger.LogMessage("error", "Failed to read directory", map[string]any{
