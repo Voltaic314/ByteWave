@@ -11,7 +11,7 @@ if (!(Test-Path -Path "./venv")) {
 
 # Activate the Python venv and run the reset script
 $pythonPath = ".\venv\Scripts\python.exe"
-$setupScript = "tests\traversal_tests\setup_src_traversal_db.py"
+$setupScript = "tests\traversal_tests\setup_db.py"
 
 if (Test-Path $pythonPath) {
     Write-Host "[ByteWave] Running setup script to prepare test database..."

@@ -148,6 +148,35 @@ func (qp *QueuePublisher) StartListening() {
 		}
 	})
 
+	// Subscribe to destination phase updates
+	signals.GlobalSR.On("qp:phase_updated:dst-traversal", func(sig signals.Signal) {
+		level, ok := sig.Payload.(int)
+		if !ok {
+			logging.GlobalLogger.LogSystem("error", "QP", "Invalid data type in dst phase_updated signal", map[string]any{
+				"payload_type": fmt.Sprintf("%T", sig.Payload),
+				"payload":      sig.Payload,
+			})
+			return
+		}
+
+		logging.GlobalLogger.LogSystem("info", "QP", "Destination phase updated", map[string]any{
+			"newLevel": level,
+		})
+
+		// Handle destination queue with source dependency check
+		dstQueueName := "dst-traversal"
+		qp.Mutex.Lock()
+		qp.QueueLevels[dstQueueName] = level
+		qp.ScanModes[dstQueueName] = firstPass
+		qp.Mutex.Unlock()
+
+		// Wait for source to be ready if needed (in a goroutine to avoid blocking)
+		go func() {
+			qp.waitForSrcProgress(level)
+			qp.PublishDestinationTasks(dstQueueName)
+		}()
+	})
+
 	// Keep the main loop running
 	for qp.Running {
 		time.Sleep(100 * time.Millisecond)
@@ -250,8 +279,8 @@ func (qp *QueuePublisher) checkDestinationStart(srcLevel int) {
 		return // Destination queue not set up yet
 	}
 
-	// Check if we should start destination (source is at level 2 or higher)
-	if !dstLevelExists && srcLevel >= 2 {
+	// Check if we should start destination (source has completed level 0)
+	if !dstLevelExists && srcLevel >= 1 {
 		logging.GlobalLogger.LogSystem("info", "QP", "Starting destination traversal", map[string]any{
 			"srcLevel": srcLevel,
 		})
@@ -276,7 +305,9 @@ func (qp *QueuePublisher) checkDestinationStart(srcLevel int) {
 		return
 	}
 
-	// Check if destination can advance (source must be N+2 ahead)
+	// Check if destination can advance (N+1 dependency rule)
+	// Dst Level N requires Src to have COMPLETED Level N+1
+	// Since srcLevel represents what Src is currently working on, we need srcLevel >= N+2
 	if dstLevelExists && srcLevel >= currentDstLevel+2 {
 		logging.GlobalLogger.LogSystem("info", "QP", "Advancing destination phase", map[string]any{
 			"srcLevel": srcLevel,
@@ -298,6 +329,50 @@ func (qp *QueuePublisher) checkDestinationStart(srcLevel int) {
 // isDstPhaseComplete checks if the current destination phase is complete
 func (qp *QueuePublisher) isDstPhaseComplete(queue *TaskQueue, level int) bool {
 	return queue.QueueSize() == 0 && queue.AreAllWorkersIdle() && queue.State == QueueRunning
+}
+
+// canDstAdvanceToLevel checks if destination can advance to the specified level based on source progress
+func (qp *QueuePublisher) canDstAdvanceToLevel(targetDstLevel int) bool {
+	qp.Mutex.Lock()
+	srcLevel, srcExists := qp.QueueLevels["src-traversal"]
+	qp.Mutex.Unlock()
+
+	if !srcExists {
+		return false // Source queue doesn't exist
+	}
+
+	// Destination level N requires source to have completed level N+1
+	// This means source must be currently working on level N+2 or higher
+	requiredSrcLevel := targetDstLevel + 2
+	return srcLevel >= requiredSrcLevel
+}
+
+// waitForSrcProgress blocks until source reaches the required level for destination to advance
+func (qp *QueuePublisher) waitForSrcProgress(targetDstLevel int) {
+	requiredSrcLevel := targetDstLevel + 2
+
+	// Check if we can already proceed
+	if qp.canDstAdvanceToLevel(targetDstLevel) {
+		return // No need to wait
+	}
+
+	logging.GlobalLogger.LogSystem("info", "QP", "Destination waiting for source progress", map[string]any{
+		"targetDstLevel":   targetDstLevel,
+		"requiredSrcLevel": requiredSrcLevel,
+	})
+
+	// Poll for source progress with a reasonable interval
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		if qp.canDstAdvanceToLevel(targetDstLevel) {
+			logging.GlobalLogger.LogSystem("info", "QP", "Destination can now advance", map[string]any{
+				"targetDstLevel": targetDstLevel,
+			})
+			return
+		}
+	}
 }
 
 // PublishDestinationTasks creates destination traversal tasks by querying both source and destination tables
@@ -653,8 +728,9 @@ func (qp *QueuePublisher) advancePhase(queueName string) {
 		"phase": queue.Phase,
 	})
 
+	// Publish queue-specific phase update signal
 	signals.GlobalSR.Publish(signals.Signal{
-		Topic:   "qp:phase_updated",
+		Topic:   "qp:phase_updated:" + queueName,
 		Payload: queue.Phase,
 	})
 }

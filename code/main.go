@@ -49,7 +49,7 @@ func main() {
 
 	// Start the Conductor — now self-contained (handles its own DB + logger)
 	conductor := processing.NewConductor(
-		"C:\\Users\\golde\\OneDrive\\Documents\\GitHub\\ByteWave\\tests\\traversal_tests\\test_src_traversal.db",
+		"C:\\Users\\golde\\OneDrive\\Documents\\GitHub\\ByteWave\\tests\\traversal_tests\\test_traversal.db",
 		3,    // retry threshold
 		1000, // batch size
 	)

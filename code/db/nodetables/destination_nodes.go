@@ -20,8 +20,7 @@ func (t DestinationNodesTable) Schema() string {
 		last_modified TIMESTAMP,
 		traversal_status VARCHAR NOT NULL CHECK(traversal_status IN ('pending', 'queued', 'successful', 'failed')),
 		traversal_attempts INTEGER DEFAULT 0,
-		error_ids VARCHAR DEFAULT NULL,
-		FOREIGN KEY (error_ids) REFERENCES node_errors(id) ON DELETE SET NULL
+		error_ids VARCHAR DEFAULT NULL
 	`
 }
 
