@@ -70,7 +70,7 @@ func (c *Conductor) StartTraversal() {
 			WorkerBase: c.AddWorker(dstQueueName, "dst"),
 			DB:         c.DB,
 			Service:    os_svc,
-			pv:         pv_obj,
+			pv:         pv_obj, // TODO: dst doesn't need pv, this should be removed when we build out the actual pv logic. 
 			QP:         c.QP,
 		}
 		go tw.Run(tw.ProcessTraversalTask)
@@ -89,7 +89,7 @@ func (c *Conductor) StartTraversal() {
 
 	// Listen for traversal complete signals
 	// Source traversal completion
-	signals.GlobalSR.On("qp:traversal_complete:src-traversal", func(sig signals.Signal) {
+	go signals.GlobalSR.On("qp:traversal_complete:src-traversal", func(sig signals.Signal) {
 		queueName, ok := sig.Payload.(string)
 		if !ok {
 			logging.GlobalLogger.LogSystem("error", "Conductor", "Invalid traversal.complete payload", map[string]any{
@@ -106,7 +106,7 @@ func (c *Conductor) StartTraversal() {
 	})
 
 	// Destination traversal completion
-	signals.GlobalSR.On("qp:traversal_complete:dst-traversal", func(sig signals.Signal) {
+	go signals.GlobalSR.On("qp:traversal_complete:dst-traversal", func(sig signals.Signal) {
 		queueName, ok := sig.Payload.(string)
 		if !ok {
 			logging.GlobalLogger.LogSystem("error", "Conductor", "Invalid traversal.complete payload", map[string]any{
