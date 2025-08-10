@@ -46,7 +46,7 @@ func (db *DB) InitWriteQueue(table string, queueType typesdb.WriteQueueType, bat
 // Close shuts down all write queues and DB connection.
 func (db *DB) Close() {
 	for tableName, wq := range db.wqMap {
-		db.flushWriteQueue(wq, tableName)
+		db.flushWriteQueue(wq, tableName, true)
 	}
 
 	db.cancel()
@@ -59,7 +59,7 @@ func (db *DB) Close() {
 func (db *DB) Query(table string, query string, params ...any) (*sql.Rows, error) {
 	if wq, ok := db.wqMap[table]; ok {
 		// if we want to read from a table that has pending writes, we need to flush them first to make sure we query all of the data
-		db.flushWriteQueue(wq, table)
+		db.flushWriteQueue(wq, table, true)
 	}
 	return db.conn.QueryContext(db.ctx, query, params...)
 }
@@ -70,8 +70,8 @@ func (db *DB) Write(query string, params ...any) error {
 	return err
 }
 
-func (db *DB) flushWriteQueue(wq *WriteQueue, tableName string) {
-	batches := wq.Flush()
+func (db *DB) flushWriteQueue(wq *WriteQueue, tableName string, force bool) {
+	batches := wq.Flush(force)
 	for _, b := range batches {
 		qs := make([]string, len(b.Ops))
 		ps := make([][]any, len(b.Ops))
@@ -93,7 +93,6 @@ func (db *DB) QueueWrite(tableName, query string, params ...any) {
 			Params: params,
 			OpType: "insert",
 		})
-		db.flushWriteQueue(wq, tableName)
 	}
 }
 
@@ -106,7 +105,6 @@ func (db *DB) QueueWriteWithPath(tableName, path, query string, params ...any) {
 			Params: params,
 			OpType: "update",
 		})
-		db.flushWriteQueue(wq, tableName)
 	}
 }
 
@@ -133,6 +131,13 @@ func (db *DB) GetWriteQueue(table string) typesdb.WriteQueueInterface {
 		return wq
 	}
 	return nil
+}
+
+// ForceFlushTable forces a flush of the write queue for a specific table
+func (db *DB) ForceFlushTable(tableName string) {
+	if wq, ok := db.wqMap[tableName]; ok {
+		db.flushWriteQueue(wq, tableName, true)
+	}
 }
 
 // batchExecute flushes all pending write queries in a single transaction.
@@ -183,7 +188,7 @@ func (db *DB) startQueueListener(tableName string, queue *WriteQueue) {
 	for {
 		select {
 		case <-timer.C:
-			db.flushWriteQueue(queue, tableName)
+			db.flushWriteQueue(queue, tableName, false)
 			timer.Reset(queue.GetFlushInterval())
 		case <-db.ctx.Done():
 			return

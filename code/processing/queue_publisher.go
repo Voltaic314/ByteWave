@@ -395,8 +395,9 @@ func (qp *QueuePublisher) PublishDestinationTasks(queueName string) {
 		return
 	}
 
-	// Force flush destination table to ensure all pending writes are committed
-	qp.FlushTable("destination_nodes")
+	// Force flush both tables before cross-table queries to ensure data consistency
+	qp.DB.ForceFlushTable("source_nodes")      // Need to see source children
+	qp.DB.ForceFlushTable("destination_nodes") // Need to see destination folders
 
 	// Step 1: Query destination table for pending folders at current level
 	dstFolders := qp.fetchDestinationFolders(currentLevel)
@@ -694,8 +695,9 @@ func (qp *QueuePublisher) PublishTasks(queueName string) {
 		}
 	}
 
-	// Switch to retry mode if the first pass ends
-	if mode == firstPass && len(tasks) < qp.BatchSize {
+	// Switch to retry mode only if first pass is truly exhausted
+	// (got zero tasks, not just a small batch)
+	if mode == firstPass && len(tasks) == 0 {
 		qp.ScanModes[queueName] = retryPass
 	}
 
@@ -955,6 +957,14 @@ func (qp *QueuePublisher) FetchTasksFromDB(table string, queueType QueueType, cu
 		"currentLevel": currentLevel,
 		"lastSeenPath": lastSeenPath,
 	})
+
+	// Force flush in retry mode to see latest failure states
+	qp.Mutex.Lock()
+	isRetryMode := qp.ScanModes[queueName] == retryPass
+	qp.Mutex.Unlock()
+	if isRetryMode {
+		qp.DB.ForceFlushTable(table)
+	}
 
 	statusColumn := "traversal_status"
 	retryColumn := "traversal_attempts"

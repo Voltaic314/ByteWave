@@ -79,7 +79,7 @@ func (c *Conductor) StartTraversal() {
 	// Start QP listening loop
 	c.StartAll()
 
-	time.Sleep(25 * time.Millisecond) // Give QP a moment to initialize
+	time.Sleep(250 * time.Millisecond) // Give QP a moment to initialize
 
 	// kick start the first phase manually for source only
 	signals.GlobalSR.Publish(signals.Signal{
