@@ -3,7 +3,6 @@ package processing
 
 import (
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/Voltaic314/ByteWave/code/db"
@@ -19,6 +18,7 @@ type TraverserWorker struct {
 	DB      *db.DB
 	Service services.BaseServiceInterface // Interface for interacting with FS/API
 	pv      *pv.PathValidator
+	QP      *QueuePublisher // Reference to QueuePublisher for path normalization
 }
 
 // FetchAndProcessTask pulls a task from the queue and executes it.
@@ -33,7 +33,7 @@ func (tw *TraverserWorker) FetchAndProcessTask() {
 		task := tw.Queue.PopTask()
 		if task != nil {
 			logging.GlobalLogger.LogWorker("info", tw.ID, task.GetPath(), "Task acquired, processing", map[string]any{
-				"taskID":    task.ID,
+				"taskID":    task.GetID(),
 				"queueType": tw.QueueType,
 			})
 
@@ -43,7 +43,7 @@ func (tw *TraverserWorker) FetchAndProcessTask() {
 			err := tw.ProcessTraversalTask(task)
 			if err != nil {
 				logging.GlobalLogger.LogWorker("error", tw.ID, task.GetPath(), "Error during traversal task", map[string]any{
-					"taskID": task.ID,
+					"taskID": task.GetID(),
 					"error":  err.Error(),
 				})
 			}
@@ -64,23 +64,37 @@ func (tw *TraverserWorker) FetchAndProcessTask() {
 }
 
 // ProcessTraversalTask executes a traversal task.
-func (tw *TraverserWorker) ProcessTraversalTask(task *Task) error {
+func (tw *TraverserWorker) ProcessTraversalTask(task Task) error {
 	logging.GlobalLogger.LogWorker("info", tw.ID, task.GetPath(), "Processing traversal task", map[string]any{
-		"taskID": task.ID,
+		"taskID": task.GetID(),
+		"type":   task.GetType(),
 	})
 
 	// Validate path
-	if !tw.pv.IsValidPath(task.Folder.Path) {
+	if !tw.pv.IsValidPath(task.GetFolder().Path) {
 		logging.GlobalLogger.LogWorker("error", tw.ID, task.GetPath(), "Invalid path for traversal", map[string]any{
-			"taskID": task.ID,
+			"taskID": task.GetID(),
 		})
 		tw.LogTraversalFailure(task, "invalid path")
-		return fmt.Errorf("invalid path: %s", task.Folder.Path)
+		return fmt.Errorf("invalid path: %s", task.GetFolder().Path)
 	}
 
+	// Handle different task types using type switching
+	switch concreteTask := task.(type) {
+	case *TraversalSrcTask:
+		return tw.ProcessSrcTraversal(concreteTask)
+	case *TraversalDstTask:
+		return tw.ProcessDstTraversal(concreteTask)
+	default:
+		return fmt.Errorf("unknown task type: %s", task.GetType())
+	}
+}
+
+// ProcessSrcTraversal handles source traversal - discovers and logs all valid items
+func (tw *TraverserWorker) ProcessSrcTraversal(task *TraversalSrcTask) error {
 	// List folder contents
 	paginationStream := tw.Queue.GetPaginationChan()
-	foldersChan, filesChan, errChan := tw.Service.GetAllItems(*task.Folder, paginationStream)
+	foldersChan, filesChan, errChan := tw.Service.GetAllItems(*task.GetFolder(), paginationStream)
 
 	var allFolders []filesystem.Folder
 	var allFiles []filesystem.File
@@ -97,7 +111,7 @@ func (tw *TraverserWorker) ProcessTraversalTask(task *Task) error {
 
 	if err != nil {
 		logging.GlobalLogger.LogWorker("error", tw.ID, task.GetPath(), "Failed to list folder contents", map[string]any{
-			"taskID": task.ID,
+			"taskID": task.GetID(),
 			"error":  err.Error(),
 		})
 		tw.LogTraversalFailure(task, err.Error())
@@ -119,12 +133,103 @@ func (tw *TraverserWorker) ProcessTraversalTask(task *Task) error {
 		}
 	}
 
-	return tw.LogTraversalSuccess(task, validFiles, validFolders)
+	// Log all discovered items for source traversal
+	return tw.LogSrcTraversalSuccess(task, validFiles, validFolders)
 }
 
-func (tw *TraverserWorker) LogTraversalSuccess(task *Task, files []filesystem.File, folders []filesystem.Folder) error {
+// ProcessDstTraversal handles destination traversal - compares discovered items against expected source children
+func (tw *TraverserWorker) ProcessDstTraversal(dstTask *TraversalDstTask) error {
+
+	// List folder contents
+	paginationStream := tw.Queue.GetPaginationChan()
+	foldersChan, filesChan, errChan := tw.Service.GetAllItems(*dstTask.GetFolder(), paginationStream)
+
+	var allFolders []filesystem.Folder
+	var allFiles []filesystem.File
+
+	for folders := range foldersChan {
+		allFolders = append(allFolders, folders...)
+	}
+
+	for files := range filesChan {
+		allFiles = append(allFiles, files...)
+	}
+
+	err := <-errChan // Wait for error channel to close
+
+	if err != nil {
+		logging.GlobalLogger.LogWorker("error", tw.ID, dstTask.GetPath(), "Failed to list folder contents", map[string]any{
+			"taskID": dstTask.GetID(),
+			"error":  err.Error(),
+		})
+		tw.LogTraversalFailure(dstTask, err.Error())
+		return err
+	}
+
+	var validFolders []filesystem.Folder
+	var validFiles []filesystem.File
+
+	for _, folder := range allFolders {
+		if tw.pv.IsValidPath(folder.Path) {
+			validFolders = append(validFolders, folder)
+		}
+	}
+
+	for _, file := range allFiles {
+		if tw.pv.IsValidPath(file.Path) {
+			validFiles = append(validFiles, file)
+		}
+	}
+
+	// Create maps for efficient lookup of expected source items
+	expectedFolders := make(map[string]*filesystem.Folder)
+	expectedFiles := make(map[string]*filesystem.File)
+
+	// Populate maps with expected source children from the task
+	for _, folder := range dstTask.ExpectedSrcChildren {
+		expectedFolders[folder.Name] = folder
+	}
+
+	for _, file := range dstTask.ExpectedSrcFiles {
+		expectedFiles[file.Name] = file
+	}
+
+	// Filter to only include items that are expected from source AND actually present
+	var presentFiles []filesystem.File
+	var presentFolders []filesystem.Folder
+
+	// Check discovered files against expected source files
+	for _, file := range validFiles {
+		if _, expectedFromSource := expectedFiles[file.Name]; expectedFromSource {
+			// This file is expected from source AND present in destination
+			presentFiles = append(presentFiles, file)
+		}
+	}
+
+	// Check discovered folders against expected source folders
+	for _, folder := range validFolders {
+		if _, expectedFromSource := expectedFolders[folder.Name]; expectedFromSource {
+			// This folder is expected from source AND present in destination
+			presentFolders = append(presentFolders, folder)
+		}
+	}
+
+	logging.GlobalLogger.LogWorker("info", tw.ID, dstTask.GetPath(), "Destination traversal comparison complete", map[string]any{
+		"expected_files":     len(expectedFiles),
+		"expected_folders":   len(expectedFolders),
+		"discovered_files":   len(validFiles),
+		"discovered_folders": len(validFolders),
+		"present_files":      len(presentFiles),
+		"present_folders":    len(presentFolders),
+	})
+
+	// Log only the items that are present (expected from source AND found in destination)
+	return tw.LogDstTraversalSuccess(dstTask, presentFiles, presentFolders)
+}
+
+func (tw *TraverserWorker) LogSrcTraversalSuccess(task Task, files []filesystem.File, folders []filesystem.Folder) error {
 	logging.GlobalLogger.LogWorker("info", tw.ID, task.GetPath(), "Logging traversal success", map[string]any{
-		"taskID": task.ID,
+		"taskID": task.GetID(),
 	})
 
 	table := "source_nodes"
@@ -138,12 +243,12 @@ func (tw *TraverserWorker) LogTraversalSuccess(task *Task, files []filesystem.Fi
 			path, name, identifier, parent_id, type, level, size, last_modified,
 			traversal_status, upload_status, traversal_attempts, upload_attempts, error_ids
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			file.Path,
+			tw.QP.normalizePathForJoin(tw.Queue.QueueID, file.Path),
 			file.Name,
 			file.Identifier,
-			strings.ReplaceAll(task.Folder.Path, "/", "\\"),
+			tw.QP.normalizePathForJoin(tw.Queue.QueueID, task.GetFolder().Path),
 			"file",
-			task.Folder.Level+1,
+			task.GetFolder().Level+1,
 			file.Size,
 			file.LastModified,
 			"successful", // we don't traverse files so this is always successful
@@ -158,12 +263,12 @@ func (tw *TraverserWorker) LogTraversalSuccess(task *Task, files []filesystem.Fi
 			path, name, identifier, parent_id, type, level, size, last_modified,
 			traversal_status, upload_status, traversal_attempts, upload_attempts, error_ids
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			folder.Path,
+			tw.QP.normalizePathForJoin(tw.Queue.QueueID, folder.Path),
 			folder.Name,
 			folder.Identifier,
-			strings.ReplaceAll(task.Folder.Path, "/", "\\"),
+			tw.QP.normalizePathForJoin(tw.Queue.QueueID, task.GetFolder().Path),
 			"folder",
-			task.Folder.Level+1,
+			task.GetFolder().Level+1,
 			0, // Size = 0 for folders
 			folder.LastModified,
 			"pending",
@@ -174,7 +279,7 @@ func (tw *TraverserWorker) LogTraversalSuccess(task *Task, files []filesystem.Fi
 
 	// Mark the parent folder (this task's folder) as successful
 	updateQuery := `UPDATE ` + table + ` SET traversal_status = 'successful', traversal_attempts = traversal_attempts + 1 WHERE path = ?`
-	updatePath := task.Folder.Path
+	updatePath := tw.QP.normalizePathForJoin(tw.Queue.QueueID, task.GetFolder().Path)
 
 	logging.GlobalLogger.LogWorker("debug", tw.ID, task.GetPath(), "Executing success UPDATE", map[string]any{
 		"query": updateQuery,
@@ -192,7 +297,7 @@ func (tw *TraverserWorker) LogTraversalSuccess(task *Task, files []filesystem.Fi
 
 	// Add debug logging to track the success update
 	logging.GlobalLogger.LogWorker("debug", tw.ID, task.GetPath(), "Marking folder as successful", map[string]any{
-		"taskID":       task.ID,
+		"taskID":       task.GetID(),
 		"table":        table,
 		"filesFound":   len(files),
 		"foldersFound": len(folders),
@@ -201,9 +306,77 @@ func (tw *TraverserWorker) LogTraversalSuccess(task *Task, files []filesystem.Fi
 	return nil
 }
 
-func (tw *TraverserWorker) LogTraversalFailure(task *Task, errorMsg string) {
+// LogDstTraversalSuccess handles destination traversal success - logs items to destination_nodes table
+func (tw *TraverserWorker) LogDstTraversalSuccess(task Task, files []filesystem.File, folders []filesystem.Folder) error {
+	logging.GlobalLogger.LogWorker("info", tw.ID, task.GetPath(), "Logging destination traversal success", map[string]any{
+		"taskID": task.GetID(),
+	})
+
+	table := "destination_nodes"
+
+	// Log all discovered items to destination_nodes table
+	for _, file := range files {
+		tw.DB.QueueWrite(table, `INSERT OR IGNORE INTO `+table+` (
+			path, name, identifier, parent_id, type, level, size, last_modified,
+			traversal_status, upload_status, traversal_attempts, upload_attempts, error_ids
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			tw.QP.normalizePathForJoin(tw.Queue.QueueID, file.Path),
+			file.Name,
+			file.Identifier,
+			tw.QP.normalizePathForJoin(tw.Queue.QueueID, task.GetFolder().Path),
+			"file",
+			task.GetFolder().Level+1,
+			file.Size,
+			file.LastModified,
+			"successful", // we don't traverse files so this is always successful
+			"pending",
+			0, 0, nil,
+		)
+	}
+
+	for _, folder := range folders {
+		tw.DB.QueueWrite(table, `INSERT OR IGNORE INTO `+table+` (
+			path, name, identifier, parent_id, type, level, size, last_modified,
+			traversal_status, upload_status, traversal_attempts, upload_attempts, error_ids
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			tw.QP.normalizePathForJoin(tw.Queue.QueueID, folder.Path),
+			folder.Name,
+			folder.Identifier,
+			tw.QP.normalizePathForJoin(tw.Queue.QueueID, task.GetFolder().Path),
+			"folder",
+			task.GetFolder().Level+1,
+			0, // Size = 0 for folders
+			folder.LastModified,
+			"pending",
+			"pending",
+			0, 0, nil,
+		)
+	}
+
+	// Mark the parent folder as successful
+	updateQuery := `UPDATE ` + table + ` SET traversal_status = 'successful', traversal_attempts = traversal_attempts + 1 WHERE path = ?`
+	updatePath := tw.QP.normalizePathForJoin(tw.Queue.QueueID, task.GetFolder().Path)
+
+	logging.GlobalLogger.LogWorker("debug", tw.ID, task.GetPath(), "Executing destination success UPDATE", map[string]any{
+		"query": updateQuery,
+		"path":  updatePath,
+		"table": table,
+	})
+
+	tw.DB.QueueWriteWithPath(table, updatePath, updateQuery, updatePath)
+
+	logging.GlobalLogger.LogWorker("info", tw.ID, task.GetPath(), "Destination traversal success logged to DB", map[string]any{
+		"files":      len(files),
+		"folders":    len(folders),
+		"queue_type": tw.QueueType,
+	})
+
+	return nil
+}
+
+func (tw *TraverserWorker) LogTraversalFailure(task Task, errorMsg string) {
 	logging.GlobalLogger.LogWorker("error", tw.ID, task.GetPath(), "Logging traversal failure", map[string]any{
-		"taskID": task.ID,
+		"taskID": task.GetID(),
 		"error":  errorMsg,
 	})
 
@@ -212,9 +385,10 @@ func (tw *TraverserWorker) LogTraversalFailure(task *Task, errorMsg string) {
 		table = "destination_nodes"
 	}
 
-	tw.DB.QueueWriteWithPath(table, task.Folder.Path, `UPDATE `+table+` SET traversal_status = 'failed', traversal_attempts = traversal_attempts + 1, last_error = ? WHERE path = ?`, errorMsg, task.Folder.Path)
+	relativePath := tw.QP.normalizePathForJoin(tw.Queue.QueueID, task.GetFolder().Path)
+	tw.DB.QueueWriteWithPath(table, relativePath, `UPDATE `+table+` SET traversal_status = 'failed', traversal_attempts = traversal_attempts + 1, last_error = ? WHERE path = ?`, errorMsg, relativePath)
 
 	logging.GlobalLogger.LogWorker("info", tw.ID, task.GetPath(), "Traversal failure logged to DB", map[string]any{
-		"taskID": task.ID,
+		"taskID": task.GetID(),
 	})
 }

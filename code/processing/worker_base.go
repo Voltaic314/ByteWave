@@ -56,7 +56,7 @@ func (wb *WorkerBase) GenerateID() string {
 }
 
 // RunMainLoop is a generic polling loop that can be called by any worker type.
-func (wb *WorkerBase) Run(process func(*Task) error) {
+func (wb *WorkerBase) Run(process func(Task) error) {
 	for {
 		// logging.GlobalLogger.LogMessage("info", "Worker entering polling cycle", map[string]any{
 		// 	"workerID":  wb.ID,
@@ -101,7 +101,7 @@ func (wb *WorkerBase) Run(process func(*Task) error) {
 		})
 
 		logging.GlobalLogger.LogWorker("info", wb.ID, task.GetPath(), "Worker acquired task", map[string]any{
-			"taskID": task.ID,
+			"taskID": task.GetID(),
 		})
 
 		wb.State = WorkerActive
@@ -109,16 +109,16 @@ func (wb *WorkerBase) Run(process func(*Task) error) {
 
 		if err := process(task); err != nil {
 			logging.GlobalLogger.LogWorker("error", wb.ID, task.GetPath(), "Worker task failed", map[string]any{
-				"taskID": task.ID,
+				"taskID": task.GetID(),
 				"error":  err.Error(),
 			})
 		} else {
 			logging.GlobalLogger.LogWorker("info", wb.ID, task.GetPath(), "Worker completed task", map[string]any{
-				"taskID": task.ID,
+				"taskID": task.GetID(),
 			})
 		}
 
 		// Remove task from in-progress list (whether successful or failed)
-		wb.Queue.RemoveInProgressTask(task.ID)
+		wb.Queue.RemoveInProgressTask(task.GetID())
 	}
 }

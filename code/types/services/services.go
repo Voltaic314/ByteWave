@@ -27,6 +27,7 @@ type BaseServiceInterface interface {
 	GetFileIdentifier(path string) string
 	SetRootPath(path string)
 	GetRootPath() string
+	Relativize(path string) string
 }
 
 // BaseService holds shared attributes/methods and migration rules

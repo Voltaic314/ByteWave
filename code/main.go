@@ -3,9 +3,9 @@ ByteWave — Free and Open Source File Migration Tool
 Licensed under the ByteWave License v1.0
 See LICENSE.md for full terms.
 
-You may use, modify, and distribute this software freely for internal or 
-service-based commercial purposes, but resale as a stand-alone software product 
-is prohibited. Attribution to the ByteWave Project is required in all 
+You may use, modify, and distribute this software freely for internal or
+service-based commercial purposes, but resale as a stand-alone software product
+is prohibited. Attribution to the ByteWave Project is required in all
 public-facing deployments.
 */
 
@@ -17,8 +17,8 @@ import (
 
 	"github.com/Voltaic314/ByteWave/code/cli"
 	"github.com/Voltaic314/ByteWave/code/logging"
-	"github.com/Voltaic314/ByteWave/code/signals"
 	"github.com/Voltaic314/ByteWave/code/processing"
+	"github.com/Voltaic314/ByteWave/code/signals"
 	typesdb "github.com/Voltaic314/ByteWave/code/types/db"
 )
 
@@ -62,6 +62,7 @@ func main() {
 	// Initialize write queues before starting traversal
 	conductor.DB.InitWriteQueue("audit_log", typesdb.LogWriteQueue, 50, 5*time.Second)
 	conductor.DB.InitWriteQueue("source_nodes", typesdb.NodeWriteQueue, 100, 5*time.Second)
+	conductor.DB.InitWriteQueue("destination_nodes", typesdb.NodeWriteQueue, 100, 5*time.Second)
 
 	// Register the logger with the DB
 	logging.GlobalLogger.RegisterDB(conductor.DB)

@@ -49,6 +49,8 @@ type QueuePublisher struct {
 	ScanModes          map[string]scanMode // queueName -> scanMode
 	// HandlersInstalled ensures per-queue handlers/goroutines are registered once
 	HandlersInstalled map[string]bool
+	// RootPaths stores the root folder path for each queue (for path normalization)
+	RootPaths map[string]string // queueName -> rootPath
 }
 
 func NewQueuePublisher(db *db.DB, retryThreshold, batchSize int) *QueuePublisher {
@@ -70,6 +72,7 @@ func NewQueuePublisher(db *db.DB, retryThreshold, batchSize int) *QueuePublisher
 		QueriesPerPhase:    make(map[string]int), // queueName -> queryCount
 		ScanModes:          make(map[string]scanMode),
 		HandlersInstalled:  make(map[string]bool),
+		RootPaths:          make(map[string]string), // queueName -> rootPath
 	}
 }
 
@@ -107,8 +110,8 @@ func (qp *QueuePublisher) StartListening() {
 	logging.GlobalLogger.LogSystem("info", "QP", "Starting QueuePublisher listening loop", nil)
 	qp.Running = true
 
-	// Subscribe to phase updates using SignalRouter
-	signals.GlobalSR.On("qp:phase_updated", func(sig signals.Signal) {
+	// Subscribe to queue-specific phase updates using SignalRouter
+	signals.GlobalSR.On("qp:phase_updated:src-traversal", func(sig signals.Signal) {
 		level, ok := sig.Payload.(int)
 		if !ok {
 			logging.GlobalLogger.LogSystem("error", "QP", "Invalid data type in phase_updated signal", map[string]any{
@@ -118,114 +121,30 @@ func (qp *QueuePublisher) StartListening() {
 			return
 		}
 
-		logging.GlobalLogger.LogSystem("info", "QP", "Phase updated", map[string]any{
+		logging.GlobalLogger.LogSystem("info", "QP", "Source phase updated", map[string]any{
 			"newLevel": level,
 		})
 
-		// Snapshot queue names under lock to avoid concurrent map iteration
+		// Handle source queue
+		srcQueueName := "src-traversal"
 		qp.Mutex.Lock()
-		names := make([]string, 0, len(qp.Queues))
-		for n := range qp.Queues {
-			names = append(names, n)
-		}
+		qp.QueueLevels[srcQueueName] = level
+		qp.ScanModes[srcQueueName] = firstPass
 		qp.Mutex.Unlock()
+		qp.PublishTasks(srcQueueName)
 
-		for _, name := range names {
+		// Check if destination should be started or advanced
+		qp.checkDestinationStart(level)
+
+		// Install per-queue handlers for source queue if not already installed
+		qp.Mutex.Lock()
+		needInstall := !qp.HandlersInstalled[srcQueueName]
+		qp.Mutex.Unlock()
+		if needInstall {
+			qp.installQueueHandlers(srcQueueName)
 			qp.Mutex.Lock()
-			qp.QueueLevels[name] = level
-			qp.ScanModes[name] = firstPass
+			qp.HandlersInstalled[srcQueueName] = true
 			qp.Mutex.Unlock()
-			qp.PublishTasks(name)
-
-			// Install per-queue handlers and refresher only once
-			qp.Mutex.Lock()
-			needInstall := !qp.HandlersInstalled[name]
-			qp.Mutex.Unlock()
-			if needInstall {
-				queueName := name
-				signals.GlobalSR.On("qp:running_low:"+queueName, func(sig signals.Signal) {
-					phase, ok := sig.Payload.(int)
-					if !ok {
-						logging.GlobalLogger.LogSystem("error", "QP", "Invalid data for running_low signal", map[string]any{
-							"queue": queueName, "data": sig.Payload,
-						})
-						return
-					}
-
-					qp.Mutex.Lock()
-					queue, exists := qp.Queues[queueName]
-					qp.Mutex.Unlock()
-
-					if !exists || queue.State != QueueRunning {
-						return
-					}
-
-					qp.Mutex.Lock()
-					qp.QueueLevels[queueName] = phase
-					qp.ScanModes[queueName] = firstPass
-					qp.Mutex.Unlock()
-					qp.PublishTasks(queueName)
-					queue.ResetRunningLowTrigger()
-				})
-
-				// Listen for idle signals from workers
-				signals.GlobalSR.On("qp:idle:"+queueName, func(sig signals.Signal) {
-					phase, ok := sig.Payload.(int)
-					if !ok {
-						logging.GlobalLogger.LogSystem("error", "QP", "Invalid data for idle signal", map[string]any{
-							"queue": queueName, "data": sig.Payload,
-						})
-						return
-					}
-
-					qp.Mutex.Lock()
-					queue, exists := qp.Queues[queueName]
-					qp.Mutex.Unlock()
-
-					if !exists || queue.State != QueueRunning {
-						return
-					}
-
-					logging.GlobalLogger.LogQP("info", queueName, "", "Received idle signal from worker", map[string]any{
-						"phase": phase,
-					})
-
-					// Check if we need to publish more tasks
-					if queue.QueueSize() == 0 {
-						qp.PublishTasks(queueName)
-					}
-					queue.ResetIdleTrigger()
-				})
-
-				go func(queueName string) {
-					for {
-						time.Sleep(3 * time.Second)
-
-						qp.Mutex.Lock()
-						queue, exists := qp.Queues[queueName]
-						qp.Mutex.Unlock()
-
-						if !exists || queue.State != QueueRunning {
-							return
-						}
-
-						// Check if we should stop
-						select {
-						case <-queue.StopChan:
-							return
-						default:
-						}
-
-						if queue.QueueSize() < queue.RunningLowThreshold {
-							qp.PublishTasks(queueName)
-						}
-					}
-				}(queueName)
-
-				qp.Mutex.Lock()
-				qp.HandlersInstalled[name] = true
-				qp.Mutex.Unlock()
-			}
 		}
 	})
 
@@ -233,6 +152,394 @@ func (qp *QueuePublisher) StartListening() {
 	for qp.Running {
 		time.Sleep(100 * time.Millisecond)
 	}
+}
+
+// installQueueHandlers sets up the running_low, idle, and refresh handlers for a queue
+func (qp *QueuePublisher) installQueueHandlers(queueName string) {
+	signals.GlobalSR.On("qp:running_low:"+queueName, func(sig signals.Signal) {
+		phase, ok := sig.Payload.(int)
+		if !ok {
+			logging.GlobalLogger.LogSystem("error", "QP", "Invalid data for running_low signal", map[string]any{
+				"queue": queueName, "data": sig.Payload,
+			})
+			return
+		}
+
+		qp.Mutex.Lock()
+		queue, exists := qp.Queues[queueName]
+		qp.Mutex.Unlock()
+
+		if !exists || queue.State != QueueRunning {
+			return
+		}
+
+		qp.Mutex.Lock()
+		qp.QueueLevels[queueName] = phase
+		qp.ScanModes[queueName] = firstPass
+		qp.Mutex.Unlock()
+		qp.PublishTasks(queueName)
+		queue.ResetRunningLowTrigger()
+	})
+
+	// Listen for idle signals from workers
+	signals.GlobalSR.On("qp:idle:"+queueName, func(sig signals.Signal) {
+		phase, ok := sig.Payload.(int)
+		if !ok {
+			logging.GlobalLogger.LogSystem("error", "QP", "Invalid data for idle signal", map[string]any{
+				"queue": queueName, "data": sig.Payload,
+			})
+			return
+		}
+
+		qp.Mutex.Lock()
+		queue, exists := qp.Queues[queueName]
+		qp.Mutex.Unlock()
+
+		if !exists || queue.State != QueueRunning {
+			return
+		}
+
+		logging.GlobalLogger.LogQP("info", queueName, "", "Received idle signal from worker", map[string]any{
+			"phase": phase,
+		})
+
+		// Check if we need to publish more tasks
+		if queue.QueueSize() == 0 {
+			qp.PublishTasks(queueName)
+		}
+		queue.ResetIdleTrigger()
+	})
+
+	// Background refresh goroutine for this queue
+	go func(queueName string) {
+		for {
+			time.Sleep(3 * time.Second)
+
+			qp.Mutex.Lock()
+			queue, exists := qp.Queues[queueName]
+			qp.Mutex.Unlock()
+
+			if !exists || queue.State != QueueRunning {
+				return
+			}
+
+			// Check if we should stop
+			select {
+			case <-queue.StopChan:
+				return
+			default:
+			}
+
+			if queue.QueueSize() < queue.RunningLowThreshold {
+				qp.PublishTasks(queueName)
+			}
+		}
+	}(queueName)
+}
+
+// checkDestinationStart checks if destination traversal should be started or advanced
+func (qp *QueuePublisher) checkDestinationStart(srcLevel int) {
+	dstQueueName := "dst-traversal"
+
+	qp.Mutex.Lock()
+	dstQueue, dstExists := qp.Queues[dstQueueName]
+	currentDstLevel, dstLevelExists := qp.QueueLevels[dstQueueName]
+	qp.Mutex.Unlock()
+
+	if !dstExists {
+		return // Destination queue not set up yet
+	}
+
+	// Check if we should start destination (source is at level 2 or higher)
+	if !dstLevelExists && srcLevel >= 2 {
+		logging.GlobalLogger.LogSystem("info", "QP", "Starting destination traversal", map[string]any{
+			"srcLevel": srcLevel,
+		})
+
+		// Initialize destination queue handlers if not already done
+		qp.Mutex.Lock()
+		needInstall := !qp.HandlersInstalled[dstQueueName]
+		qp.Mutex.Unlock()
+		if needInstall {
+			qp.installQueueHandlers(dstQueueName)
+			qp.Mutex.Lock()
+			qp.HandlersInstalled[dstQueueName] = true
+			qp.Mutex.Unlock()
+		}
+
+		// Start destination at level 0
+		qp.Mutex.Lock()
+		qp.QueueLevels[dstQueueName] = 0
+		qp.ScanModes[dstQueueName] = firstPass
+		qp.Mutex.Unlock()
+		qp.PublishDestinationTasks(dstQueueName)
+		return
+	}
+
+	// Check if destination can advance (source must be N+2 ahead)
+	if dstLevelExists && srcLevel >= currentDstLevel+2 {
+		logging.GlobalLogger.LogSystem("info", "QP", "Advancing destination phase", map[string]any{
+			"srcLevel": srcLevel,
+			"dstLevel": currentDstLevel,
+		})
+
+		// Check if current destination phase is complete before advancing
+		if qp.isDstPhaseComplete(dstQueue, currentDstLevel) {
+			newDstLevel := currentDstLevel + 1
+			qp.Mutex.Lock()
+			qp.QueueLevels[dstQueueName] = newDstLevel
+			qp.ScanModes[dstQueueName] = firstPass
+			qp.Mutex.Unlock()
+			qp.PublishDestinationTasks(dstQueueName)
+		}
+	}
+}
+
+// isDstPhaseComplete checks if the current destination phase is complete
+func (qp *QueuePublisher) isDstPhaseComplete(queue *TaskQueue, level int) bool {
+	return queue.QueueSize() == 0 && queue.AreAllWorkersIdle() && queue.State == QueueRunning
+}
+
+// PublishDestinationTasks creates destination traversal tasks by querying both source and destination tables
+func (qp *QueuePublisher) PublishDestinationTasks(queueName string) {
+	qp.Mutex.Lock()
+	queue, exists := qp.Queues[queueName]
+	currentLevel := qp.QueueLevels[queueName]
+	qp.Mutex.Unlock()
+
+	if !exists {
+		logging.GlobalLogger.LogQP("error", queueName, "", "Destination queue not found", nil)
+		return
+	}
+
+	// Discover and set root path for destination queue if not already done
+	if err := qp.discoverAndSetRootPath(queueName, "destination_nodes"); err != nil {
+		logging.GlobalLogger.LogQP("error", queueName, "", "Failed to discover destination root path", map[string]any{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	// Force flush destination table to ensure all pending writes are committed
+	qp.FlushTable("destination_nodes")
+
+	// Step 1: Query destination table for pending folders at current level
+	dstFolders := qp.fetchDestinationFolders(currentLevel)
+	if len(dstFolders) == 0 {
+		logging.GlobalLogger.LogQP("info", queueName, "", "No pending destination folders found", map[string]any{
+			"level": currentLevel,
+		})
+		return
+	}
+
+	logging.GlobalLogger.LogQP("info", queueName, "", "Found destination folders to process", map[string]any{
+		"count": len(dstFolders),
+		"level": currentLevel,
+	})
+
+	// Step 2: For each destination folder, get expected source children and create tasks
+	var tasks []Task
+	for _, dstFolder := range dstFolders {
+		expectedSrcChildren, expectedSrcFiles := qp.fetchExpectedSourceChildren(dstFolder.Path)
+
+		// Create destination traversal task with expected source children
+		taskID := fmt.Sprintf("dst-%d-%s", currentLevel, dstFolder.Identifier)
+		dstTask, err := NewDstTraversalTask(taskID, dstFolder, nil, expectedSrcChildren, expectedSrcFiles)
+		if err != nil {
+			logging.GlobalLogger.LogQP("error", queueName, dstFolder.Path, "Failed to create destination task", map[string]any{
+				"error": err.Error(),
+			})
+			continue
+		}
+
+		tasks = append(tasks, dstTask)
+	}
+
+	if len(tasks) > 0 {
+		queue.AddTasks(tasks)
+		logging.GlobalLogger.LogQP("info", queueName, "", "Added destination tasks to queue", map[string]any{
+			"taskCount": len(tasks),
+			"level":     currentLevel,
+		})
+	}
+}
+
+// fetchDestinationFolders queries the destination table for pending folders at the specified level
+func (qp *QueuePublisher) fetchDestinationFolders(level int) []*filesystem.Folder {
+	query := `SELECT path, name, identifier, parent_id, last_modified 
+	          FROM destination_nodes 
+	          WHERE traversal_status = 'pending' AND level = ? AND type = 'folder'
+	          ORDER BY path`
+
+	rows, err := qp.DB.Query("destination_nodes", query, level)
+	if err != nil {
+		logging.GlobalLogger.LogSystem("error", "QP", "Failed to query destination folders", map[string]any{
+			"error": err.Error(),
+			"level": level,
+		})
+		return nil
+	}
+	defer rows.Close()
+
+	var folders []*filesystem.Folder
+	for rows.Next() {
+		var path, name, identifier, parentID, lastModified string
+		if err := rows.Scan(&path, &name, &identifier, &parentID, &lastModified); err != nil {
+			logging.GlobalLogger.LogSystem("error", "QP", "Failed to scan destination folder row", map[string]any{
+				"error": err.Error(),
+			})
+			continue
+		}
+
+		folder := &filesystem.Folder{
+			Name:         name,
+			Path:         path,
+			ParentID:     parentID,
+			Identifier:   identifier,
+			LastModified: lastModified,
+			Level:        level,
+		}
+		folders = append(folders, folder)
+	}
+
+	return folders
+}
+
+// fetchExpectedSourceChildren queries the source table for expected children of the given path
+func (qp *QueuePublisher) fetchExpectedSourceChildren(dstPath string) ([]*filesystem.Folder, []*filesystem.File) {
+	// Query source table for children of this path
+	query := `SELECT path, name, identifier, parent_id, type, last_modified, size
+	          FROM source_nodes 
+	          WHERE parent_id = ?
+	          ORDER BY type, name`
+
+	rows, err := qp.DB.Query("source_nodes", query, dstPath)
+	if err != nil {
+		logging.GlobalLogger.LogSystem("error", "QP", "Failed to query expected source children", map[string]any{
+			"error": err.Error(),
+			"path":  dstPath,
+		})
+		return nil, nil
+	}
+	defer rows.Close()
+
+	var expectedFolders []*filesystem.Folder
+	var expectedFiles []*filesystem.File
+
+	for rows.Next() {
+		var path, name, identifier, parentID, nodeType, lastModified string
+		var size int64
+		if err := rows.Scan(&path, &name, &identifier, &parentID, &nodeType, &lastModified, &size); err != nil {
+			logging.GlobalLogger.LogSystem("error", "QP", "Failed to scan source child row", map[string]any{
+				"error": err.Error(),
+			})
+			continue
+		}
+
+		if nodeType == "folder" {
+			folder := &filesystem.Folder{
+				Name:         name,
+				Path:         path,
+				ParentID:     parentID,
+				Identifier:   identifier,
+				LastModified: lastModified,
+				Level:        0, // Will be set properly when used
+			}
+			expectedFolders = append(expectedFolders, folder)
+		} else if nodeType == "file" {
+			file := &filesystem.File{
+				Name:         name,
+				Path:         path,
+				ParentID:     parentID,
+				Identifier:   identifier,
+				LastModified: lastModified,
+				Size:         size,
+			}
+			expectedFiles = append(expectedFiles, file)
+		}
+	}
+
+	return expectedFolders, expectedFiles
+}
+
+// discoverAndSetRootPath finds the root folder (level 0) for the given table and stores it
+func (qp *QueuePublisher) discoverAndSetRootPath(queueName string, table string) error {
+	qp.Mutex.Lock()
+	// Check if root path is already discovered for this queue
+	if _, exists := qp.RootPaths[queueName]; exists {
+		qp.Mutex.Unlock()
+		return nil
+	}
+	qp.Mutex.Unlock()
+
+	// Query for the root folder (level 0)
+	query := `SELECT path FROM ` + table + ` WHERE level = 0 AND type = 'folder' LIMIT 1`
+	rows, err := qp.DB.Query(table, query)
+	if err != nil {
+		logging.GlobalLogger.LogSystem("error", "QP", "Failed to discover root path", map[string]any{
+			"error": err.Error(),
+			"table": table,
+			"queue": queueName,
+		})
+		return err
+	}
+	defer rows.Close()
+
+	var rootPath string
+	if rows.Next() {
+		if err := rows.Scan(&rootPath); err != nil {
+			logging.GlobalLogger.LogSystem("error", "QP", "Failed to scan root path", map[string]any{
+				"error": err.Error(),
+				"table": table,
+				"queue": queueName,
+			})
+			return err
+		}
+	} else {
+		return fmt.Errorf("no root folder (level 0) found in table %s", table)
+	}
+
+	// Store the discovered root path
+	qp.Mutex.Lock()
+	qp.RootPaths[queueName] = rootPath
+	qp.Mutex.Unlock()
+
+	logging.GlobalLogger.LogSystem("info", "QP", "Discovered root path for queue", map[string]any{
+		"queue":    queueName,
+		"rootPath": rootPath,
+		"table":    table,
+	})
+
+	return nil
+}
+
+// normalizePathForJoin converts an absolute path to a root-relative path for cross-table joins
+func (qp *QueuePublisher) normalizePathForJoin(queueName, absolutePath string) string {
+	qp.Mutex.Lock()
+	rootPath, exists := qp.RootPaths[queueName]
+	qp.Mutex.Unlock()
+
+	if !exists || rootPath == "" {
+		// Fallback: return the absolute path if no root is known
+		return absolutePath
+	}
+
+	// If this is the root path itself, return "/"
+	if absolutePath == rootPath {
+		return "/"
+	}
+
+	// Remove the root prefix and ensure it starts with "/"
+	if strings.HasPrefix(absolutePath, rootPath) {
+		relativePath := strings.TrimPrefix(absolutePath, rootPath)
+		if !strings.HasPrefix(relativePath, "/") {
+			relativePath = "/" + relativePath
+		}
+		return relativePath
+	}
+
+	// Fallback: return absolute path if it doesn't match the root
+	return absolutePath
 }
 
 func (qp *QueuePublisher) PublishTasks(queueName string) {
@@ -248,6 +555,14 @@ func (qp *QueuePublisher) PublishTasks(queueName string) {
 	table := "source_nodes"
 	if queue.Type == UploadQueueType {
 		table = "destination_nodes"
+	}
+
+	// Discover and set root path for this queue if not already done
+	if err := qp.discoverAndSetRootPath(queueName, table); err != nil {
+		logging.GlobalLogger.LogQP("error", queueName, "", "Failed to discover root path", map[string]any{
+			"error": err.Error(),
+		})
+		return
 	}
 
 	qp.Mutex.Lock()
@@ -557,7 +872,7 @@ func (qp *QueuePublisher) hasPendingAtLevel(queueName string, level int) bool {
 	return count > 0
 }
 
-func (qp *QueuePublisher) FetchTasksFromDB(table string, queueType QueueType, currentLevel int, lastSeenPath string, queueName string) []*Task {
+func (qp *QueuePublisher) FetchTasksFromDB(table string, queueType QueueType, currentLevel int, lastSeenPath string, queueName string) []Task {
 	logging.GlobalLogger.LogMessage("info", "Fetching tasks from DB", map[string]any{
 		"table":        table,
 		"queueType":    queueType,
@@ -651,7 +966,7 @@ func (qp *QueuePublisher) FetchTasksFromDB(table string, queueType QueueType, cu
 }
 
 // runTaskQuery executes the query and returns a list of tasks.
-func (qp *QueuePublisher) runTaskQuery(table, query string, params []any, currentLevel int, queueName string) []*Task {
+func (qp *QueuePublisher) runTaskQuery(table, query string, params []any, currentLevel int, queueName string) []Task {
 	rows, err := qp.DB.Query(table, query, params...)
 	if err != nil {
 		logging.GlobalLogger.LogMessage("error", "DB query failed", map[string]any{
@@ -666,7 +981,7 @@ func (qp *QueuePublisher) runTaskQuery(table, query string, params []any, curren
 
 	defer rows.Close()
 
-	var tasks []*Task
+	var tasks []Task
 	for rows.Next() {
 		var path, name, identifier, parentID, nodeType, lastModified string
 		if err := rows.Scan(&path, &name, &identifier, &parentID, &nodeType, &lastModified); err != nil {
@@ -692,7 +1007,7 @@ func (qp *QueuePublisher) runTaskQuery(table, query string, params []any, curren
 				LastModified: lastModified,
 				Level:        currentLevel,
 			}
-			task, err := NewTraversalTask(normalizedPath, folder, &folder.ParentID)
+			task, err := NewSrcTraversalTask(normalizedPath, folder, &folder.ParentID)
 			if err == nil {
 				tasks = append(tasks, task)
 			}

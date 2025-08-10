@@ -43,7 +43,7 @@ func (osSvc *OSService) GetRootPath() string {
 	return osSvc.rootPath
 }
 
-func (osSvc *OSService) relativize(path string) string {
+func (osSvc *OSService) Relativize(path string) string {
 	normalized := osSvc.NormalizePath(path)
 	root := osSvc.GetRootPath()
 	if strings.HasPrefix(normalized, root) {
@@ -127,17 +127,17 @@ func (osSvc *OSService) GetAllItems(folder filesystem.Folder, _ <-chan int) (<-c
 			if info.IsDir() {
 				foldersList = append(foldersList, filesystem.Folder{
 					Name:         item.Name(),
-					Path:         osSvc.relativize(itemPath),
+					Path:         osSvc.Relativize(itemPath),
 					Identifier:   identifier,
-					ParentID:     osSvc.relativize(normalizedPath),
+					ParentID:     osSvc.Relativize(normalizedPath),
 					LastModified: metadata["last_modified"].(string),
 				})
 			} else {
 				filesList = append(filesList, filesystem.File{
 					Name:         item.Name(),
-					Path:         osSvc.relativize(itemPath),
+					Path:         osSvc.Relativize(itemPath),
 					Identifier:   identifier,
-					ParentID:     osSvc.relativize(normalizedPath),
+					ParentID:     osSvc.Relativize(normalizedPath),
 					Size:         metadata["size"].(int64),
 					LastModified: metadata["last_modified"].(string),
 				})

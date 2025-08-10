@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/Voltaic314/ByteWave/code/filesystem"
@@ -29,6 +30,7 @@ type BaseServiceInterface interface {
 	GetFileIdentifier(path string) string
 	SetRootPath(path string)
 	GetRootPath() string
+	Relativize(path string) string
 }
 
 // BaseService holds shared attributes/methods and migration rules.
@@ -222,4 +224,16 @@ func (b *BaseService) GetRootPath() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.rootPath
+}
+
+func (b *BaseService) Relativize(path string) string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	normalized := b.NormalizePath(path)
+	root := b.rootPath
+	if strings.HasPrefix(normalized, root) {
+		rel := strings.TrimPrefix(normalized, root)
+		return strings.TrimPrefix(rel, "/")
+	}
+	return normalized // fallback
 }

@@ -40,24 +40,39 @@ func (c *Conductor) StartTraversal() {
 	// Initialize QP after DB and other components are ready
 	c.QP = NewQueuePublisher(c.DB, c.retryThreshold, c.batchSize)
 
-	// Setup queues
-	name := "src-traversal"
-	c.SetupQueue(name, TraversalQueueType, 0, "src", 1000)
+	// Setup source queue
+	srcQueueName := "src-traversal"
+	c.SetupQueue(srcQueueName, TraversalQueueType, 0, "src", 1000)
+
+	// Setup destination queue (but don't kickstart it yet)
+	dstQueueName := "dst-traversal"
+	c.SetupQueue(dstQueueName, TraversalQueueType, 0, "dst", 1000)
 
 	var os_svc services.BaseServiceInterface = services.NewOSService()
 	pv_obj := pv.NewPathValidator()
 
-	// Create the workers and assign them to the queue! 🤖
+	// Create workers for source queue
 	num_of_workers := 10
 	for range num_of_workers {
 		tw := &TraverserWorker{
-			WorkerBase: c.AddWorker("src-traversal", "src"),
+			WorkerBase: c.AddWorker(srcQueueName, "src"),
 			DB:         c.DB,
-			Service:    os_svc, // Or whatever service you need
-			pv:         pv_obj, // Or load actual rules if available
+			Service:    os_svc,
+			pv:         pv_obj,
+			QP:         c.QP,
 		}
-		// register worker to the queue
+		go tw.Run(tw.ProcessTraversalTask)
+	}
 
+	// Create workers for destination queue
+	for range num_of_workers {
+		tw := &TraverserWorker{
+			WorkerBase: c.AddWorker(dstQueueName, "dst"),
+			DB:         c.DB,
+			Service:    os_svc,
+			pv:         pv_obj,
+			QP:         c.QP,
+		}
 		go tw.Run(tw.ProcessTraversalTask)
 	}
 
@@ -66,14 +81,14 @@ func (c *Conductor) StartTraversal() {
 
 	time.Sleep(25 * time.Millisecond) // Give QP a moment to initialize
 
-	// kick start the first phase manually
+	// kick start the first phase manually for source only
 	signals.GlobalSR.Publish(signals.Signal{
-		Topic:   "qp:phase_updated",
+		Topic:   "qp:phase_updated:src-traversal",
 		Payload: 0,
 	})
 
 	// Listen for traversal complete signals
-	// This is a separate goroutine to handle traversal completion signals
+	// Source traversal completion
 	signals.GlobalSR.On("qp:traversal_complete:src-traversal", func(sig signals.Signal) {
 		queueName, ok := sig.Payload.(string)
 		if !ok {
@@ -83,7 +98,24 @@ func (c *Conductor) StartTraversal() {
 			return
 		}
 
-		logging.GlobalLogger.LogSystem("info", "Conductor", "Traversal complete received", map[string]any{
+		logging.GlobalLogger.LogSystem("info", "Conductor", "Source traversal complete", map[string]any{
+			"queue": queueName,
+		})
+
+		c.TeardownQueue(queueName)
+	})
+
+	// Destination traversal completion
+	signals.GlobalSR.On("qp:traversal_complete:dst-traversal", func(sig signals.Signal) {
+		queueName, ok := sig.Payload.(string)
+		if !ok {
+			logging.GlobalLogger.LogSystem("error", "Conductor", "Invalid traversal.complete payload", map[string]any{
+				"payload_type": fmt.Sprintf("%T", sig.Payload),
+			})
+			return
+		}
+
+		logging.GlobalLogger.LogSystem("info", "Conductor", "Destination traversal complete", map[string]any{
 			"queue": queueName,
 		})
 

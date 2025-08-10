@@ -31,8 +31,8 @@ type TaskQueue struct {
 	Type                QueueType      // Type of queue (traversal or upload)
 	Phase               int            // Current phase
 	SrcOrDst            string         // "src" or "dst"
-	tasks               []*Task        // List of tasks
-	inProgressTasks     []*Task        // Tasks currently being processed by workers
+	tasks               []Task         // List of tasks
+	inProgressTasks     []Task         // Tasks currently being processed by workers
 	workers             []*WorkerBase  // Managed by Conductor
 	mu                  sync.Mutex     // Mutex for concurrent access
 	PaginationSize      int            // Pagination width for folder content listing
@@ -63,8 +63,8 @@ func NewTaskQueue(queueType QueueType, phase int, srcOrDst string, paginationSiz
 		Type:                queueType,
 		Phase:               phase,
 		SrcOrDst:            srcOrDst,
-		tasks:               []*Task{},
-		inProgressTasks:     []*Task{},
+		tasks:               []Task{},
+		inProgressTasks:     []Task{},
 		workers:             []*WorkerBase{},
 		PaginationSize:      paginationSize,
 		PaginationChan:      make(chan int, 1),
@@ -188,18 +188,18 @@ func (q *TaskQueue) Resume() {
 }
 
 // AddTask adds a task to the queue.
-func (q *TaskQueue) AddTask(task *Task) {
+func (q *TaskQueue) AddTask(task Task) {
 
 	logging.GlobalLogger.LogMessage("info", "Adding task to queue", map[string]any{
 		"queueID": q.QueueID,
-		"taskID":  task.ID,
+		"taskID":  task.GetID(),
 	})
 	q.Lock()
 	q.tasks = append(q.tasks, task)
 	q.Unlock()
 }
 
-func (q *TaskQueue) AddTasks(tasks []*Task) {
+func (q *TaskQueue) AddTasks(tasks []Task) {
 
 	logging.GlobalLogger.LogMessage("info", "Adding multiple tasks to queue", map[string]any{
 		"queueID":   q.QueueID,
@@ -225,7 +225,7 @@ func (q *TaskQueue) ResetRunningLowTrigger() {
 }
 
 // PopTask retrieves the next available task, pausing workers if needed.
-func (q *TaskQueue) PopTask() *Task {
+func (q *TaskQueue) PopTask() Task {
 	q.Lock()
 	defer q.Unlock()
 
@@ -240,8 +240,8 @@ func (q *TaskQueue) PopTask() *Task {
 
 	// Find first unlocked task, remove it from slice, return it
 	for i, task := range q.tasks {
-		if !task.Locked {
-			task.Locked = true
+		if !task.IsLocked() {
+			task.SetLocked(true)
 			// splice: tasks = tasks[:i] + tasks[i+1:]
 			// Sidenote but this is really weird compared to Python's append syntax lol
 			q.tasks = append(q.tasks[:i], q.tasks[i+1:]...)
@@ -251,7 +251,7 @@ func (q *TaskQueue) PopTask() *Task {
 
 			logging.GlobalLogger.LogMessage("info", "Task popped and added to in-progress", map[string]any{
 				"queueID": q.QueueID,
-				"taskID":  task.ID,
+				"taskID":  task.GetID(),
 				"path":    task.GetPath(),
 			})
 
@@ -271,8 +271,8 @@ func (q *TaskQueue) UnlockTask(taskID string) {
 		"taskID":  taskID,
 	})
 	for _, task := range q.tasks {
-		if task.ID == taskID {
-			task.Locked = false
+		if task.GetID() == taskID {
+			task.SetLocked(false)
 			return
 		}
 	}
@@ -440,7 +440,7 @@ func (q *TaskQueue) TrackedPaths(includeInProgress bool) map[string]bool {
 }
 
 // AddInProgressTask adds a task to the in-progress list
-func (q *TaskQueue) AddInProgressTask(task *Task) {
+func (q *TaskQueue) AddInProgressTask(task Task) {
 	q.Lock()
 	defer q.Unlock()
 
@@ -448,7 +448,7 @@ func (q *TaskQueue) AddInProgressTask(task *Task) {
 
 	logging.GlobalLogger.LogMessage("info", "Task added to in-progress", map[string]any{
 		"queueID": q.QueueID,
-		"taskID":  task.ID,
+		"taskID":  task.GetID(),
 		"path":    task.GetPath(),
 	})
 }
@@ -459,7 +459,7 @@ func (q *TaskQueue) RemoveInProgressTask(taskID string) {
 	defer q.Unlock()
 
 	for i, task := range q.inProgressTasks {
-		if task.ID == taskID {
+		if task.GetID() == taskID {
 			// Remove from slice
 			q.inProgressTasks = append(q.inProgressTasks[:i], q.inProgressTasks[i+1:]...)
 
