@@ -52,7 +52,7 @@ func (c *Conductor) StartTraversal() {
 	pv_obj := pv.NewPathValidator()
 
 	// Create workers for source queue
-	num_of_workers := 10
+	num_of_workers := 1
 	for range num_of_workers {
 		tw := &TraverserWorker{
 			WorkerBase: c.AddWorker(srcQueueName, "src"),
@@ -70,7 +70,7 @@ func (c *Conductor) StartTraversal() {
 			WorkerBase: c.AddWorker(dstQueueName, "dst"),
 			DB:         c.DB,
 			Service:    os_svc,
-			pv:         pv_obj, // TODO: dst doesn't need pv, this should be removed when we build out the actual pv logic. 
+			pv:         pv_obj, // TODO: dst doesn't need pv, this should be removed when we build out the actual pv logic.
 			QP:         c.QP,
 		}
 		go tw.Run(tw.ProcessTraversalTask)
@@ -80,6 +80,9 @@ func (c *Conductor) StartTraversal() {
 	c.StartAll()
 
 	time.Sleep(250 * time.Millisecond) // Give QP a moment to initialize
+
+	// Start destination polling so it's ready to respond to green lights
+	c.QP.StartDestinationPolling()
 
 	// kick start the first phase manually for source only
 	signals.GlobalSR.Publish(signals.Signal{
@@ -129,7 +132,13 @@ func (c *Conductor) SetupQueue(name string, queueType QueueType, phase int, srcO
 	queue := NewTaskQueue(queueType, phase, srcOrDst, paginationSize, RunningLowThreshold)
 
 	c.QP.Queues[name] = queue
-	c.QP.QueueLevels[name] = phase
+
+	// Only set initial queue level for source queues
+	// Destination queues should start when triggered by source progress
+	if srcOrDst == "src" {
+		c.QP.QueueLevels[name] = phase
+	}
+
 	c.QP.LastPathCursors[name] = "" // 🆕 Add path-based cursor for this queue
 }
 

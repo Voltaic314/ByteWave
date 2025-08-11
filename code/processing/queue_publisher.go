@@ -51,6 +51,9 @@ type QueuePublisher struct {
 	HandlersInstalled map[string]bool
 	// RootPaths stores the root folder path for each queue (for path normalization)
 	RootPaths map[string]string // queueName -> rootPath
+	// DstCanAdvance is the simple red-light/green-light flag for destination
+	DstCanAdvance  bool
+	DstTargetLevel int // What level destination should advance to when green-lit
 }
 
 func NewQueuePublisher(db *db.DB, retryThreshold, batchSize int) *QueuePublisher {
@@ -73,6 +76,8 @@ func NewQueuePublisher(db *db.DB, retryThreshold, batchSize int) *QueuePublisher
 		ScanModes:          make(map[string]scanMode),
 		HandlersInstalled:  make(map[string]bool),
 		RootPaths:          make(map[string]string), // queueName -> rootPath
+		DstCanAdvance:      false,                   // Start with red light
+		DstTargetLevel:     0,
 	}
 }
 
@@ -129,12 +134,16 @@ func (qp *QueuePublisher) StartListening() {
 		srcQueueName := "src-traversal"
 		qp.Mutex.Lock()
 		qp.QueueLevels[srcQueueName] = level
+		if srcQueue, exists := qp.Queues[srcQueueName]; exists {
+			srcQueue.Phase = level // Keep queue.Phase in sync
+		}
 		qp.ScanModes[srcQueueName] = firstPass
+
+		// Simple red-light/green-light logic for destination
+		qp.updateDestinationGreenLight(level)
+
 		qp.Mutex.Unlock()
 		qp.PublishTasks(srcQueueName)
-
-		// Check if destination should be started or advanced
-		qp.checkDestinationStart(level)
 
 		// Install per-queue handlers for source queue if not already installed
 		qp.Mutex.Lock()
@@ -148,34 +157,8 @@ func (qp *QueuePublisher) StartListening() {
 		}
 	})
 
-	// Subscribe to destination phase updates
-	signals.GlobalSR.On("qp:phase_updated:dst-traversal", func(sig signals.Signal) {
-		level, ok := sig.Payload.(int)
-		if !ok {
-			logging.GlobalLogger.LogSystem("error", "QP", "Invalid data type in dst phase_updated signal", map[string]any{
-				"payload_type": fmt.Sprintf("%T", sig.Payload),
-				"payload":      sig.Payload,
-			})
-			return
-		}
-
-		logging.GlobalLogger.LogSystem("info", "QP", "Destination phase updated", map[string]any{
-			"newLevel": level,
-		})
-
-		// Handle destination queue with source dependency check
-		dstQueueName := "dst-traversal"
-		qp.Mutex.Lock()
-		qp.QueueLevels[dstQueueName] = level
-		qp.ScanModes[dstQueueName] = firstPass
-		qp.Mutex.Unlock()
-
-		// Wait for source to be ready if needed (in a goroutine to avoid blocking)
-		go func() {
-			qp.waitForSrcProgress(level)
-			qp.PublishDestinationTasks(dstQueueName)
-		}()
-	})
+	// Destination phase updates are now handled by the simple green-light logic
+	// No complex signal handling needed
 
 	// Keep the main loop running
 	for qp.Running {
@@ -204,6 +187,9 @@ func (qp *QueuePublisher) installQueueHandlers(queueName string) {
 
 		qp.Mutex.Lock()
 		qp.QueueLevels[queueName] = phase
+		if queue, exists := qp.Queues[queueName]; exists {
+			queue.Phase = phase // Keep queue.Phase in sync
+		}
 		qp.ScanModes[queueName] = firstPass
 		qp.Mutex.Unlock()
 		qp.PublishTasks(queueName)
@@ -266,113 +252,62 @@ func (qp *QueuePublisher) installQueueHandlers(queueName string) {
 	}(queueName)
 }
 
-// checkDestinationStart checks if destination traversal should be started or advanced
-func (qp *QueuePublisher) checkDestinationStart(srcLevel int) {
+// updateDestinationGreenLight sets the destination green light based on source progress
+func (qp *QueuePublisher) updateDestinationGreenLight(srcLevel int) {
 	dstQueueName := "dst-traversal"
 
-	qp.Mutex.Lock()
-	dstQueue, dstExists := qp.Queues[dstQueueName]
-	currentDstLevel, dstLevelExists := qp.QueueLevels[dstQueueName]
-	qp.Mutex.Unlock()
-
+	// Check if destination queue exists
+	_, dstExists := qp.Queues[dstQueueName]
 	if !dstExists {
-		return // Destination queue not set up yet
+		return // No destination queue to coordinate
 	}
 
-	// Check if we should start destination (source has completed level 0)
+	currentDstLevel, dstLevelExists := qp.QueueLevels[dstQueueName]
+
+	// Start destination when source reaches level 1 (completed level 0)
 	if !dstLevelExists && srcLevel >= 1 {
-		logging.GlobalLogger.LogSystem("info", "QP", "Starting destination traversal", map[string]any{
+		logging.GlobalLogger.LogSystem("info", "QP", "Green light: Starting destination", map[string]any{
 			"srcLevel": srcLevel,
 		})
-
-		// Initialize destination queue handlers if not already done
-		qp.Mutex.Lock()
-		needInstall := !qp.HandlersInstalled[dstQueueName]
-		qp.Mutex.Unlock()
-		if needInstall {
-			qp.installQueueHandlers(dstQueueName)
-			qp.Mutex.Lock()
-			qp.HandlersInstalled[dstQueueName] = true
-			qp.Mutex.Unlock()
-		}
-
-		// Start destination at level 0
-		qp.Mutex.Lock()
-		qp.QueueLevels[dstQueueName] = 0
-		qp.ScanModes[dstQueueName] = firstPass
-		qp.Mutex.Unlock()
-		qp.PublishDestinationTasks(dstQueueName)
+		qp.DstCanAdvance = true
+		qp.DstTargetLevel = 0
 		return
 	}
 
-	// Check if destination can advance (N+1 dependency rule)
-	// Dst Level N requires Src to have COMPLETED Level N+1
-	// Since srcLevel represents what Src is currently working on, we need srcLevel >= N+2
+	// Allow destination to advance if source is N+2 ahead
 	if dstLevelExists && srcLevel >= currentDstLevel+2 {
-		logging.GlobalLogger.LogSystem("info", "QP", "Advancing destination phase", map[string]any{
-			"srcLevel": srcLevel,
-			"dstLevel": currentDstLevel,
+		logging.GlobalLogger.LogSystem("info", "QP", "Green light: Destination can advance", map[string]any{
+			"srcLevel":    srcLevel,
+			"currentDst":  currentDstLevel,
+			"targetLevel": currentDstLevel + 1,
 		})
-
-		// Check if current destination phase is complete before advancing
-		if qp.isDstPhaseComplete(dstQueue, currentDstLevel) {
-			newDstLevel := currentDstLevel + 1
-			qp.Mutex.Lock()
-			qp.QueueLevels[dstQueueName] = newDstLevel
-			qp.ScanModes[dstQueueName] = firstPass
-			qp.Mutex.Unlock()
-			qp.PublishDestinationTasks(dstQueueName)
-		}
+		qp.DstCanAdvance = true
+		qp.DstTargetLevel = currentDstLevel + 1
+		return
 	}
+
+	// Otherwise, red light
+	qp.DstCanAdvance = false
 }
 
-// isDstPhaseComplete checks if the current destination phase is complete
-func (qp *QueuePublisher) isDstPhaseComplete(queue *TaskQueue, level int) bool {
-	return queue.QueueSize() == 0 && queue.AreAllWorkersIdle() && queue.State == QueueRunning
-}
+// StartDestinationPolling starts the destination polling loop so it's ready to respond to green lights
+func (qp *QueuePublisher) StartDestinationPolling() {
+	dstQueueName := "dst-traversal"
 
-// canDstAdvanceToLevel checks if destination can advance to the specified level based on source progress
-func (qp *QueuePublisher) canDstAdvanceToLevel(targetDstLevel int) bool {
+	// Check if destination queue exists
 	qp.Mutex.Lock()
-	srcLevel, srcExists := qp.QueueLevels["src-traversal"]
+	_, exists := qp.Queues[dstQueueName]
 	qp.Mutex.Unlock()
 
-	if !srcExists {
-		return false // Source queue doesn't exist
+	if !exists {
+		logging.GlobalLogger.LogSystem("warning", "QP", "Cannot start destination polling - queue doesn't exist", nil)
+		return
 	}
 
-	// Destination level N requires source to have completed level N+1
-	// This means source must be currently working on level N+2 or higher
-	requiredSrcLevel := targetDstLevel + 2
-	return srcLevel >= requiredSrcLevel
-}
+	// Start polling for destination so it can respond to green lights
+	qp.startPolling(dstQueueName)
 
-// waitForSrcProgress blocks until source reaches the required level for destination to advance
-func (qp *QueuePublisher) waitForSrcProgress(targetDstLevel int) {
-	requiredSrcLevel := targetDstLevel + 2
-
-	// Check if we can already proceed
-	if qp.canDstAdvanceToLevel(targetDstLevel) {
-		return // No need to wait
-	}
-
-	logging.GlobalLogger.LogSystem("info", "QP", "Destination waiting for source progress", map[string]any{
-		"targetDstLevel":   targetDstLevel,
-		"requiredSrcLevel": requiredSrcLevel,
-	})
-
-	// Poll for source progress with a reasonable interval
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		if qp.canDstAdvanceToLevel(targetDstLevel) {
-			logging.GlobalLogger.LogSystem("info", "QP", "Destination can now advance", map[string]any{
-				"targetDstLevel": targetDstLevel,
-			})
-			return
-		}
-	}
+	logging.GlobalLogger.LogSystem("info", "QP", "Destination polling started - ready for green lights", nil)
 }
 
 // PublishDestinationTasks creates destination traversal tasks by querying both source and destination tables
@@ -724,7 +659,18 @@ func (qp *QueuePublisher) createRootTask(queueName string, table string) ([]Task
 			Level:        0,
 		}
 
-		task, err := NewSrcTraversalTask(identifier, folder, nil)
+		var task Task
+		var err error
+
+		// Create the appropriate task type based on the table
+		if table == "destination_nodes" {
+			// For destination root task, create with empty expected children/files
+			task, err = NewDstTraversalTask(identifier, folder, nil, nil, nil)
+		} else {
+			// For source root task
+			task, err = NewSrcTraversalTask(identifier, folder, nil)
+		}
+
 		if err != nil {
 			return nil, err
 		}
@@ -733,6 +679,7 @@ func (qp *QueuePublisher) createRootTask(queueName string, table string) ([]Task
 			"queue":      queueName,
 			"path":       "/",
 			"identifier": identifier,
+			"taskType":   task.GetType(),
 		})
 
 		return []Task{task}, nil
@@ -750,9 +697,11 @@ func (qp *QueuePublisher) PublishTasks(queueName string) {
 		return
 	}
 
-	// Determine the correct table
+	// Determine the correct table based on queue type and src/dst designation
 	table := "source_nodes"
 	if queue.Type == UploadQueueType {
+		table = "destination_nodes"
+	} else if queue.Type == TraversalQueueType && queue.SrcOrDst == "dst" {
 		table = "destination_nodes"
 	}
 
@@ -855,6 +804,63 @@ func (qp *QueuePublisher) isRoundComplete(queue *TaskQueue) bool {
 
 func (qp *QueuePublisher) advancePhase(queueName string) {
 	queue := qp.Queues[queueName]
+
+	// For destination queues, check the simple green light flag
+	if queue.SrcOrDst == "dst" {
+		if !qp.DstCanAdvance {
+			logging.GlobalLogger.LogMessage("info", "Destination red light - cannot advance", map[string]any{
+				"queue":        queueName,
+				"currentPhase": queue.Phase,
+				"canAdvance":   qp.DstCanAdvance,
+				"targetLevel":  qp.DstTargetLevel,
+			})
+			return // Red light - don't advance destination yet
+		}
+
+		// Check if this is the initial startup (target level 0)
+		if qp.DstTargetLevel == 0 && queue.Phase == 0 {
+			// Initialize destination for first time
+			qp.QueueLevels[queueName] = 0
+			qp.ScanModes[queueName] = firstPass
+
+			// Install handlers if needed
+			needInstall := !qp.HandlersInstalled[queueName]
+			if needInstall {
+				qp.installQueueHandlers(queueName)
+				qp.HandlersInstalled[queueName] = true
+			}
+
+			logging.GlobalLogger.LogMessage("info", "Destination initialized at level 0", map[string]any{
+				"queue": queueName,
+			})
+			qp.DstCanAdvance = false // Turn back to red light
+
+			// Publish initial tasks for level 0 immediately
+			go qp.PublishTasks(queueName)
+			return
+		}
+
+		// Check if we should advance to the target level
+		if qp.DstTargetLevel != queue.Phase+1 {
+			logging.GlobalLogger.LogMessage("info", "Destination target level mismatch", map[string]any{
+				"queue":        queueName,
+				"currentPhase": queue.Phase,
+				"targetLevel":  qp.DstTargetLevel,
+				"expectedNext": queue.Phase + 1,
+			})
+			return // Target level doesn't match expected next level
+		}
+
+		// Green light - advance and turn back to red
+		logging.GlobalLogger.LogMessage("info", "Destination green light - advancing", map[string]any{
+			"queue":        queueName,
+			"currentPhase": queue.Phase,
+			"targetLevel":  qp.DstTargetLevel,
+		})
+		qp.DstCanAdvance = false // Turn back to red light after advancing
+	}
+
+	// Advance the phase
 	queue.Phase++
 	qp.QueueLevels[queueName] = queue.Phase
 	qp.LastPathCursors[queueName] = ""
@@ -862,8 +868,9 @@ func (qp *QueuePublisher) advancePhase(queueName string) {
 	qp.QueriesPerPhase[queueName] = 0
 
 	logging.GlobalLogger.LogMessage("info", "Advancing to next phase", map[string]any{
-		"queue": queueName,
-		"phase": queue.Phase,
+		"queue":       queueName,
+		"phase":       queue.Phase,
+		"syncedLevel": qp.QueueLevels[queueName],
 	})
 
 	// Publish queue-specific phase update signal
@@ -950,7 +957,6 @@ func (qp *QueuePublisher) checkTraversalComplete(queueName string, queryResultSi
 }
 
 func (qp *QueuePublisher) startPolling(queueName string) {
-
 	controller, exists := qp.PollingControllers[queueName]
 	if exists {
 		controller.Mutex.Lock()
@@ -1002,6 +1008,8 @@ func (qp *QueuePublisher) startPolling(queueName string) {
 					table := "source_nodes"
 					if queue.Type == UploadQueueType {
 						table = "destination_nodes"
+					} else if queue.Type == TraversalQueueType && queue.SrcOrDst == "dst" {
+						table = "destination_nodes"
 					}
 					qp.FlushTable(table)
 
@@ -1046,6 +1054,9 @@ func (qp *QueuePublisher) hasPendingAtLevel(queueName string, level int) bool {
 	if queue.Type == UploadQueueType {
 		table = "destination_nodes"
 		statusColumn = "upload_status"
+	} else if queue.Type == TraversalQueueType && queue.SrcOrDst == "dst" {
+		table = "destination_nodes"
+		statusColumn = "traversal_status"
 	}
 
 	// Ensure pending writes are flushed before checking
