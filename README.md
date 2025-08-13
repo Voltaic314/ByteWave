@@ -6,7 +6,9 @@ This application allows you to migrate data from one storage service to another 
 # ByteWave Roadmap (Where We Are & Where We’re Going)
 
 > ByteWave is a local, privacy‑first file migration tool with advanced **Path Verification (PV)** filters, **File Path Validation (FPV)** checks/cleaning, and an event‑driven core. This roadmap is a living snapshot for contributors, users, and curious hiring managers.
+
 ---
+
 
 ## Status at a Glance
 
@@ -21,7 +23,9 @@ This application allows you to migrate data from one storage service to another 
 * ✅ **PV vs FPV clarified** — PV = user filters (can stop recursion). FPV = compatibility checks/cleaning (never stops traversal; accumulates findings).
 
 > **Website:** planned later. For now, this README and the wiki are the source of truth.
+
 ---
+
 
 ## What’s Blocking What (and main sub-projects ongoing or future)
 
@@ -41,7 +45,9 @@ This application allows you to migrate data from one storage service to another 
 * **Prepare the Root** = UI folder picker + API endpoints to browse the local FS, select src/dst roots, and persist them to DB; replaces hardcoded JSON “root” entries. Every stored path is relative to its selected root.
 * **API/UI** follow traversal+upload so the UI has meaningful controls from day one.
 * **Cloud support** depends on API/UI (OAuth device/user flows and listing views).
+
 ---
+
 
 ## Near‑Term Core Priorities
 
@@ -57,7 +63,9 @@ This application allows you to migrate data from one storage service to another 
 
    * API: `GET /fs/roots`, `GET /fs/ls?path=…`, `POST /roots` (set src/dst), `GET /roots`.
    * UI: simple folder picker → show chosen src/dst → **Start traversal**.
+
 ---
+
 
 ## Path Review Phase (between traversal and upload) (after destination traversal is finished)
 
@@ -80,7 +88,9 @@ This application allows you to migrate data from one storage service to another 
 **Later**
 
 * Diff view (original vs cleaned), conflict resolution, undo/rollback.
+
 ---
+
 
 ## Side Projects You Can Start Now (Unblocked)
 
@@ -112,19 +122,25 @@ This application allows you to migrate data from one storage service to another 
   * Fixtures, golden files, high‑variance edge cases. 
 
 > **Installer:** groundwork (notes/templates) is fine, but final packaging should wait until CLI/API/configs stabilize. Expect this near beta.
+
 ---
+
 
 ## Performance & Architecture
 
 * **Signal Router (SR):** centralized topic based message queue (in memory, ephemeral with buffering options but no persistence - (topics like `queue:running_low`, `traversal:complete`) - eliminates channel spaghetti and missed signals.
 * **Dynamic Resource Allocation (DRA):** adjusts worker pools for traversal/upload in response to CPU/mem/I/O/network and external rate limits—maximizes throughput without thrashing.
+
 ---
+
 
 ## Security & Privacy
 
 * **Local‑only by default** — no phone‑home.
 * **Planned** — optional local auth (protects against rogue launches), later MFA; least‑privilege tokens for cloud providers; transparent docs on what’s stored locally.
+
 ---
+
 
 ## Rough Timeline (very rough; subject to change)
 
@@ -133,7 +149,9 @@ This application allows you to migrate data from one storage service to another 
 * **+3 months** — heavy beta (stability, recovery drills, performance, automated tests), FPV batch clean UX, docs pass → **V1**.
 
 Parallel contributions can accelerate this. See **Side Projects** above to get started.
+
 ---
+
 
 ## How to Contribute
 
@@ -144,4 +162,6 @@ Parallel contributions can accelerate this. See **Side Projects** above to get s
 * **UI/UX:** folder selection modal, progress/logs panel, Path Review table (bulk actions, virtualization).
 
 Open an issue to claim something, or jump into one labeled **good first issue**. PRs welcome.
+
 ---
+
