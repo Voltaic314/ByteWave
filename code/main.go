@@ -13,6 +13,8 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/Voltaic314/ByteWave/code/cli"
@@ -33,8 +35,16 @@ func main() {
 		fmt.Println("❌ Could not launch log terminal:", err)
 	}
 
+	// Get current working directory for dynamic path resolution
+	cwd, err := os.Getwd()
+	if err != nil {
+		fmt.Println("❌ Could not determine current working directory:", err)
+		return
+	}
+
 	// Initialize logger (UDP-only for now)
-	logging.InitLogger("C:\\Users\\golde\\OneDrive\\Documents\\GitHub\\ByteWave\\settings\\log_settings.json")
+	logSettingsPath := filepath.Join(cwd, "settings", "log_settings.json")
+	logging.InitLogger(logSettingsPath)
 
 	// Give the log terminal a sec to boot up
 	time.Sleep(3 * time.Second)
@@ -48,8 +58,9 @@ func main() {
 	signals.InitSignalRouter()
 
 	// Start the Conductor — now self-contained (handles its own DB + logger)
+	dbPath := filepath.Join(cwd, "tests", "traversal_tests", "test_traversal.db")
 	conductor := processing.NewConductor(
-		"C:\\Users\\golde\\OneDrive\\Documents\\GitHub\\ByteWave\\tests\\traversal_tests\\test_traversal.db",
+		dbPath,
 		3,    // retry threshold
 		1000, // batch size
 	)

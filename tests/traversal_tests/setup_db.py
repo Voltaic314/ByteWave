@@ -6,9 +6,10 @@ import duckdb
 from datetime import datetime
 
 # Paths
-src_json_path = r"C:\Users\golde\OneDrive\Documents\GitHub\ByteWave\tests\traversal_tests\test_src_path.json"
-dst_json_path = r"C:\Users\golde\OneDrive\Documents\GitHub\ByteWave\tests\traversal_tests\test_dst_path.json"
-db_path = r"C:\Users\golde\OneDrive\Documents\GitHub\ByteWave\tests\traversal_tests\test_traversal.db"
+base_dir = os.getcwd()
+src_json_path = os.path.join(base_dir, "tests", "traversal_tests", "test_src_path.json")
+dst_json_path = os.path.join(base_dir, "tests", "traversal_tests", "test_dst_path.json")
+db_path = os.path.join(base_dir, "tests", "traversal_tests", "test_traversal.db")
 
 # If the db file path exists, delete it first
 if os.path.exists(db_path):
