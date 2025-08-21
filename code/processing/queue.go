@@ -5,7 +5,6 @@ import (
 	"sync"
 
 	"github.com/Voltaic314/ByteWave/code/logging"
-	"github.com/Voltaic314/ByteWave/code/signals"
 )
 
 // QueueType defines whether a queue is for traversal or uploading.
@@ -117,51 +116,21 @@ func (q *TaskQueue) WaitIfPaused() {
 }
 
 // CheckAndTriggerQP checks the queue size and signals QP if tasks are low.
+// NOTE: This method is now a no-op since QP uses direct polling instead of signals
 func (q *TaskQueue) CheckAndTriggerQP() {
-	q.Lock()
-	defer q.Unlock()
-
-	if q.QueueSize() <= q.RunningLowThreshold && !q.RunningLowTriggered {
-		logging.GlobalLogger.LogMessage("info", "Queue running low, triggering QP", map[string]any{
-			"queueID":     q.QueueID,
-			"currentSize": q.QueueSize(),
-			"threshold":   q.RunningLowThreshold,
-		})
-		q.RunningLowTriggered = true
-		signals.GlobalSR.Publish(signals.Signal{
-			Topic:   fmt.Sprintf("qp:running_low:%s", q.SignalTopicBase),
-			Payload: q.Phase,
-		})
-	}
+	// No-op: QP now proactively manages task publishing via polling
 }
 
 // SignalWorkerIdle signals that a worker has gone idle and may need more tasks
+// NOTE: This method is now a no-op since QP uses direct polling instead of signals
 func (q *TaskQueue) SignalWorkerIdle() {
-	q.Lock()
-	defer q.Unlock()
-
-	// Only signal if we haven't already and queue is empty
-	if !q.IdleTriggered && len(q.tasks) == 0 {
-		logging.GlobalLogger.LogMessage("info", "Worker idle signal triggered", map[string]any{
-			"queueID": q.QueueID,
-		})
-		q.IdleTriggered = true
-		signals.GlobalSR.Publish(signals.Signal{
-			Topic:   fmt.Sprintf("qp:idle:%s", q.SignalTopicBase),
-			Payload: q.Phase,
-		})
-	}
+	// No-op: QP now proactively manages task publishing via polling
 }
 
 // ResetIdleTrigger is called by QP when new tasks are added
+// NOTE: This method is now a no-op since QP uses direct polling instead of signals
 func (q *TaskQueue) ResetIdleTrigger() {
-	q.Lock()
-	defer q.Unlock()
-
-	logging.GlobalLogger.LogMessage("info", "Resetting idle trigger", map[string]any{
-		"queueID": q.QueueID,
-	})
-	q.IdleTriggered = false
+	// No-op: QP now proactively manages task publishing via polling
 }
 
 // Pause the queue (workers will stop picking up tasks)
@@ -214,14 +183,9 @@ func (q *TaskQueue) AddTasks(tasks []Task) {
 }
 
 // ResetRunningLowTrigger is called by QP when new tasks are added.
+// NOTE: This method is now a no-op since QP uses direct polling instead of signals
 func (q *TaskQueue) ResetRunningLowTrigger() {
-	q.Lock()
-	defer q.Unlock()
-
-	logging.GlobalLogger.LogMessage("info", "Resetting running low trigger", map[string]any{
-		"queueID": q.QueueID,
-	})
-	q.RunningLowTriggered = false
+	// No-op: QP now proactively manages task publishing via polling
 }
 
 // PopTask retrieves the next available task, pausing workers if needed.
@@ -229,14 +193,7 @@ func (q *TaskQueue) PopTask() Task {
 	q.Lock()
 	defer q.Unlock()
 
-	// Running‑low trigger (unchanged)
-	if len(q.tasks) < q.RunningLowThreshold && !q.RunningLowTriggered {
-		q.RunningLowTriggered = true
-		signals.GlobalSR.Publish(signals.Signal{
-			Topic:   fmt.Sprintf("qp:running_low:%s", q.SignalTopicBase),
-			Payload: q.Phase,
-		})
-	}
+	// Running‑low trigger removed - QP now handles task publishing proactively
 
 	// Find first unlocked task, remove it from slice, return it
 	for i, task := range q.tasks {

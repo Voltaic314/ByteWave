@@ -74,13 +74,7 @@ func (wb *WorkerBase) Run(process func(Task) error) {
 		// ✅ Lockless check (fast path)
 		if wb.Queue.QueueSize() == 0 {
 			wb.State = WorkerIdle
-			// 🆕 NEW: Signal that worker is idle and may need more tasks
-			wb.Queue.SignalWorkerIdle()
-			// logging.GlobalLogger.LogMessage("info", "Queue empty, worker entering wait state", map[string]any{
-			// 	"workerID": wb.ID,
-			// 	"state":    wb.State,
-			// })
-			// This will block until QP calls cond.Broadcast()
+			// QP will proactively publish tasks via polling
 			wb.Queue.WaitForWork()
 			continue
 		}
@@ -90,8 +84,7 @@ func (wb *WorkerBase) Run(process func(Task) error) {
 		if task == nil {
 			wb.State = WorkerIdle
 			wb.TaskReady = true
-			// 🆕 NEW: Signal that worker is idle and may need more tasks
-			wb.Queue.SignalWorkerIdle()
+			// QP will proactively publish tasks via polling
 			wb.Queue.WaitForWork()
 			continue // skip sleep - just like my college days...
 		}

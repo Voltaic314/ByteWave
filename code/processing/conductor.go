@@ -1,14 +1,12 @@
 package processing
 
 import (
-	"fmt"
 	"time"
 
 	"github.com/Voltaic314/ByteWave/code/db"
 	"github.com/Voltaic314/ByteWave/code/logging"
 	"github.com/Voltaic314/ByteWave/code/pv"
 	"github.com/Voltaic314/ByteWave/code/services"
-	"github.com/Voltaic314/ByteWave/code/signals"
 )
 
 // The Boss 😎 - Responsible for setting up QP, queues, and workers
@@ -39,34 +37,24 @@ func NewConductor(dbPath string, retryThreshold, batchSize int) *Conductor {
 func (c *Conductor) StartTraversal() {
 	// Initialize QP after DB and other components are ready
 	c.QP = NewQueuePublisher(c.DB, c.retryThreshold, c.batchSize)
+	c.QP.SetConductor(c) // Set conductor reference for dynamic queue creation
 
-	// Setup source queue
+	// Setup source queue only - destination queue will be created when source reaches level 1
 	srcQueueName := "src-traversal"
 	c.SetupQueue(srcQueueName, TraversalQueueType, 0, "src", 1000)
 
-	// Setup destination queue (but don't kickstart it yet)
-	dstQueueName := "dst-traversal"
-	c.SetupQueue(dstQueueName, TraversalQueueType, 0, "dst", 1000)
+	// Start QP main control loop FIRST
+	go c.QP.Run()
 
-	// Start QP listening loop FIRST - this will install handlers when needed
-	c.StartAll()
+	// Start monitoring for queue completion
+	go c.monitorQueueCompletion()
 
-	time.Sleep(500 * time.Millisecond) // Give QP more time to fully initialize signal handlers
-
-	// Kick start the first phase manually for source - this will install handlers
-	signals.GlobalSR.Publish(signals.Signal{
-		Topic:   "qp:phase_updated:src-traversal",
-		Payload: 0,
-	})
-
-	// Give handlers time to install
-	time.Sleep(200 * time.Millisecond)
-
+	// Create workers
 	var os_svc services.BaseServiceInterface = services.NewOSService()
 	pv_obj := pv.NewPathValidator()
-
-	// Create workers for source queue AFTER handlers are installed
 	num_of_workers := 1
+
+	// Create source workers only - destination workers will be created when dst queue is set up
 	for range num_of_workers {
 		tw := &TraverserWorker{
 			WorkerBase: c.AddWorker(srcQueueName, "src"),
@@ -78,7 +66,22 @@ func (c *Conductor) StartTraversal() {
 		go tw.Run(tw.ProcessTraversalTask)
 	}
 
-	// Create workers for destination queue AFTER handlers are installed
+	// Kick start source traversal
+	c.QP.PublishTasks(srcQueueName)
+}
+
+// SetupDestinationQueue creates the destination queue and workers when source reaches level 1
+func (c *Conductor) SetupDestinationQueue() {
+	dstQueueName := "dst-traversal"
+
+	// Create destination queue
+	c.SetupQueue(dstQueueName, TraversalQueueType, 0, "dst", 1000)
+
+	// Create destination workers
+	var os_svc services.BaseServiceInterface = services.NewOSService()
+	pv_obj := pv.NewPathValidator()
+	num_of_workers := 1
+
 	for range num_of_workers {
 		tw := &TraverserWorker{
 			WorkerBase: c.AddWorker(dstQueueName, "dst"),
@@ -90,43 +93,50 @@ func (c *Conductor) StartTraversal() {
 		go tw.Run(tw.ProcessTraversalTask)
 	}
 
-	// Start destination polling so it's ready to respond to green lights
-	c.QP.StartDestinationPolling()
+	logging.GlobalLogger.LogSystem("info", "Conductor", "Destination queue and workers created", map[string]any{
+		"queue":   dstQueueName,
+		"workers": num_of_workers,
+	})
+}
 
-	// Listen for traversal complete signals
-	// Source traversal completion
-	go signals.GlobalSR.On("qp:traversal_complete:src-traversal", func(sig signals.Signal) {
-		queueName, ok := sig.Payload.(string)
-		if !ok {
-			logging.GlobalLogger.LogSystem("error", "Conductor", "Invalid traversal.complete payload", map[string]any{
-				"payload_type": fmt.Sprintf("%T", sig.Payload),
-			})
-			return
+// monitorQueueCompletion polls for queue completion instead of using signals
+func (c *Conductor) monitorQueueCompletion() {
+	for {
+		// Check if QP exists
+		if c.QP == nil {
+			break
 		}
 
-		logging.GlobalLogger.LogSystem("info", "Conductor", "Source traversal complete", map[string]any{
-			"queue": queueName,
-		})
+		// Poll for completed queues
+		c.QP.Mutex.Lock()
+		completedQueues := make([]string, 0)
+		for queueName, queue := range c.QP.Queues {
+			if queue.State == QueueComplete {
+				completedQueues = append(completedQueues, queueName)
+			}
+		}
+		c.QP.Mutex.Unlock()
 
-		c.TeardownQueue(queueName)
-	})
-
-	// Destination traversal completion
-	go signals.GlobalSR.On("qp:traversal_complete:dst-traversal", func(sig signals.Signal) {
-		queueName, ok := sig.Payload.(string)
-		if !ok {
-			logging.GlobalLogger.LogSystem("error", "Conductor", "Invalid traversal.complete payload", map[string]any{
-				"payload_type": fmt.Sprintf("%T", sig.Payload),
+		// Teardown completed queues
+		for _, queueName := range completedQueues {
+			logging.GlobalLogger.LogSystem("info", "Conductor", "Queue completion detected", map[string]any{
+				"queue": queueName,
 			})
-			return
+			c.TeardownQueue(queueName)
 		}
 
-		logging.GlobalLogger.LogSystem("info", "Conductor", "Destination traversal complete", map[string]any{
-			"queue": queueName,
-		})
+		// Stop monitoring if no queues remain
+		c.QP.Mutex.Lock()
+		queueCount := len(c.QP.Queues)
+		c.QP.Mutex.Unlock()
 
-		c.TeardownQueue(queueName)
-	})
+		if queueCount == 0 {
+			logging.GlobalLogger.LogSystem("info", "Conductor", "All queues completed, stopping monitor", nil)
+			break
+		}
+
+		time.Sleep(200 * time.Millisecond) // Poll every 200ms
+	}
 }
 
 // SetupQueue initializes a queue and registers it with QP
@@ -140,9 +150,10 @@ func (c *Conductor) SetupQueue(name string, queueType QueueType, phase int, srcO
 	// Destination queues should start when triggered by source progress
 	if srcOrDst == "src" {
 		c.QP.QueueLevels[name] = phase
+		c.QP.ScanModes[name] = firstPass // Initialize scan mode
 	}
 
-	c.QP.LastPathCursors[name] = "" // 🆕 Add path-based cursor for this queue
+	c.QP.LastPathCursors[name] = "" // Add path-based cursor for this queue
 }
 
 // AddWorker assigns a new worker to a queue
@@ -208,26 +219,8 @@ func (c *Conductor) TeardownQueue(queueName string) {
 		return
 	}
 
-	// Stop polling if active
-	c.QP.Mutex.Lock()
-	controller, ok := c.QP.PollingControllers[queueName]
-	if ok {
-		delete(c.QP.PollingControllers, queueName)
-	}
-	c.QP.Mutex.Unlock()
-
-	if ok {
-		controller.Mutex.Lock()
-		if controller.IsPolling {
-			controller.CancelFunc()
-		}
-		controller.Mutex.Unlock()
-	}
-
 	// Close StopChan to signal goroutines to stop
 	close(queue.StopChan)
-
-	// SignalRouter handles cleanup for signal-based communication
 
 	// Remove idle workers
 	queue.mu.Lock()
@@ -249,14 +242,10 @@ func (c *Conductor) TeardownQueue(queueName string) {
 	delete(c.QP.LastPathCursors, queueName)
 	delete(c.QP.ScanModes, queueName)
 	delete(c.QP.QueriesPerPhase, queueName)
+	delete(c.QP.RootPaths, queueName)
 	c.QP.Mutex.Unlock()
 
 	logging.GlobalLogger.LogMessage("info", "Queue teardown complete", map[string]any{
 		"queueID": queueName,
 	})
-}
-
-// StartAll starts QP and any other necessary processes
-func (c *Conductor) StartAll() {
-	go c.QP.StartListening()
 }

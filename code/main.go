@@ -20,7 +20,6 @@ import (
 	"github.com/Voltaic314/ByteWave/code/cli"
 	"github.com/Voltaic314/ByteWave/code/logging"
 	"github.com/Voltaic314/ByteWave/code/processing"
-	"github.com/Voltaic314/ByteWave/code/signals"
 	typesdb "github.com/Voltaic314/ByteWave/code/types/db"
 )
 
@@ -55,8 +54,6 @@ func main() {
 		"status": "init-complete",
 	})
 
-	signals.InitSignalRouter()
-
 	// Start the Conductor — now self-contained (handles its own DB + logger)
 	dbPath := filepath.Join(cwd, "tests", "traversal_tests", "test_traversal.db")
 	conductor := processing.NewConductor(
@@ -76,6 +73,7 @@ func main() {
 	conductor.DB.InitWriteQueue("destination_nodes", typesdb.NodeWriteQueue, 100, 5*time.Second)
 
 	// Register the logger with the DB
+	// This is basically so that the logger can write logs persistently to the DB
 	logging.GlobalLogger.RegisterDB(conductor.DB)
 
 	// Start timing the traversal

@@ -1,76 +1,88 @@
 # ByteWave Test Database Setup
 # Sets up both source_nodes and destination_nodes tables for traversal testing
 import os
-import json
 import duckdb
 from datetime import datetime
 
-# Paths
+# Paths - dynamically built from current working directory
 base_dir = os.getcwd()
-src_json_path = os.path.join(base_dir, "tests", "traversal_tests", "test_src_path.json")
-dst_json_path = os.path.join(base_dir, "tests", "traversal_tests", "test_dst_path.json")
-db_path = os.path.join(base_dir, "tests", "traversal_tests", "test_traversal.db")
+db_path = os.path.join(base_dir, "test_traversal.db")
+
+# Source and destination folder paths (relative to base_dir)
+src_folder_rel_path = "starting_src_folder"
+dst_folder_rel_path = "starting_dst_folder"
+
+# Build absolute paths
+src_folder_abs_path = os.path.join(base_dir, src_folder_rel_path)
+dst_folder_abs_path = os.path.join(base_dir, dst_folder_rel_path)
+
+print(f"📁 Base directory: {base_dir}")
+print(f"📁 Source folder: {src_folder_abs_path}")
+print(f"📁 Destination folder: {dst_folder_abs_path}")
 
 # If the db file path exists, delete it first
 if os.path.exists(db_path):
     os.remove(db_path)
     print(f"🗑️ Deleted existing database file: {db_path}")
 
-# Load source path data from JSON
-with open(src_json_path, "r") as f:
-    src_path_data = json.load(f)
+# Create test folders if they don't exist
+os.makedirs(src_folder_abs_path, exist_ok=True)
+os.makedirs(dst_folder_abs_path, exist_ok=True)
 
-# Load destination path data from JSON
-with open(dst_json_path, "r") as f:
-    dst_path_data = json.load(f)
+# Create some sample files and folders in the source directory for testing
+sample_files = [
+    os.path.join(src_folder_abs_path, "test_file_1.txt"),
+    os.path.join(src_folder_abs_path, "test_file_2.md"),
+    os.path.join(src_folder_abs_path, "subfolder_1", "nested_file.txt"),
+    os.path.join(src_folder_abs_path, "subfolder_2", "another_nested_file.json"),
+]
+
+for file_path in sample_files:
+    # Create parent directory if it doesn't exist
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    # Create the file with some content
+    with open(file_path, 'w') as f:
+        f.write(f"Test content for {os.path.basename(file_path)}")
+
+print(f"📁 Created test folders and sample files")
 
 
 # Connect to DuckDB
 conn = duckdb.connect(database=db_path)
 
-# Extract root information from the JSON data
-def extract_root_info(path_data):
-    # Find the level 0 entry (the root)
-    for item in path_data:
-        if item["level"] == 0:
-            return {
-                "path": item["path"],
-                "name": item["name"], 
-                "identifier": item["identifier"],
-                "last_modified": item["last_modified"]
-            }
-    return None
+# Create simple level 0 root entries (no hierarchy, no negative levels)
+src_root_entry = {
+    "path": "/",  # Always "/" for root
+    "name": os.path.basename(src_folder_abs_path),
+    "identifier": src_folder_abs_path,  # Absolute path for OS service
+    "parent_id": "",  # Root has no parent
+    "type": "folder",
+    "level": 0,
+    "size": None,
+    "last_modified": "2025-01-01T00:00:00Z",
+    "traversal_status": "pending",
+    "upload_status": "pending",
+    "traversal_attempts": 0,
+    "upload_attempts": 0,
+    "error_ids": None
+}
 
-# Extract all root-level items (level 0 and negative levels)
-def extract_root_items(path_data):
-    root_items = []
-    for item in path_data:
-        if item["level"] <= 0:  # Include level 0 and negative levels
-            root_items.append(item)
-    return root_items
+dst_root_entry = {
+    "path": "/",  # Always "/" for root
+    "name": os.path.basename(dst_folder_abs_path),
+    "identifier": dst_folder_abs_path,  # Absolute path for OS service
+    "parent_id": "",  # Root has no parent
+    "type": "folder",
+    "level": 0,
+    "size": None,
+    "last_modified": "2025-01-01T00:00:00Z",
+    "traversal_status": "pending",
+    "traversal_attempts": 0,
+    "error_ids": None
+}
 
-src_root_info = extract_root_info(src_path_data)
-dst_root_info = extract_root_info(dst_path_data)
-src_root_items = extract_root_items(src_path_data)
-dst_root_items = extract_root_items(dst_path_data)
-
-print(f"📁 Source root: {src_root_info['path']}")
-print(f"📁 Destination root: {dst_root_info['path']}")
-print(f"📁 Source root items (level ≤ 0): {len(src_root_items)}")
-print(f"📁 Destination root items (level ≤ 0): {len(dst_root_items)}")
-
-# Function to convert absolute path to relative path
-def make_relative_path(absolute_path, root_path):
-    if absolute_path == root_path:
-        return "/"
-    elif absolute_path.startswith(root_path):
-        relative = absolute_path[len(root_path):]
-        # Ensure it starts with /
-        if not relative.startswith("/"):
-            relative = "/" + relative
-        return relative
-    else:
-        return absolute_path  # fallback
+print(f"📁 Source root: {src_root_entry['identifier']}")
+print(f"📁 Destination root: {dst_root_entry['identifier']}")
 
 # Create error tables for future error tracking
 src_errors_schema = """
@@ -86,32 +98,6 @@ CREATE TABLE IF NOT EXISTS dst_nodes_errors (
 );
 """
 conn.execute(dst_errors_schema)
-
-# Create source_root table (supports multiple root entries for negative levels)
-source_root_schema = """
-CREATE TABLE IF NOT EXISTS source_root (
-    path VARCHAR NOT NULL UNIQUE,
-    name VARCHAR NOT NULL,
-    identifier VARCHAR NOT NULL,
-    level INTEGER NOT NULL,
-    last_modified TIMESTAMP NOT NULL,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-"""
-conn.execute(source_root_schema)
-
-# Create destination_root table (supports multiple root entries for negative levels)
-destination_root_schema = """
-CREATE TABLE IF NOT EXISTS destination_root (
-    path VARCHAR NOT NULL UNIQUE,
-    name VARCHAR NOT NULL,
-    identifier VARCHAR NOT NULL,
-    level INTEGER NOT NULL,
-    last_modified TIMESTAMP NOT NULL,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-"""
-conn.execute(destination_root_schema)
 
 # Create source_nodes table (with parent_id and identifier as NOT NULL)
 source_nodes_schema = """
@@ -170,44 +156,10 @@ CREATE TABLE IF NOT EXISTS audit_log (
 """
 conn.execute(audit_log_schema)
 
-# Insert root records first (level 0 and negative levels)
-print("📥 Inserting root data...")
+# Insert level 0 root entries directly into nodes tables
+print("📥 Inserting root data into nodes tables...")
 
-# Insert source root items
-src_root_insert = """
-INSERT OR IGNORE INTO source_root (path, name, identifier, level, last_modified)
-VALUES (?, ?, ?, ?, ?)
-"""
-for item in src_root_items:
-    # Convert paths to relative format for root items too
-    relative_path = make_relative_path(item["path"], src_root_info["path"])
-    
-    conn.execute(src_root_insert, (
-        relative_path,
-        item["name"],
-        item["identifier"],
-        item["level"],
-        datetime.strptime(item["last_modified"], "%Y-%m-%dT%H:%M:%SZ")
-    ))
-
-# Insert destination root items
-dst_root_insert = """
-INSERT OR IGNORE INTO destination_root (path, name, identifier, level, last_modified)
-VALUES (?, ?, ?, ?, ?)
-"""
-for item in dst_root_items:
-    # Convert paths to relative format for root items too
-    relative_path = make_relative_path(item["path"], dst_root_info["path"])
-    
-    conn.execute(dst_root_insert, (
-        relative_path,
-        item["name"],
-        item["identifier"],
-        item["level"],
-        datetime.strptime(item["last_modified"], "%Y-%m-%dT%H:%M:%SZ")
-    ))
-
-# Insert source_nodes records (excluding level 0 root, convert paths to relative)
+# Insert source root entry
 src_insert_query = """
 INSERT OR IGNORE INTO source_nodes (
     path, name, identifier, parent_id, type, level, size,
@@ -216,33 +168,23 @@ INSERT OR IGNORE INTO source_nodes (
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
-print("📥 Inserting source node data...")
-for item in src_path_data:
-    # Skip root items (level 0 and negative levels) as they're now in the source_root table
-    if item["level"] <= 0:
-        continue
-        
-    # Convert paths to relative format
-    relative_path = make_relative_path(item["path"], src_root_info["path"])
-    relative_parent_id = make_relative_path(item["parent_id"], src_root_info["path"]) if item["parent_id"] else "/"
-    
-    conn.execute(src_insert_query, (
-        relative_path,
-        item["name"],
-        item["identifier"],  # Keep identifier as absolute for OS service
-        relative_parent_id,
-        item["type"],
-        item["level"],
-        item.get("size"),
-        datetime.strptime(item["last_modified"], "%Y-%m-%dT%H:%M:%SZ"),
-        item["traversal_status"],
-        item["upload_status"],
-        item.get("traversal_attempts", 0),
-        item.get("upload_attempts", 0),
-        item.get("error_ids")
-    ))
+conn.execute(src_insert_query, (
+    src_root_entry["path"],
+    src_root_entry["name"],
+    src_root_entry["identifier"],
+    src_root_entry["parent_id"],
+    src_root_entry["type"],
+    src_root_entry["level"],
+    src_root_entry["size"],
+    datetime.strptime(src_root_entry["last_modified"], "%Y-%m-%dT%H:%M:%SZ"),
+    src_root_entry["traversal_status"],
+    src_root_entry["upload_status"],
+    src_root_entry["traversal_attempts"],
+    src_root_entry["upload_attempts"],
+    src_root_entry["error_ids"]
+))
 
-# Insert destination_nodes records (note: no upload_status field in destination_nodes)
+# Insert destination root entry
 dst_insert_query = """
 INSERT OR IGNORE INTO destination_nodes (
     path, name, identifier, parent_id, type, level, size,
@@ -250,32 +192,21 @@ INSERT OR IGNORE INTO destination_nodes (
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
-print("📥 Inserting destination node data...")
-for item in dst_path_data:
-    # Skip root items (level 0 and negative levels) as they're now in the destination_root table
-    if item["level"] <= 0:
-        continue
-        
-    # Convert paths to relative format
-    relative_path = make_relative_path(item["path"], dst_root_info["path"])
-    relative_parent_id = make_relative_path(item["parent_id"], dst_root_info["path"]) if item["parent_id"] else "/"
-    
-    conn.execute(dst_insert_query, (
-        relative_path,
-        item["name"],
-        item["identifier"],  # Keep identifier as absolute for OS service
-        relative_parent_id,
-        item["type"],
-        item["level"],
-        item.get("size"),
-        datetime.strptime(item["last_modified"], "%Y-%m-%dT%H:%M:%SZ"),
-        item["traversal_status"],
-        item.get("traversal_attempts", 0),
-        item.get("error_ids")
-    ))
+conn.execute(dst_insert_query, (
+    dst_root_entry["path"],
+    dst_root_entry["name"],
+    dst_root_entry["identifier"],
+    dst_root_entry["parent_id"],
+    dst_root_entry["type"],
+    dst_root_entry["level"],
+    dst_root_entry["size"],
+    datetime.strptime(dst_root_entry["last_modified"], "%Y-%m-%dT%H:%M:%SZ"),
+    dst_root_entry["traversal_status"],
+    dst_root_entry["traversal_attempts"],
+    dst_root_entry["error_ids"]
+))
 
 conn.close()
-print("✅ Tables created: source_root, destination_root, source_nodes, destination_nodes, audit_log, src_nodes_errors, dst_nodes_errors")
+print("✅ Tables created: source_nodes, destination_nodes, audit_log, src_nodes_errors, dst_nodes_errors")
 print(f"🎉 Test data inserted into DuckDB!")
-print(f"   📁 Root tables: {len(src_root_items)} source roots + {len(dst_root_items)} destination roots")
-print(f"   📂 Node tables: {len([item for item in src_path_data if item['level'] > 0])} source nodes, {len([item for item in dst_path_data if item['level'] > 0])} destination nodes")
+print(f"   📂 Node tables: 1 source root + 1 destination root")
