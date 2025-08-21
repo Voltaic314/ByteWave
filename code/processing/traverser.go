@@ -246,7 +246,7 @@ func (tw *TraverserWorker) LogSrcTraversalSuccess(task Task, files []filesystem.
 			tw.QP.normalizePathForJoin(tw.Queue.QueueID, file.Path),
 			file.Name,
 			file.Identifier,
-			tw.QP.normalizePathForJoin(tw.Queue.QueueID, task.GetFolder().Path),
+			task.GetFolder().Path, // Already relative, no need to normalize
 			"file",
 			task.GetFolder().Level+1,
 			file.Size,
@@ -266,7 +266,7 @@ func (tw *TraverserWorker) LogSrcTraversalSuccess(task Task, files []filesystem.
 			tw.QP.normalizePathForJoin(tw.Queue.QueueID, folder.Path),
 			folder.Name,
 			folder.Identifier,
-			tw.QP.normalizePathForJoin(tw.Queue.QueueID, task.GetFolder().Path),
+			task.GetFolder().Path, // Already relative, no need to normalize
 			"folder",
 			task.GetFolder().Level+1,
 			0, // Size = 0 for folders
@@ -279,7 +279,7 @@ func (tw *TraverserWorker) LogSrcTraversalSuccess(task Task, files []filesystem.
 
 	// Mark the parent folder (this task's folder) as successful
 	updateQuery := `UPDATE ` + table + ` SET traversal_status = 'successful', traversal_attempts = traversal_attempts + 1 WHERE path = ?`
-	updatePath := tw.QP.normalizePathForJoin(tw.Queue.QueueID, task.GetFolder().Path) // Use normalized path to match DB format
+	updatePath := task.GetFolder().Path // Already relative, matches DB format
 
 	logging.GlobalLogger.LogWorker("debug", tw.ID, task.GetPath(), "Executing success UPDATE", map[string]any{
 		"query": updateQuery,
@@ -323,7 +323,7 @@ func (tw *TraverserWorker) LogDstTraversalSuccess(task Task, files []filesystem.
 			tw.QP.normalizePathForJoin(tw.Queue.QueueID, file.Path),
 			file.Name,
 			file.Identifier,
-			tw.QP.normalizePathForJoin(tw.Queue.QueueID, task.GetFolder().Path),
+			task.GetFolder().Path, // Already relative, no need to normalize
 			"file",
 			task.GetFolder().Level+1,
 			file.Size,
@@ -342,7 +342,7 @@ func (tw *TraverserWorker) LogDstTraversalSuccess(task Task, files []filesystem.
 			tw.QP.normalizePathForJoin(tw.Queue.QueueID, folder.Path),
 			folder.Name,
 			folder.Identifier,
-			tw.QP.normalizePathForJoin(tw.Queue.QueueID, task.GetFolder().Path),
+			task.GetFolder().Path, // Already relative, no need to normalize
 			"folder",
 			task.GetFolder().Level+1,
 			0, // Size = 0 for folders
@@ -355,7 +355,7 @@ func (tw *TraverserWorker) LogDstTraversalSuccess(task Task, files []filesystem.
 
 	// Mark the parent folder as successful
 	updateQuery := `UPDATE ` + table + ` SET traversal_status = 'successful', traversal_attempts = traversal_attempts + 1 WHERE path = ?`
-	updatePath := tw.QP.normalizePathForJoin(tw.Queue.QueueID, task.GetFolder().Path) // Use normalized path to match DB format
+	updatePath := task.GetFolder().Path // Already relative, matches DB format
 
 	logging.GlobalLogger.LogWorker("debug", tw.ID, task.GetPath(), "Executing destination success UPDATE", map[string]any{
 		"query": updateQuery,
@@ -385,7 +385,7 @@ func (tw *TraverserWorker) LogTraversalFailure(task Task, errorMsg string) {
 		table = "destination_nodes"
 	}
 
-	taskPath := tw.QP.normalizePathForJoin(tw.Queue.QueueID, task.GetFolder().Path) // Use normalized path to match DB format
+	taskPath := task.GetFolder().Path // Already relative, matches DB format
 	tw.DB.QueueWriteWithPath(table, taskPath, `UPDATE `+table+` SET traversal_status = 'failed', traversal_attempts = traversal_attempts + 1, last_error = ? WHERE path = ?`, errorMsg, taskPath)
 
 	logging.GlobalLogger.LogWorker("info", tw.ID, task.GetPath(), "Traversal failure logged to DB", map[string]any{

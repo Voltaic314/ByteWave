@@ -127,17 +127,17 @@ func (osSvc *OSService) GetAllItems(folder filesystem.Folder, _ <-chan int) (<-c
 			if info.IsDir() {
 				foldersList = append(foldersList, filesystem.Folder{
 					Name:         item.Name(),
-					Path:         osSvc.Relativize(itemPath),
+					Path:         itemPath, // Return absolute path
 					Identifier:   identifier,
-					ParentID:     osSvc.Relativize(normalizedPath),
+					ParentID:     normalizedPath, // Return absolute parent path
 					LastModified: metadata["last_modified"].(string),
 				})
 			} else {
 				filesList = append(filesList, filesystem.File{
 					Name:         item.Name(),
-					Path:         osSvc.Relativize(itemPath),
+					Path:         itemPath, // Return absolute path
 					Identifier:   identifier,
-					ParentID:     osSvc.Relativize(normalizedPath),
+					ParentID:     normalizedPath, // Return absolute parent path
 					Size:         metadata["size"].(int64),
 					LastModified: metadata["last_modified"].(string),
 				})

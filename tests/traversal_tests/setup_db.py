@@ -41,11 +41,23 @@ def extract_root_info(path_data):
             }
     return None
 
+# Extract all root-level items (level 0 and negative levels)
+def extract_root_items(path_data):
+    root_items = []
+    for item in path_data:
+        if item["level"] <= 0:  # Include level 0 and negative levels
+            root_items.append(item)
+    return root_items
+
 src_root_info = extract_root_info(src_path_data)
 dst_root_info = extract_root_info(dst_path_data)
+src_root_items = extract_root_items(src_path_data)
+dst_root_items = extract_root_items(dst_path_data)
 
 print(f"📁 Source root: {src_root_info['path']}")
 print(f"📁 Destination root: {dst_root_info['path']}")
+print(f"📁 Source root items (level ≤ 0): {len(src_root_items)}")
+print(f"📁 Destination root items (level ≤ 0): {len(dst_root_items)}")
 
 # Function to convert absolute path to relative path
 def make_relative_path(absolute_path, root_path):
@@ -75,26 +87,26 @@ CREATE TABLE IF NOT EXISTS dst_nodes_errors (
 """
 conn.execute(dst_errors_schema)
 
-# Create source_root table
+# Create source_root table (supports multiple root entries for negative levels)
 source_root_schema = """
 CREATE TABLE IF NOT EXISTS source_root (
-    id INTEGER PRIMARY KEY DEFAULT 1,
-    path VARCHAR NOT NULL,
+    path VARCHAR NOT NULL UNIQUE,
     name VARCHAR NOT NULL,
     identifier VARCHAR NOT NULL,
+    level INTEGER NOT NULL,
     last_modified TIMESTAMP NOT NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 """
 conn.execute(source_root_schema)
 
-# Create destination_root table
+# Create destination_root table (supports multiple root entries for negative levels)
 destination_root_schema = """
 CREATE TABLE IF NOT EXISTS destination_root (
-    id INTEGER PRIMARY KEY DEFAULT 1,
-    path VARCHAR NOT NULL,
+    path VARCHAR NOT NULL UNIQUE,
     name VARCHAR NOT NULL,
     identifier VARCHAR NOT NULL,
+    level INTEGER NOT NULL,
     last_modified TIMESTAMP NOT NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -158,32 +170,42 @@ CREATE TABLE IF NOT EXISTS audit_log (
 """
 conn.execute(audit_log_schema)
 
-# Insert root records first
+# Insert root records first (level 0 and negative levels)
 print("📥 Inserting root data...")
 
-# Insert source root
+# Insert source root items
 src_root_insert = """
-INSERT OR IGNORE INTO source_root (path, name, identifier, last_modified)
-VALUES (?, ?, ?, ?)
+INSERT OR IGNORE INTO source_root (path, name, identifier, level, last_modified)
+VALUES (?, ?, ?, ?, ?)
 """
-conn.execute(src_root_insert, (
-    src_root_info["path"],
-    src_root_info["name"],
-    src_root_info["identifier"],
-    datetime.strptime(src_root_info["last_modified"], "%Y-%m-%dT%H:%M:%SZ")
-))
+for item in src_root_items:
+    # Convert paths to relative format for root items too
+    relative_path = make_relative_path(item["path"], src_root_info["path"])
+    
+    conn.execute(src_root_insert, (
+        relative_path,
+        item["name"],
+        item["identifier"],
+        item["level"],
+        datetime.strptime(item["last_modified"], "%Y-%m-%dT%H:%M:%SZ")
+    ))
 
-# Insert destination root  
+# Insert destination root items
 dst_root_insert = """
-INSERT OR IGNORE INTO destination_root (path, name, identifier, last_modified)
-VALUES (?, ?, ?, ?)
+INSERT OR IGNORE INTO destination_root (path, name, identifier, level, last_modified)
+VALUES (?, ?, ?, ?, ?)
 """
-conn.execute(dst_root_insert, (
-    dst_root_info["path"],
-    dst_root_info["name"],
-    dst_root_info["identifier"],
-    datetime.strptime(dst_root_info["last_modified"], "%Y-%m-%dT%H:%M:%SZ")
-))
+for item in dst_root_items:
+    # Convert paths to relative format for root items too
+    relative_path = make_relative_path(item["path"], dst_root_info["path"])
+    
+    conn.execute(dst_root_insert, (
+        relative_path,
+        item["name"],
+        item["identifier"],
+        item["level"],
+        datetime.strptime(item["last_modified"], "%Y-%m-%dT%H:%M:%SZ")
+    ))
 
 # Insert source_nodes records (excluding level 0 root, convert paths to relative)
 src_insert_query = """
@@ -196,8 +218,8 @@ INSERT OR IGNORE INTO source_nodes (
 
 print("📥 Inserting source node data...")
 for item in src_path_data:
-    # Skip the root (level 0) as it's now in the source_root table
-    if item["level"] == 0:
+    # Skip root items (level 0 and negative levels) as they're now in the source_root table
+    if item["level"] <= 0:
         continue
         
     # Convert paths to relative format
@@ -230,8 +252,8 @@ INSERT OR IGNORE INTO destination_nodes (
 
 print("📥 Inserting destination node data...")
 for item in dst_path_data:
-    # Skip the root (level 0) as it's now in the destination_root table
-    if item["level"] == 0:
+    # Skip root items (level 0 and negative levels) as they're now in the destination_root table
+    if item["level"] <= 0:
         continue
         
     # Convert paths to relative format
@@ -255,5 +277,5 @@ for item in dst_path_data:
 conn.close()
 print("✅ Tables created: source_root, destination_root, source_nodes, destination_nodes, audit_log, src_nodes_errors, dst_nodes_errors")
 print(f"🎉 Test data inserted into DuckDB!")
-print(f"   📁 Root tables: 2 entries (source + destination)")
-print(f"   📂 Node tables: {len([item for item in src_path_data if item['level'] != 0])} source nodes, {len([item for item in dst_path_data if item['level'] != 0])} destination nodes")
+print(f"   📁 Root tables: {len(src_root_items)} source roots + {len(dst_root_items)} destination roots")
+print(f"   📂 Node tables: {len([item for item in src_path_data if item['level'] > 0])} source nodes, {len([item for item in dst_path_data if item['level'] > 0])} destination nodes")

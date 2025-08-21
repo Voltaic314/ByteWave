@@ -48,10 +48,24 @@ func (c *Conductor) StartTraversal() {
 	dstQueueName := "dst-traversal"
 	c.SetupQueue(dstQueueName, TraversalQueueType, 0, "dst", 1000)
 
+	// Start QP listening loop FIRST - this will install handlers when needed
+	c.StartAll()
+
+	time.Sleep(500 * time.Millisecond) // Give QP more time to fully initialize signal handlers
+
+	// Kick start the first phase manually for source - this will install handlers
+	signals.GlobalSR.Publish(signals.Signal{
+		Topic:   "qp:phase_updated:src-traversal",
+		Payload: 0,
+	})
+
+	// Give handlers time to install
+	time.Sleep(200 * time.Millisecond)
+
 	var os_svc services.BaseServiceInterface = services.NewOSService()
 	pv_obj := pv.NewPathValidator()
 
-	// Create workers for source queue
+	// Create workers for source queue AFTER handlers are installed
 	num_of_workers := 1
 	for range num_of_workers {
 		tw := &TraverserWorker{
@@ -64,7 +78,7 @@ func (c *Conductor) StartTraversal() {
 		go tw.Run(tw.ProcessTraversalTask)
 	}
 
-	// Create workers for destination queue
+	// Create workers for destination queue AFTER handlers are installed
 	for range num_of_workers {
 		tw := &TraverserWorker{
 			WorkerBase: c.AddWorker(dstQueueName, "dst"),
@@ -76,19 +90,8 @@ func (c *Conductor) StartTraversal() {
 		go tw.Run(tw.ProcessTraversalTask)
 	}
 
-	// Start QP listening loop
-	c.StartAll()
-
-	time.Sleep(250 * time.Millisecond) // Give QP a moment to initialize
-
 	// Start destination polling so it's ready to respond to green lights
 	c.QP.StartDestinationPolling()
-
-	// kick start the first phase manually for source only
-	signals.GlobalSR.Publish(signals.Signal{
-		Topic:   "qp:phase_updated:src-traversal",
-		Payload: 0,
-	})
 
 	// Listen for traversal complete signals
 	// Source traversal completion
@@ -197,19 +200,28 @@ func (c *Conductor) SetWorkerState(queueName string, workerID string, state Work
 }
 
 func (c *Conductor) TeardownQueue(queueName string) {
+	c.QP.Mutex.Lock()
 	queue, exists := c.QP.Queues[queueName]
+	c.QP.Mutex.Unlock()
+
 	if !exists {
 		return
 	}
 
 	// Stop polling if active
-	if controller, ok := c.QP.PollingControllers[queueName]; ok {
+	c.QP.Mutex.Lock()
+	controller, ok := c.QP.PollingControllers[queueName]
+	if ok {
+		delete(c.QP.PollingControllers, queueName)
+	}
+	c.QP.Mutex.Unlock()
+
+	if ok {
 		controller.Mutex.Lock()
 		if controller.IsPolling {
 			controller.CancelFunc()
 		}
 		controller.Mutex.Unlock()
-		delete(c.QP.PollingControllers, queueName)
 	}
 
 	// Close StopChan to signal goroutines to stop
@@ -231,11 +243,13 @@ func (c *Conductor) TeardownQueue(queueName string) {
 	queue.mu.Unlock()
 
 	// Delete from all QP maps
+	c.QP.Mutex.Lock()
 	delete(c.QP.Queues, queueName)
 	delete(c.QP.QueueLevels, queueName)
 	delete(c.QP.LastPathCursors, queueName)
 	delete(c.QP.ScanModes, queueName)
 	delete(c.QP.QueriesPerPhase, queueName)
+	c.QP.Mutex.Unlock()
 
 	logging.GlobalLogger.LogMessage("info", "Queue teardown complete", map[string]any{
 		"queueID": queueName,

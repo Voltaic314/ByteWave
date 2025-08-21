@@ -10,10 +10,10 @@ func (t SourceRootTable) Name() string {
 
 func (t SourceRootTable) Schema() string {
 	return `
-		id INTEGER PRIMARY KEY DEFAULT 1,
-		path VARCHAR NOT NULL,
+		path VARCHAR NOT NULL UNIQUE,
 		name VARCHAR NOT NULL,
 		identifier VARCHAR NOT NULL,
+		level INTEGER NOT NULL,
 		last_modified TIMESTAMP NOT NULL,
 		created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 	`
