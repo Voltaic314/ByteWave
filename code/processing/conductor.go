@@ -43,13 +43,7 @@ func (c *Conductor) StartTraversal() {
 	srcQueueName := "src-traversal"
 	c.SetupQueue(srcQueueName, TraversalQueueType, 0, "src", 1000)
 
-	// Start QP main control loop FIRST
-	go c.QP.Run()
-
-	// Start monitoring for queue completion
-	go c.monitorQueueCompletion()
-
-	// Create workers
+	// Create workers FIRST before starting QP to avoid startup race condition
 	var os_svc services.BaseServiceInterface = services.NewOSService()
 	pv_obj := pv.NewPathValidator()
 	num_of_workers := 1
@@ -66,8 +60,14 @@ func (c *Conductor) StartTraversal() {
 		go tw.Run(tw.ProcessTraversalTask)
 	}
 
-	// Kick start source traversal
-	c.QP.PublishTasks(srcQueueName)
+	// Small delay to let workers settle into their WaitForWork state
+	time.Sleep(50 * time.Millisecond)
+
+	// Now start QP main control loop after workers are ready
+	go c.QP.Run()
+
+	// Start monitoring for queue completion
+	go c.monitorQueueCompletion()
 }
 
 // SetupDestinationQueue creates the destination queue and workers when source reaches level 1

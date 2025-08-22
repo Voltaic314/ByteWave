@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	"github.com/Voltaic314/ByteWave/code/logging"
+	"github.com/Voltaic314/ByteWave/code/signals"
 )
 
 // QueueType defines whether a queue is for traversal or uploading.
@@ -169,17 +170,35 @@ func (q *TaskQueue) AddTask(task Task) {
 }
 
 func (q *TaskQueue) AddTasks(tasks []Task) {
-
 	logging.GlobalLogger.LogMessage("info", "Adding multiple tasks to queue", map[string]any{
 		"queueID":   q.QueueID,
 		"taskCount": len(tasks),
 	})
+
+	logging.GlobalLogger.LogMessage("debug", "🔒 LOCK for: add new tasks to queue", map[string]any{
+		"queueID": q.QueueID,
+		"adding":  len(tasks),
+	})
 	q.Lock()
 	q.tasks = append(q.tasks, tasks...)
+	logging.GlobalLogger.LogMessage("debug", "🔓 UNLOCK: done adding tasks", map[string]any{
+		"queueID":  q.QueueID,
+		"newTotal": len(q.tasks),
+	})
 	q.Unlock()
 
-	// ✅ Wake up the workers
-	q.NotifyWorkers()
+	// ✅ Signal workers via Signal Router instead of condition variables
+	taskTopic := "tasks_published:" + q.QueueID
+	signals.GlobalSR.Publish(signals.Signal{
+		Topic:   taskTopic,
+		Payload: len(q.tasks),
+	})
+
+	logging.GlobalLogger.LogMessage("debug", "📡 SIGNAL: published task notification", map[string]any{
+		"queueID":   q.QueueID,
+		"topic":     taskTopic,
+		"taskCount": len(q.tasks),
+	})
 }
 
 // ResetRunningLowTrigger is called by QP when new tasks are added.
@@ -190,7 +209,15 @@ func (q *TaskQueue) ResetRunningLowTrigger() {
 
 // PopTask retrieves the next available task, pausing workers if needed.
 func (q *TaskQueue) PopTask() Task {
+	logging.GlobalLogger.LogMessage("debug", "🔒 LOCK for: find and remove next task", map[string]any{
+		"queueID": q.QueueID,
+	})
 	q.Lock()
+	defer func() {
+		logging.GlobalLogger.LogMessage("debug", "🔓 UNLOCK: done removing task", map[string]any{
+			"queueID": q.QueueID,
+		})
+	}()
 	defer q.Unlock()
 
 	// Running‑low trigger removed - QP now handles task publishing proactively
@@ -237,7 +264,15 @@ func (q *TaskQueue) UnlockTask(taskID string) {
 
 // QueueSize returns the number of tasks in the queue.
 func (q *TaskQueue) QueueSize() int {
+	logging.GlobalLogger.LogMessage("debug", "🔒 LOCK for: read task count", map[string]any{
+		"queueID": q.QueueID,
+	})
 	q.Lock()
+	defer func() {
+		logging.GlobalLogger.LogMessage("debug", "🔓 UNLOCK: done reading task count", map[string]any{
+			"queueID": q.QueueID,
+		})
+	}()
 	defer q.Unlock()
 
 	size := len(q.tasks)
@@ -323,43 +358,19 @@ func (q *TaskQueue) AreAllWorkersIdle() bool {
 
 // NotifyWorkers sets all idle workers to active.
 func (q *TaskQueue) NotifyWorkers() {
-	q.Lock()
-	defer q.Unlock()
-
-	logging.GlobalLogger.LogMessage("info", "Notifying workers", map[string]any{
-		"queueID":     q.QueueID,
-		"workerCount": len(q.workers),
+	// NOTE: This method is now a no-op since workers use Signal Router for task notifications
+	// Tasks are published via "tasks_published:{queueID}" signals in AddTasks() method
+	logging.GlobalLogger.LogMessage("debug", "⚠️ NotifyWorkers called but is deprecated - using Signal Router instead", map[string]any{
+		"queueID": q.QueueID,
 	})
-
-	// // Set all idle workers to active
-	// for _, worker := range q.workers {
-	// 	if worker.State == WorkerIdle {
-	// 		worker.State = WorkerActive
-	// 		logging.GlobalLogger.LogMessage("info", "Worker state updated", map[string]any{
-	// 			"queueID":  q.QueueID,
-	// 			"workerID": worker.ID,
-	// 			"state":    worker.State,
-	// 		})
-	// 	}
-	// }
-
-	q.cond.Broadcast()
 }
 
 func (q *TaskQueue) WaitForWork() {
-	q.cond.L.Lock()
-	logging.GlobalLogger.LogMessage("info", "Waiting for work", map[string]any{
+	// NOTE: This method is now a no-op since workers use Signal Router for task notifications
+	// Workers subscribe to "tasks_published:{queueID}" signals instead of condition variables
+	logging.GlobalLogger.LogMessage("debug", "⚠️ WaitForWork called but is deprecated - workers should use Signal Router", map[string]any{
 		"queueID": q.QueueID,
 	})
-	for len(q.tasks) == 0 && q.State == QueueRunning {
-		q.cond.Wait()
-	}
-	if q.State == QueueComplete {
-		logging.GlobalLogger.LogMessage("info", "Queue marked complete, worker should exit", map[string]any{
-			"queueID": q.QueueID,
-		})
-	}
-	q.cond.L.Unlock()
 }
 
 // TrackedPaths returns a map of paths currently in the queue and optionally in-progress

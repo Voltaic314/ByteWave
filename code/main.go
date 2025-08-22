@@ -20,6 +20,7 @@ import (
 	"github.com/Voltaic314/ByteWave/code/cli"
 	"github.com/Voltaic314/ByteWave/code/logging"
 	"github.com/Voltaic314/ByteWave/code/processing"
+	"github.com/Voltaic314/ByteWave/code/signals"
 	typesdb "github.com/Voltaic314/ByteWave/code/types/db"
 )
 
@@ -44,6 +45,9 @@ func main() {
 	// Initialize logger (UDP-only for now)
 	logSettingsPath := filepath.Join(cwd, "settings", "log_settings.json")
 	logging.InitLogger(logSettingsPath)
+
+	// Initialize Signal Router for task publication broadcasts
+	signals.InitSignalRouter()
 
 	// Give the log terminal a sec to boot up
 	time.Sleep(3 * time.Second)
