@@ -6,11 +6,11 @@ from datetime import datetime
 
 # Paths - dynamically built from current working directory
 base_dir = os.getcwd()
-db_path = os.path.join(base_dir, "test_traversal.db")
+db_path = os.path.join(base_dir, "tests/traversal_tests/test_traversal.db")
 
 # Source and destination folder paths (relative to base_dir)
-src_folder_rel_path = "starting_src_folder"
-dst_folder_rel_path = "starting_dst_folder"
+src_folder_rel_path = "tests/traversal_tests/starting_src_folder"
+dst_folder_rel_path = "tests/traversal_tests/starting_dst_folder"
 
 # Build absolute paths
 src_folder_abs_path = os.path.join(base_dir, src_folder_rel_path)
@@ -28,23 +28,6 @@ if os.path.exists(db_path):
 # Create test folders if they don't exist
 os.makedirs(src_folder_abs_path, exist_ok=True)
 os.makedirs(dst_folder_abs_path, exist_ok=True)
-
-# Create some sample files and folders in the source directory for testing
-sample_files = [
-    os.path.join(src_folder_abs_path, "test_file_1.txt"),
-    os.path.join(src_folder_abs_path, "test_file_2.md"),
-    os.path.join(src_folder_abs_path, "subfolder_1", "nested_file.txt"),
-    os.path.join(src_folder_abs_path, "subfolder_2", "another_nested_file.json"),
-]
-
-for file_path in sample_files:
-    # Create parent directory if it doesn't exist
-    os.makedirs(os.path.dirname(file_path), exist_ok=True)
-    # Create the file with some content
-    with open(file_path, 'w') as f:
-        f.write(f"Test content for {os.path.basename(file_path)}")
-
-print(f"📁 Created test folders and sample files")
 
 
 # Connect to DuckDB
@@ -209,4 +192,3 @@ conn.execute(dst_insert_query, (
 conn.close()
 print("✅ Tables created: source_nodes, destination_nodes, audit_log, src_nodes_errors, dst_nodes_errors")
 print(f"🎉 Test data inserted into DuckDB!")
-print(f"   📂 Node tables: 1 source root + 1 destination root")

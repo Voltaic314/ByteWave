@@ -822,7 +822,7 @@ func (qp *QueuePublisher) isRoundComplete(queue *TaskQueue) bool {
 		qp.DB.ForceFlushTable("destination_nodes")
 		qp.DB.ForceFlushTable("source_nodes")
 	}
-	return queue.QueueSize() == 0 && queue.AreAllWorkersIdle() && queue.State == QueueRunning
+	return queue.QueueSize() == 0 && queue.AreAllWorkersIdle() && queue.State == QueueRunning && !qp.hasPendingAtLevel(queue.QueueID, queue.Phase)
 }
 
 func (qp *QueuePublisher) advancePhase(queueName string) {
