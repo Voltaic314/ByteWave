@@ -55,7 +55,6 @@ func (c *Conductor) StartTraversal() {
 			DB:         c.DB,
 			Service:    os_svc,
 			pv:         pv_obj,
-			QP:         c.QP,
 		}
 		go tw.Run(tw.ProcessTraversalTask)
 	}
@@ -88,7 +87,6 @@ func (c *Conductor) SetupDestinationQueue() {
 			DB:         c.DB,
 			Service:    os_svc,
 			pv:         pv_obj, // TODO: dst doesn't need pv, this should be removed when we build out the actual pv logic.
-			QP:         c.QP,
 		}
 		go tw.Run(tw.ProcessTraversalTask)
 	}
@@ -242,7 +240,6 @@ func (c *Conductor) TeardownQueue(queueName string) {
 	delete(c.QP.LastPathCursors, queueName)
 	delete(c.QP.ScanModes, queueName)
 	delete(c.QP.QueriesPerPhase, queueName)
-	delete(c.QP.RootPaths, queueName)
 	c.QP.Mutex.Unlock()
 
 	logging.GlobalLogger.LogMessage("info", "Queue teardown complete", map[string]any{

@@ -3,6 +3,7 @@ package services
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -41,16 +42,6 @@ func (osSvc *OSService) SetRootPath(path string) {
 
 func (osSvc *OSService) GetRootPath() string {
 	return osSvc.rootPath
-}
-
-func (osSvc *OSService) Relativize(path string) string {
-	normalized := osSvc.NormalizePath(path)
-	root := osSvc.GetRootPath()
-	if strings.HasPrefix(normalized, root) {
-		rel := strings.TrimPrefix(normalized, root)
-		return strings.TrimPrefix(rel, "/")
-	}
-	return normalized // fallback
 }
 
 // IsDirectory returns a channel that asynchronously sends whether the given path is a directory.
@@ -122,22 +113,26 @@ func (osSvc *OSService) GetAllItems(folder filesystem.Folder, _ <-chan int) (<-c
 			}
 
 			metadata := osSvc.ConvertFileInfoToMap(info, itemPath)
-			identifier := filepath.Clean(strings.ReplaceAll(metadata["identifier"].(string), "/", "\\"))
+
+			// Normalize identifier: all slashes to OS-native
+			identifier := filepath.Clean(itemPath)
+			parentPath := strings.TrimLeft(folder.Path, "/")
+			relPath := fmt.Sprintf("/%s/%s", parentPath, item.Name())
 
 			if info.IsDir() {
 				foldersList = append(foldersList, filesystem.Folder{
 					Name:         item.Name(),
-					Path:         itemPath, // Return absolute path
-					Identifier:   identifier,
-					ParentID:     normalizedPath, // Return absolute parent path
+					Path:         relPath, // Relative path with forward slashes
+					Identifier:   identifier, // OS-native slashes
+					ParentID:     folder.Identifier, // Use input folder.Identifier
 					LastModified: metadata["last_modified"].(string),
 				})
 			} else {
 				filesList = append(filesList, filesystem.File{
 					Name:         item.Name(),
-					Path:         itemPath, // Return absolute path
-					Identifier:   identifier,
-					ParentID:     normalizedPath, // Return absolute parent path
+					Path:         relPath, // Relative path with forward slashes
+					Identifier:   identifier, // OS-native slashes
+					ParentID:     folder.Identifier, // Use input folder.Identifier
 					Size:         metadata["size"].(int64),
 					LastModified: metadata["last_modified"].(string),
 				})

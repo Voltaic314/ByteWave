@@ -6,11 +6,11 @@ from datetime import datetime
 
 # Paths - dynamically built from current working directory
 base_dir = os.getcwd()
-db_path = os.path.join(base_dir, "tests/traversal_tests/test_traversal.db")
+db_path = os.path.join(base_dir, "tests", "traversal_tests", "test_traversal.db")
 
 # Source and destination folder paths (relative to base_dir)
-src_folder_rel_path = "tests/traversal_tests/starting_src_folder"
-dst_folder_rel_path = "tests/traversal_tests/starting_dst_folder"
+src_folder_rel_path = os.path.join("tests", "traversal_tests", "starting_src_folder")
+dst_folder_rel_path = os.path.join("tests", "traversal_tests", "starting_dst_folder")
 
 # Build absolute paths
 src_folder_abs_path = os.path.join(base_dir, src_folder_rel_path)
@@ -35,7 +35,7 @@ conn = duckdb.connect(database=db_path)
 
 # Create simple level 0 root entries (no hierarchy, no negative levels)
 src_root_entry = {
-    "path": "/",  # Always "/" for root
+    "path": "",  # Always "" for root
     "name": os.path.basename(src_folder_abs_path),
     "identifier": src_folder_abs_path,  # Absolute path for OS service
     "parent_id": "",  # Root has no parent
@@ -51,7 +51,7 @@ src_root_entry = {
 }
 
 dst_root_entry = {
-    "path": "/",  # Always "/" for root
+    "path": "",  # Always "" for root
     "name": os.path.basename(dst_folder_abs_path),
     "identifier": dst_folder_abs_path,  # Absolute path for OS service
     "parent_id": "",  # Root has no parent

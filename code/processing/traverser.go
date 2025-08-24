@@ -4,6 +4,7 @@ package processing
 import (
 	"fmt"
 	"time"
+	"strings"
 
 	"github.com/Voltaic314/ByteWave/code/db"
 	"github.com/Voltaic314/ByteWave/code/filesystem"
@@ -18,7 +19,18 @@ type TraverserWorker struct {
 	DB      *db.DB
 	Service services.BaseServiceInterface // Interface for interacting with FS/API
 	pv      *pv.PathValidator
-	QP      *QueuePublisher // Reference to QueuePublisher for path normalization
+}
+
+// PathNormalizer normalizes paths for the database
+func (tw *TraverserWorker) PathNormalizer(path string) string {
+	// convert all back slashes to forward slashes
+	path = strings.ReplaceAll(path, "\\", "/")
+	// remove the leading slash if any
+	path = strings.TrimLeft(path, "/")
+	// add a leading slash (this is just to avoid double start slashes just in case)
+	path = "/" + path
+
+	return path
 }
 
 // FetchAndProcessTask pulls a task from the queue and executes it.
@@ -243,7 +255,7 @@ func (tw *TraverserWorker) LogSrcTraversalSuccess(task Task, files []filesystem.
 			path, name, identifier, parent_id, type, level, size, last_modified,
 			traversal_status, upload_status, traversal_attempts, upload_attempts, error_ids
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			tw.QP.normalizePathForJoin(tw.Queue.QueueID, file.Path),
+			tw.PathNormalizer(file.Path),
 			file.Name,
 			file.Identifier,
 			task.GetFolder().Path, // Already relative, no need to normalize
@@ -263,7 +275,7 @@ func (tw *TraverserWorker) LogSrcTraversalSuccess(task Task, files []filesystem.
 			path, name, identifier, parent_id, type, level, size, last_modified,
 			traversal_status, upload_status, traversal_attempts, upload_attempts, error_ids
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			tw.QP.normalizePathForJoin(tw.Queue.QueueID, folder.Path),
+			tw.PathNormalizer(folder.Path),
 			folder.Name,
 			folder.Identifier,
 			task.GetFolder().Path, // Already relative, no need to normalize
@@ -320,7 +332,7 @@ func (tw *TraverserWorker) LogDstTraversalSuccess(task Task, files []filesystem.
 			path, name, identifier, parent_id, type, level, size, last_modified,
 			traversal_status, upload_status, traversal_attempts, upload_attempts, error_ids
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			tw.QP.normalizePathForJoin(tw.Queue.QueueID, file.Path),
+			tw.PathNormalizer(file.Path),
 			file.Name,
 			file.Identifier,
 			task.GetFolder().Path, // Already relative, no need to normalize
@@ -339,7 +351,7 @@ func (tw *TraverserWorker) LogDstTraversalSuccess(task Task, files []filesystem.
 			path, name, identifier, parent_id, type, level, size, last_modified,
 			traversal_status, upload_status, traversal_attempts, upload_attempts, error_ids
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			tw.QP.normalizePathForJoin(tw.Queue.QueueID, folder.Path),
+			tw.PathNormalizer(folder.Path),
 			folder.Name,
 			folder.Identifier,
 			task.GetFolder().Path, // Already relative, no need to normalize
