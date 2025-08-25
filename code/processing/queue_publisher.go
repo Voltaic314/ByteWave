@@ -265,6 +265,8 @@ func (qp *QueuePublisher) isQueueRoundComplete(queue *TaskQueue) bool {
 		qp.DB.ForceFlushTable("destination_nodes")
 		qp.DB.ForceFlushTable("source_nodes")
 	}
+	qp.DB.ForceFlushTable("audit_log") // forcing a flush to audit log for now so that we can avoid the issue of audit log not auto-flushing
+	// TODO: remove this once we have a better solution for audit log auto-flushing
 
 	queue.mu.Lock()
 	queueSize := len(queue.tasks)
@@ -303,14 +305,35 @@ func (qp *QueuePublisher) canAdvanceQueueSafe(queueName, queueType string, srcLe
 	// Safely get destination level
 	qp.Mutex.Lock()
 	dstLevel, exists := qp.QueueLevels[queueName]
+	_, srcExists := qp.Queues["src-traversal"]
 	qp.Mutex.Unlock()
 
 	if !exists {
-		return false // Queue doesn't exist
+		return false // Dst queue doesn't exist
 	}
 
-	// Destination can only advance if source is ahead
-	return srcLevel > dstLevel
+	// If src queue doesn't exist anymore, src traversal is complete - dst can advance freely
+	if !srcExists {
+		logging.GlobalLogger.LogSystem("info", "QP", "Src traversal complete, dst can advance freely", map[string]any{
+			"dstLevel": dstLevel,
+		})
+		return true
+	}
+
+	// Dst can only advance if src has completed N+1 levels ahead
+	// For dst level 0: src must have completed level 1 (srcLevel >= 2)
+	// For dst level 1: src must have completed level 2 (srcLevel >= 3), etc.
+	requiredSrcLevel := dstLevel + 2
+	canAdvance := srcLevel >= requiredSrcLevel
+
+	logging.GlobalLogger.LogSystem("debug", "QP", "Dst advancement check", map[string]any{
+		"dstLevel":         dstLevel,
+		"srcLevel":         srcLevel,
+		"requiredSrcLevel": requiredSrcLevel,
+		"canAdvance":       canAdvance,
+	})
+
+	return canAdvance
 }
 
 // isTraversalComplete checks if the entire traversal is complete for a queue
@@ -371,16 +394,18 @@ func (qp *QueuePublisher) isTraversalComplete(queueName string, queue *TaskQueue
 	return count == 0
 }
 
-// maybeCreateDestinationQueue creates destination queue when source reaches level 1
+// maybeCreateDestinationQueue creates destination queue when source has completed level 1 (srcLevel >= 2)
 func (qp *QueuePublisher) maybeCreateDestinationQueue() {
 	qp.Mutex.Lock()
 	srcLevel, srcExists := qp.QueueLevels["src-traversal"]
 	_, dstExists := qp.QueueLevels["dst-traversal"]
 	qp.Mutex.Unlock()
 
-	if srcExists && !dstExists && srcLevel >= 1 && qp.Conductor != nil {
-		logging.GlobalLogger.LogSystem("info", "QP", "Source reached level 1, creating destination queue", map[string]any{
-			"srcLevel": srcLevel,
+	// Dst level 0 requires src to have completed level 1 (N+2 rule: srcLevel >= 2)
+	if srcExists && !dstExists && srcLevel >= 2 && qp.Conductor != nil {
+		logging.GlobalLogger.LogSystem("info", "QP", "Source completed level 1, creating destination queue", map[string]any{
+			"srcLevel":            srcLevel,
+			"dstCanStartAtLevel0": true,
 		})
 
 		qp.Conductor.SetupDestinationQueue()
@@ -394,10 +419,15 @@ func (qp *QueuePublisher) maybeCreateDestinationQueue() {
 
 		qp.setupQueueSignals("dst-traversal")
 		go qp.PublishTasks("dst-traversal")
+	} else if srcExists && !dstExists && srcLevel < 2 {
+		logging.GlobalLogger.LogSystem("debug", "QP", "Waiting for src to complete level 1 before starting dst", map[string]any{
+			"srcLevel":      srcLevel,
+			"needsSrcLevel": 2,
+		})
 	}
 }
 
-// PublishDestinationTasks creates destination traversal tasks by querying both source and destination tables
+// PublishDestinationTasks creates destination traversal tasks using efficient 3-query batch approach
 func (qp *QueuePublisher) PublishDestinationTasks(queueName string) {
 	qp.Mutex.Lock()
 	queue, exists := qp.Queues[queueName]
@@ -414,83 +444,229 @@ func (qp *QueuePublisher) PublishDestinationTasks(queueName string) {
 		return
 	}
 
-	// Handle level 0 specially - create root task with expected source children
-	if currentLevel == 0 && mode == firstPass && lastPath == "" {
-		// Get the destination root folder info
-		rootTasks, err := qp.createRootTask(queueName, "destination_nodes")
-		if err != nil {
-			logging.GlobalLogger.LogQP("error", queueName, "", "Failed to create destination root task", map[string]any{
-				"error": err.Error(),
-			})
-			return
-		}
-
-		if len(rootTasks) > 0 {
-			// Get expected source children for the root level
-			rootTask := rootTasks[0].(*TraversalDstTask) // Safe cast since createRootTask for destination creates DstTraversalTask
-			rootPath := rootTask.GetFolder().Path        // Should be "/"
-
-			// Force flush source table to ensure we see all source children
-			qp.DB.ForceFlushTable("source_nodes")
-
-			// Get expected source children for root comparison
-			expectedSrcChildren, expectedSrcFiles := qp.fetchExpectedSourceChildren(rootPath)
-
-			logging.GlobalLogger.LogQP("info", queueName, "", "Fetched expected source children for destination root", map[string]any{
-				"expectedFolders": len(expectedSrcChildren),
-				"expectedFiles":   len(expectedSrcFiles),
-				"rootPath":        rootPath,
-			})
-
-			// Update the root task with expected source children
-			rootTask.ExpectedSrcChildren = expectedSrcChildren
-			rootTask.ExpectedSrcFiles = expectedSrcFiles
-
-			queue.AddTasks([]Task{rootTask})
-			qp.QueriesPerPhase[queueName]++
-
-			qp.Mutex.Lock()
-			qp.LastPathCursors[queueName] = rootTask.GetPath() // Set to "/" to mark root as processed
-			qp.Mutex.Unlock()
-
-			logging.GlobalLogger.LogQP("info", queueName, "", "Created destination root task with expected children", map[string]any{
-				"taskCount":       1,
-				"level":           currentLevel,
-				"cursor":          rootTask.GetPath(),
-				"expectedFolders": len(expectedSrcChildren),
-				"expectedFiles":   len(expectedSrcFiles),
-			})
-		}
-		return
-	}
-
 	// Force flush both tables before cross-table queries to ensure data consistency
 	qp.DB.ForceFlushTable("source_nodes")      // Need to see source children
 	qp.DB.ForceFlushTable("destination_nodes") // Need to see destination folders
+	qp.DB.ForceFlushTable("audit_log")
 
-	// Step 1: Query destination table for pending folders at current level (level 1+)
-	dstFolders := qp.fetchDestinationFolders(currentLevel)
-	if len(dstFolders) == 0 {
-		logging.GlobalLogger.LogQP("info", queueName, "", "No pending destination folders found", map[string]any{
-			"level": currentLevel,
+	// Normal batch approach for ALL levels - no special cases needed
+	tasks := qp.FetchDestinationTasksFromDB(currentLevel, lastPath, queueName)
+
+	if len(tasks) > 0 {
+		logging.GlobalLogger.LogQP("debug", queueName, "", "Tasks fetched from DB (dst)", map[string]any{
+			"taskCount":    len(tasks),
+			"scanMode":     mode,
+			"level":        currentLevel,
+			"lastSeenPath": lastPath,
 		})
-		return
-	}
 
-	logging.GlobalLogger.LogQP("info", queueName, "", "Found destination folders to process", map[string]any{
-		"count": len(dstFolders),
-		"level": currentLevel,
+		queue.AddTasks(tasks)
+		qp.Mutex.Lock()
+		qp.QueriesPerPhase[queueName]++
+		if mode == firstPass {
+			if lastRaw, ok := qp.LastDBPaths[queueName]; ok && lastRaw != "" {
+				qp.LastPathCursors[queueName] = lastRaw
+			} else {
+				// Fallback to task path if we don't have a recorded raw DB path yet
+				qp.LastPathCursors[queueName] = tasks[len(tasks)-1].GetPath()
+			}
+		}
+		qp.Mutex.Unlock()
+
+		// Switch to retry mode if we got a short batch
+		if len(tasks) < qp.BatchSize && mode == firstPass {
+			qp.Mutex.Lock()
+			qp.ScanModes[queueName] = retryPass
+			qp.Mutex.Unlock()
+		}
+	} else {
+		logging.GlobalLogger.LogQP("debug", queueName, "", "No tasks fetched from DB (dst)", map[string]any{
+			"scanMode":     mode,
+			"level":        currentLevel,
+			"lastSeenPath": lastPath,
+		})
+
+		// Switch to retry mode if we found no tasks in first pass
+		if mode == firstPass {
+			qp.Mutex.Lock()
+			qp.ScanModes[queueName] = retryPass
+			qp.Mutex.Unlock()
+		}
+	}
+}
+
+// FetchDestinationTasksFromDB efficiently fetches destination tasks using 3-query batch approach with ID offset pagination
+func (qp *QueuePublisher) FetchDestinationTasksFromDB(currentLevel int, lastSeenPath string, queueName string) []Task {
+	logging.GlobalLogger.LogMessage("info", "Fetching destination tasks from DB (efficient)", map[string]any{
+		"currentLevel": currentLevel,
+		"lastSeenPath": lastSeenPath,
+		"queueName":    queueName,
 	})
 
-	// Step 2: For each destination folder, get expected source children and create tasks
+	// Same retry/pagination logic as src traversal
+	qp.Mutex.Lock()
+	isRetryMode := qp.ScanModes[queueName] == retryPass
+	scanMode := qp.ScanModes[queueName]
+	qp.Mutex.Unlock()
+
+	if isRetryMode {
+		qp.DB.ForceFlushTable("destination_nodes")
+	}
+
+	// QUERY 1: Get dst folders at current level with same pagination logic as src
+	query1 := `SELECT path, name, identifier, parent_id, last_modified 
+	          FROM destination_nodes WHERE `
+
+	var params1 []any
+
+	if scanMode == firstPass {
+		query1 += `(traversal_status = 'pending' OR (traversal_status = 'failed' AND traversal_attempts < ?)) 
+		           AND level = ? AND type = 'folder'`
+		params1 = []any{qp.RetryThreshold, currentLevel}
+
+		if lastSeenPath != "" {
+			query1 += ` AND path > ?`
+			params1 = append(params1, lastSeenPath)
+		}
+	} else { // retryPass
+		query1 += `traversal_status = 'failed' AND traversal_attempts < ? 
+		          AND level = ? AND type = 'folder'`
+		params1 = []any{qp.RetryThreshold, currentLevel}
+
+		// Add NOT IN filtering for retry mode to prevent re-processing active paths
+		qp.Mutex.Lock()
+		queue, exists := qp.Queues[queueName]
+		qp.Mutex.Unlock()
+
+		if exists {
+			trackedPaths := queue.TrackedPaths(true) // Include both queued and in-progress paths
+			if len(trackedPaths) > 0 {
+				placeholders := make([]string, len(trackedPaths))
+				pathList := make([]string, 0, len(trackedPaths))
+				for path := range trackedPaths {
+					pathList = append(pathList, path)
+				}
+
+				for i := range placeholders {
+					placeholders[i] = "?"
+				}
+				query1 += ` AND path NOT IN (` + strings.Join(placeholders, ", ") + `)`
+
+				// Add the tracked paths as parameters
+				for _, path := range pathList {
+					params1 = append(params1, path)
+				}
+
+				logging.GlobalLogger.LogMessage("info", "Retry mode filtering applied (dst)", map[string]any{
+					"queueName":     queueName,
+					"excludedPaths": len(pathList),
+				})
+			}
+		}
+	}
+
+	query1 += ` ORDER BY path LIMIT ?`
+	params1 = append(params1, qp.BatchSize)
+
+	// Debug log the query
+	logging.GlobalLogger.LogMessage("info", "Executing dst query", map[string]any{
+		"query":    query1,
+		"params":   params1,
+		"scanMode": scanMode,
+	})
+
+	// ADDITIONAL DEBUG: Check what's actually in the dst table at this level
+	debugQuery := `SELECT path, name, type, traversal_status, level FROM destination_nodes WHERE level = ?`
+	debugRows, debugErr := qp.DB.Query("destination_nodes", debugQuery, currentLevel)
+	if debugErr == nil {
+		defer debugRows.Close()
+		var debugItems []map[string]any
+		for debugRows.Next() {
+			var path, name, nodeType, status string
+			var level int
+			if err := debugRows.Scan(&path, &name, &nodeType, &status, &level); err == nil {
+				debugItems = append(debugItems, map[string]any{
+					"path":   path,
+					"name":   name,
+					"type":   nodeType,
+					"status": status,
+					"level":  level,
+				})
+			}
+		}
+		logging.GlobalLogger.LogMessage("debug", "Dst table contents at level", map[string]any{
+			"level": currentLevel,
+			"items": debugItems,
+		})
+	}
+
+	// Execute Query 1
+	rows, err := qp.DB.Query("destination_nodes", query1, params1...)
+	if err != nil {
+		logging.GlobalLogger.LogMessage("error", "Dst DB query failed", map[string]any{
+			"error": err.Error(),
+		})
+		return nil
+	}
+	defer rows.Close()
+
+	var dstFolders []*filesystem.Folder
+	var dstPaths []string
+
+	for rows.Next() {
+		var path, name, identifier, parentID, lastModified string
+		if err := rows.Scan(&path, &name, &identifier, &parentID, &lastModified); err != nil {
+			logging.GlobalLogger.LogMessage("error", "Failed to scan dst folder row", map[string]any{
+				"err": err.Error(),
+			})
+			continue
+		}
+
+		// Record path for stable cursor updates (paths are already in correct relative format)
+		qp.Mutex.Lock()
+		qp.LastDBPaths[queueName] = path
+		qp.Mutex.Unlock()
+
+		folder := &filesystem.Folder{
+			Name:         name,
+			Path:         path,
+			ParentID:     parentID,
+			Identifier:   identifier,
+			LastModified: lastModified,
+			Level:        currentLevel,
+		}
+		dstFolders = append(dstFolders, folder)
+		dstPaths = append(dstPaths, path) // Collect paths for batch query
+	}
+
+	if len(dstFolders) == 0 {
+		logging.GlobalLogger.LogMessage("warning", "No dst folders found despite hasPendingAtLevel returning true", map[string]any{
+			"currentLevel": currentLevel,
+			"lastSeenPath": lastSeenPath,
+			"query":        query1,
+			"params":       params1,
+			"scanMode":     scanMode,
+		})
+		return nil
+	}
+
+	// QUERY 2 & 3 COMBINED: Get all expected children for all dst paths in one efficient batch query
+	expectedChildrenMap := qp.fetchExpectedSourceChildrenBatch(dstPaths)
+
+	// Create tasks with expected children
 	var tasks []Task
 	for _, dstFolder := range dstFolders {
-		expectedSrcChildren, expectedSrcFiles := qp.fetchExpectedSourceChildren(dstFolder.Path)
+		expectedChildren := expectedChildrenMap[dstFolder.Path]
+		var expectedSrcChildren []*filesystem.Folder
+		var expectedSrcFiles []*filesystem.File
+		if expectedChildren != nil {
+			expectedSrcChildren = expectedChildren.Folders
+			expectedSrcFiles = expectedChildren.Files
+		}
 
-		// Create destination traversal task with expected source children (use identifier as task ID)
 		dstTask, err := NewDstTraversalTask(dstFolder.Identifier, dstFolder, nil, expectedSrcChildren, expectedSrcFiles)
 		if err != nil {
-			logging.GlobalLogger.LogQP("error", queueName, dstFolder.Path, "Failed to create destination task", map[string]any{
+			logging.GlobalLogger.LogMessage("error", "Failed to create dst task", map[string]any{
 				"error": err.Error(),
 			})
 			continue
@@ -499,86 +675,128 @@ func (qp *QueuePublisher) PublishDestinationTasks(queueName string) {
 		tasks = append(tasks, dstTask)
 	}
 
-	if len(tasks) > 0 {
-		queue.AddTasks(tasks)
-		logging.GlobalLogger.LogQP("info", queueName, "", "Added destination tasks to queue", map[string]any{
-			"taskCount": len(tasks),
-			"level":     currentLevel,
-		})
-	}
+	qp.Mutex.Lock()
+	qp.QueriesPerPhase[queueName]++
+	qp.Mutex.Unlock()
+
+	logging.GlobalLogger.LogMessage("info", "Created destination tasks efficiently", map[string]any{
+		"dstFoldersFound": len(dstFolders),
+		"tasksCreated":    len(tasks),
+		"totalQueries":    3, // Efficient: 1 for dst folders + 2 for expected children lookup (path match + children)
+	})
+
+	return tasks
 }
 
-// fetchDestinationFolders queries the destination table for pending folders at the specified level
-func (qp *QueuePublisher) fetchDestinationFolders(level int) []*filesystem.Folder {
-	query := `SELECT path, name, identifier, parent_id, last_modified 
-	          FROM destination_nodes 
-	          WHERE traversal_status = 'pending' AND level = ? AND type = 'folder'
-	          ORDER BY path`
+// ExpectedChildren holds the expected folders and files for a path
+type ExpectedChildren struct {
+	Folders []*filesystem.Folder
+	Files   []*filesystem.File
+}
 
-	rows, err := qp.DB.Query("destination_nodes", query, level)
-	if err != nil {
-		logging.GlobalLogger.LogSystem("error", "QP", "Failed to query destination folders", map[string]any{
-			"error": err.Error(),
-			"level": level,
-		})
-		return nil
+// fetchExpectedSourceChildrenBatch efficiently queries source table for expected children using 2-step process:
+// 1. Find src items with matching paths (path = foreign key)
+// 2. Get children of those src items using their identifiers as parent_id
+func (qp *QueuePublisher) fetchExpectedSourceChildrenBatch(dstPaths []string) map[string]*ExpectedChildren {
+	if len(dstPaths) == 0 {
+		return make(map[string]*ExpectedChildren)
 	}
-	defer rows.Close()
 
-	var folders []*filesystem.Folder
-	for rows.Next() {
-		var path, name, identifier, parentID, lastModified string
-		if err := rows.Scan(&path, &name, &identifier, &parentID, &lastModified); err != nil {
-			logging.GlobalLogger.LogSystem("error", "QP", "Failed to scan destination folder row", map[string]any{
-				"error": err.Error(),
-			})
+	// STEP 1: Find src items with matching paths to get their identifiers
+	placeholders := make([]string, len(dstPaths))
+	params := make([]any, len(dstPaths))
+	for i, path := range dstPaths {
+		placeholders[i] = "?"
+		params[i] = path
+	}
+
+	// Query src table to find items with matching paths
+	srcQuery := `SELECT path, identifier FROM source_nodes WHERE path IN (` + strings.Join(placeholders, ", ") + `)`
+
+	logging.GlobalLogger.LogMessage("info", "Step 1: Finding src items with matching dst paths", map[string]any{
+		"dstPathCount": len(dstPaths),
+		"query":        srcQuery,
+	})
+
+	srcRows, err := qp.DB.Query("source_nodes", srcQuery, params...)
+	if err != nil {
+		logging.GlobalLogger.LogMessage("error", "Failed to find matching src items", map[string]any{
+			"error": err.Error(),
+			"paths": dstPaths,
+		})
+		return make(map[string]*ExpectedChildren)
+	}
+	defer srcRows.Close()
+
+	// Collect src identifiers and map them back to dst paths
+	var srcIdentifiers []string
+	pathToIdentifier := make(map[string]string) // dst path -> src identifier
+
+	for srcRows.Next() {
+		var srcPath, srcIdentifier string
+		if err := srcRows.Scan(&srcPath, &srcIdentifier); err != nil {
 			continue
 		}
-
-		folder := &filesystem.Folder{
-			Name:         name,
-			Path:         path,
-			ParentID:     parentID,
-			Identifier:   identifier,
-			LastModified: lastModified,
-			Level:        level,
-		}
-		folders = append(folders, folder)
+		srcIdentifiers = append(srcIdentifiers, srcIdentifier)
+		pathToIdentifier[srcPath] = srcIdentifier
 	}
 
-	return folders
-}
-
-// fetchExpectedSourceChildren queries the source table for expected children of the given path
-func (qp *QueuePublisher) fetchExpectedSourceChildren(dstPath string) ([]*filesystem.Folder, []*filesystem.File) {
-
-	// Query source table for children of this equivalent path
-	query := `SELECT path, name, identifier, parent_id, type, last_modified, size
-	          FROM source_nodes 
-	          WHERE parent_id = ?
-	          ORDER BY type, name`
-
-	rows, err := qp.DB.Query("source_nodes", query, dstPath)
-	if err != nil {
-		logging.GlobalLogger.LogSystem("error", "QP", "Failed to query expected source children", map[string]any{
-			"error": err.Error(),
-			"path":  dstPath,
+	if len(srcIdentifiers) == 0 {
+		logging.GlobalLogger.LogMessage("info", "No matching src items found for dst paths", map[string]any{
+			"dstPaths": dstPaths,
 		})
-		return nil, nil
+		return make(map[string]*ExpectedChildren)
+	}
+
+	// STEP 2: Get children of those src items using their identifiers as parent_id
+	childPlaceholders := make([]string, len(srcIdentifiers))
+	childParams := make([]any, len(srcIdentifiers))
+	for i, identifier := range srcIdentifiers {
+		childPlaceholders[i] = "?"
+		childParams[i] = identifier
+	}
+
+	// Query for children of the matched src items
+	query := `SELECT path, name, identifier, parent_id, type, level, last_modified, size
+	          FROM source_nodes 
+	          WHERE parent_id IN (` + strings.Join(childPlaceholders, ", ") + `)
+	          ORDER BY parent_id, type, name`
+
+	logging.GlobalLogger.LogMessage("info", "Step 2: Getting children of matched src items", map[string]any{
+		"srcIdentifierCount": len(srcIdentifiers),
+		"query":              query,
+	})
+
+	rows, err := qp.DB.Query("source_nodes", query, childParams...)
+	if err != nil {
+		logging.GlobalLogger.LogMessage("error", "Failed to get children of matched src items", map[string]any{
+			"error":          err.Error(),
+			"srcIdentifiers": srcIdentifiers,
+		})
+		return make(map[string]*ExpectedChildren)
 	}
 	defer rows.Close()
 
-	var expectedFolders []*filesystem.Folder
-	var expectedFiles []*filesystem.File
+	// Group results by parent identifier, then map back to dst path
+	childrenByParentId := make(map[string]*ExpectedChildren)
 
 	for rows.Next() {
 		var path, name, identifier, parentID, nodeType, lastModified string
 		var size int64
-		if err := rows.Scan(&path, &name, &identifier, &parentID, &nodeType, &lastModified, &size); err != nil {
-			logging.GlobalLogger.LogSystem("error", "QP", "Failed to scan source child row", map[string]any{
-				"error": err.Error(),
+		var level int
+		if err := rows.Scan(&path, &name, &identifier, &parentID, &nodeType, &level, &lastModified, &size); err != nil {
+			logging.GlobalLogger.LogMessage("error", "Failed to scan expected child row", map[string]any{
+				"err": err.Error(),
 			})
 			continue
+		}
+
+		// Initialize map entry if needed
+		if _, exists := childrenByParentId[parentID]; !exists {
+			childrenByParentId[parentID] = &ExpectedChildren{
+				Folders: []*filesystem.Folder{},
+				Files:   []*filesystem.File{},
+			}
 		}
 
 		switch nodeType {
@@ -589,9 +807,9 @@ func (qp *QueuePublisher) fetchExpectedSourceChildren(dstPath string) ([]*filesy
 				ParentID:     parentID,
 				Identifier:   identifier,
 				LastModified: lastModified,
-				Level:        0, // Will be set properly when used
+				Level:        level, // Use the actual source level from database
 			}
-			expectedFolders = append(expectedFolders, folder)
+			childrenByParentId[parentID].Folders = append(childrenByParentId[parentID].Folders, folder)
 		case "file":
 			file := &filesystem.File{
 				Name:         name,
@@ -600,86 +818,28 @@ func (qp *QueuePublisher) fetchExpectedSourceChildren(dstPath string) ([]*filesy
 				Identifier:   identifier,
 				LastModified: lastModified,
 				Size:         size,
+				Level:        level, // Use the actual source level from database
 			}
-			expectedFiles = append(expectedFiles, file)
+			childrenByParentId[parentID].Files = append(childrenByParentId[parentID].Files, file)
 		}
 	}
 
-	return expectedFolders, expectedFiles
-}
+	// Map results back to dst paths (the key we need for the caller)
+	result := make(map[string]*ExpectedChildren)
+	for dstPath, srcIdentifier := range pathToIdentifier {
+		if children, exists := childrenByParentId[srcIdentifier]; exists {
+			result[dstPath] = children
+		}
+	}
 
-// createRootTask creates the initial root task from the nodes table for level 0
-func (qp *QueuePublisher) createRootTask(queueName string, table string) ([]Task, error) {
-	logging.GlobalLogger.LogSystem("debug", "QP", "Creating root task", map[string]any{
-		"queueName": queueName,
-		"table":     table,
+	logging.GlobalLogger.LogMessage("info", "Batch expected children lookup completed", map[string]any{
+		"dstPathsQueried":  len(dstPaths),
+		"srcItemsMatched":  len(srcIdentifiers),
+		"parentPathsFound": len(result),
+		"queryEfficiency":  fmt.Sprintf("2 queries instead of %d queries", len(dstPaths)),
 	})
 
-	// Query the nodes table for level 0 root information
-	query := `SELECT path, name, identifier, last_modified FROM ` + table + ` WHERE level = 0 LIMIT 1`
-	logging.GlobalLogger.LogSystem("debug", "QP", "Querying nodes table for root task creation", map[string]any{
-		"query": query,
-		"table": table,
-	})
-
-	rows, err := qp.DB.Query(table, query)
-	if err != nil {
-		logging.GlobalLogger.LogSystem("error", "QP", "Failed to query nodes table", map[string]any{
-			"error": err.Error(),
-			"table": table,
-			"queue": queueName,
-		})
-		return nil, err
-	}
-	defer rows.Close()
-
-	if rows.Next() {
-		var rootPath, name, identifier, lastModified string
-		if err := rows.Scan(&rootPath, &name, &identifier, &lastModified); err != nil {
-			logging.GlobalLogger.LogSystem("error", "QP", "Failed to scan root data", map[string]any{
-				"error": err.Error(),
-				"queue": queueName,
-			})
-			return nil, err
-		}
-
-		// Create root task with path="/" and absolute identifier for OS service
-		folder := &filesystem.Folder{
-			Name:         name,
-			Path:         "",        // Always "" for root in the new model
-			ParentID:     "",         // Root has no parent
-			Identifier:   identifier, // Keep absolute path for OS service
-			LastModified: lastModified,
-			Level:        0,
-		}
-
-		var task Task
-		var err error
-
-		// Create the appropriate task type based on the table
-		if table == "destination_nodes" {
-			// For destination root task, create with empty expected children/files
-			task, err = NewDstTraversalTask(identifier, folder, nil, nil, nil)
-		} else {
-			// For source root task
-			task, err = NewSrcTraversalTask(identifier, folder, nil)
-		}
-
-		if err != nil {
-			return nil, err
-		}
-
-		logging.GlobalLogger.LogSystem("info", "QP", "Created root task", map[string]any{
-			"queue":      queueName,
-			"path":       "",
-			"identifier": identifier,
-			"taskType":   task.GetType(),
-		})
-
-		return []Task{task}, nil
-	}
-
-	return nil, fmt.Errorf("no root found in table %s", table)
+	return result
 }
 
 func (qp *QueuePublisher) PublishTasks(queueName string) {
@@ -720,41 +880,14 @@ func (qp *QueuePublisher) PublishTasks(queueName string) {
 	}
 	qp.Mutex.Unlock()
 
-	logging.GlobalLogger.LogQP("debug", queueName, "", "Checking root task creation conditions", map[string]any{
+	// Normal task fetching from DB for ALL levels - no special cases
+	logging.GlobalLogger.LogQP("debug", queueName, "", "Fetching tasks from DB", map[string]any{
 		"currentLevel": currentLevel,
 		"mode":         mode,
 		"lastPath":     lastPath,
-		"condition":    currentLevel == 0 && mode == firstPass && lastPath == "",
+		"table":        table,
 	})
-
-	var tasks []Task
-	var err error
-
-	// Handle level 0 specially - create root task from root table
-	if currentLevel == 0 && mode == firstPass && lastPath == "" {
-		logging.GlobalLogger.LogQP("debug", queueName, "", "Creating root task", map[string]any{
-			"currentLevel": currentLevel,
-			"mode":         mode,
-			"lastPath":     lastPath,
-			"table":        table,
-		})
-		tasks, err = qp.createRootTask(queueName, table)
-		if err != nil {
-			logging.GlobalLogger.LogQP("error", queueName, "", "Failed to create root task", map[string]any{
-				"error": err.Error(),
-			})
-			return
-		}
-	} else {
-		logging.GlobalLogger.LogQP("debug", queueName, "", "Fetching tasks from DB", map[string]any{
-			"currentLevel": currentLevel,
-			"mode":         mode,
-			"lastPath":     lastPath,
-			"table":        table,
-		})
-		// Normal task fetching from node tables (level 1+)
-		tasks = qp.FetchTasksFromDB(table, queue.Type, currentLevel, lastPath, queueName)
-	}
+	tasks := qp.FetchTasksFromDB(table, queue.Type, currentLevel, lastPath, queueName)
 
 	if len(tasks) > 0 {
 		logging.GlobalLogger.LogQP("debug", queueName, "", "Tasks fetched from DB", map[string]any{
@@ -771,7 +904,7 @@ func (qp *QueuePublisher) PublishTasks(queueName string) {
 			if lastRaw, ok := qp.LastDBPaths[queueName]; ok && lastRaw != "" {
 				qp.LastPathCursors[queueName] = lastRaw
 			} else {
-				// Fallback to task path if we don't have a recorded raw DB path yet
+				// Use the last task path for cursor progression
 				qp.LastPathCursors[queueName] = tasks[len(tasks)-1].GetPath()
 			}
 		}
@@ -841,24 +974,42 @@ func (qp *QueuePublisher) hasPendingAtLevel(queueName string, level int) bool {
 
 	table := "source_nodes"
 	statusColumn := "traversal_status"
+	typeFilter := ""
+
 	if queue.Type == UploadQueueType {
 		table = "destination_nodes"
 		statusColumn = "upload_status"
+		typeFilter = " AND type = 'file'" // Upload queues only process files
 	} else if queue.Type == TraversalQueueType && queue.SrcOrDst == "dst" {
 		table = "destination_nodes"
 		statusColumn = "traversal_status"
+		typeFilter = " AND type = 'folder'" // Dst traversal only processes folders
+	} else if queue.Type == TraversalQueueType {
+		// Src traversal only processes folders
+		typeFilter = " AND type = 'folder'"
 	}
 
 	// Ensure pending writes are flushed before checking
 	qp.FlushTable(table)
 
-	query := `SELECT COUNT(*) FROM ` + table + ` WHERE ` + statusColumn + ` = 'pending' AND level = ?`
+	// Make the query consistent with the actual fetch query
+	query := `SELECT COUNT(*) FROM ` + table + ` WHERE ` + statusColumn + ` = 'pending' AND level = ?` + typeFilter
+
+	logging.GlobalLogger.LogMessage("debug", "hasPendingAtLevel query", map[string]any{
+		"queue":      queueName,
+		"level":      level,
+		"table":      table,
+		"query":      query,
+		"typeFilter": typeFilter,
+	})
+
 	rows, err := qp.DB.Query(table, query, level)
 	if err != nil {
 		logging.GlobalLogger.LogMessage("error", "hasPendingAtLevel query failed", map[string]any{
 			"queue": queueName,
 			"level": level,
 			"error": err.Error(),
+			"query": query,
 		})
 		// Be conservative: assume pending exists so we don't advance too early
 		return true
@@ -878,9 +1029,11 @@ func (qp *QueuePublisher) hasPendingAtLevel(queueName string, level int) bool {
 	}
 
 	logging.GlobalLogger.LogMessage("info", "hasPendingAtLevel result", map[string]any{
-		"queue":   queueName,
-		"level":   level,
-		"pending": count,
+		"queue":    queueName,
+		"level":    level,
+		"pending":  count,
+		"table":    table,
+		"hasItems": count > 0,
 	})
 	return count > 0
 }

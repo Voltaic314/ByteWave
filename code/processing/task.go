@@ -76,14 +76,6 @@ func (bt *BaseTask) GetPath() string {
 
 func NewSrcTraversalTask(id string, folder *filesystem.Folder, parentTaskID *string) (*TraversalSrcTask, error) {
 
-	// Perform basic validation
-	if folder.Path == "" {
-		logging.GlobalLogger.LogMessage("error", "Invalid folder path", map[string]any{
-			"taskID": id,
-		})
-		return nil, fmt.Errorf("invalid folder: path is empty")
-	}
-
 	return &TraversalSrcTask{
 		BaseTask: BaseTask{
 			ID:           id,
@@ -133,13 +125,6 @@ func NewUploadTask(id string, file *filesystem.File, folder *filesystem.Folder, 
 // NewDstTraversalTask creates a task specifically for destination traversal
 func NewDstTraversalTask(id string, folder *filesystem.Folder, parentTaskID *string,
 	expectedSrcChildren []*filesystem.Folder, expectedSrcFiles []*filesystem.File) (*TraversalDstTask, error) {
-
-	if folder.Path == "" {
-		logging.GlobalLogger.LogMessage("error", "Invalid folder path", map[string]any{
-			"taskID": id,
-		})
-		return nil, fmt.Errorf("invalid folder: path is empty")
-	}
 
 	return &TraversalDstTask{
 		BaseTask: BaseTask{

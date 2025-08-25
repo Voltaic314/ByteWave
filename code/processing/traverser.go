@@ -3,8 +3,8 @@ package processing
 
 import (
 	"fmt"
-	"time"
 	"strings"
+	"time"
 
 	"github.com/Voltaic314/ByteWave/code/db"
 	"github.com/Voltaic314/ByteWave/code/filesystem"
@@ -178,21 +178,6 @@ func (tw *TraverserWorker) ProcessDstTraversal(dstTask *TraversalDstTask) error 
 		return err
 	}
 
-	var validFolders []filesystem.Folder
-	var validFiles []filesystem.File
-
-	for _, folder := range allFolders {
-		if tw.pv.IsValidPath(folder.Path) {
-			validFolders = append(validFolders, folder)
-		}
-	}
-
-	for _, file := range allFiles {
-		if tw.pv.IsValidPath(file.Path) {
-			validFiles = append(validFiles, file)
-		}
-	}
-
 	// Create maps for efficient lookup of expected source items
 	expectedFolders := make(map[string]*filesystem.Folder)
 	expectedFiles := make(map[string]*filesystem.File)
@@ -211,7 +196,7 @@ func (tw *TraverserWorker) ProcessDstTraversal(dstTask *TraversalDstTask) error 
 	var presentFolders []filesystem.Folder
 
 	// Check discovered files against expected source files
-	for _, file := range validFiles {
+	for _, file := range allFiles {
 		if _, expectedFromSource := expectedFiles[file.Name]; expectedFromSource {
 			// This file is expected from source AND present in destination
 			presentFiles = append(presentFiles, file)
@@ -219,7 +204,7 @@ func (tw *TraverserWorker) ProcessDstTraversal(dstTask *TraversalDstTask) error 
 	}
 
 	// Check discovered folders against expected source folders
-	for _, folder := range validFolders {
+	for _, folder := range allFolders {
 		if _, expectedFromSource := expectedFolders[folder.Name]; expectedFromSource {
 			// This folder is expected from source AND present in destination
 			presentFolders = append(presentFolders, folder)
@@ -229,8 +214,8 @@ func (tw *TraverserWorker) ProcessDstTraversal(dstTask *TraversalDstTask) error 
 	logging.GlobalLogger.LogWorker("info", tw.ID, dstTask.GetPath(), "Destination traversal comparison complete", map[string]any{
 		"expected_files":     len(expectedFiles),
 		"expected_folders":   len(expectedFolders),
-		"discovered_files":   len(validFiles),
-		"discovered_folders": len(validFolders),
+		"discovered_files":   len(allFiles),
+		"discovered_folders": len(allFolders),
 		"present_files":      len(presentFiles),
 		"present_folders":    len(presentFolders),
 	})
@@ -258,7 +243,7 @@ func (tw *TraverserWorker) LogSrcTraversalSuccess(task Task, files []filesystem.
 			tw.PathNormalizer(file.Path),
 			file.Name,
 			file.Identifier,
-			task.GetFolder().Path, // Already relative, no need to normalize
+			task.GetFolder().Identifier, // Use parent's identifier (absolute path for OS service)
 			"file",
 			task.GetFolder().Level+1,
 			file.Size,
@@ -278,7 +263,7 @@ func (tw *TraverserWorker) LogSrcTraversalSuccess(task Task, files []filesystem.
 			tw.PathNormalizer(folder.Path),
 			folder.Name,
 			folder.Identifier,
-			task.GetFolder().Path, // Already relative, no need to normalize
+			task.GetFolder().Identifier, // Use parent's identifier (absolute path for OS service)
 			"folder",
 			task.GetFolder().Level+1,
 			0, // Size = 0 for folders
@@ -335,7 +320,7 @@ func (tw *TraverserWorker) LogDstTraversalSuccess(task Task, files []filesystem.
 			tw.PathNormalizer(file.Path),
 			file.Name,
 			file.Identifier,
-			task.GetFolder().Path, // Already relative, no need to normalize
+			task.GetFolder().Identifier, // Use parent's identifier (absolute path for OS service)
 			"file",
 			task.GetFolder().Level+1,
 			file.Size,
@@ -354,7 +339,7 @@ func (tw *TraverserWorker) LogDstTraversalSuccess(task Task, files []filesystem.
 			tw.PathNormalizer(folder.Path),
 			folder.Name,
 			folder.Identifier,
-			task.GetFolder().Path, // Already relative, no need to normalize
+			task.GetFolder().Identifier, // Use parent's identifier (absolute path for OS service)
 			"folder",
 			task.GetFolder().Level+1,
 			0, // Size = 0 for folders

@@ -116,22 +116,39 @@ func (osSvc *OSService) GetAllItems(folder filesystem.Folder, _ <-chan int) (<-c
 
 			// Normalize identifier: all slashes to OS-native
 			identifier := filepath.Clean(itemPath)
-			parentPath := strings.TrimLeft(folder.Path, "/")
-			relPath := fmt.Sprintf("/%s/%s", parentPath, item.Name())
+
+			// Fix path construction to handle root case properly
+			var relPath string
+			if folder.Path == "/" {
+				// Root case: path should be "/item_name" (not "//item_name")
+				relPath = folder.Path + item.Name() // end result is "/{item_name}"
+			} else {
+				// Non-root case: path should be "/parent_path/item_name"
+				parentPath := strings.TrimLeft(folder.Path, "/")
+				relPath = fmt.Sprintf("/%s/%s", parentPath, item.Name())
+			}
+
+			logging.GlobalLogger.LogMessage("info", "Item Found", map[string]any{
+				"name":          item.Name(),
+				"path":          relPath,
+				"identifier":    identifier,
+				"parent_id":     folder.Identifier,
+				"last_modified": metadata["last_modified"].(string),
+			})
 
 			if info.IsDir() {
 				foldersList = append(foldersList, filesystem.Folder{
 					Name:         item.Name(),
-					Path:         relPath, // Relative path with forward slashes
-					Identifier:   identifier, // OS-native slashes
+					Path:         relPath,           // Relative path with forward slashes
+					Identifier:   identifier,        // OS-native slashes
 					ParentID:     folder.Identifier, // Use input folder.Identifier
 					LastModified: metadata["last_modified"].(string),
 				})
 			} else {
 				filesList = append(filesList, filesystem.File{
 					Name:         item.Name(),
-					Path:         relPath, // Relative path with forward slashes
-					Identifier:   identifier, // OS-native slashes
+					Path:         relPath,           // Relative path with forward slashes
+					Identifier:   identifier,        // OS-native slashes
 					ParentID:     folder.Identifier, // Use input folder.Identifier
 					Size:         metadata["size"].(int64),
 					LastModified: metadata["last_modified"].(string),

@@ -35,13 +35,13 @@ conn = duckdb.connect(database=db_path)
 
 # Create simple level 0 root entries (no hierarchy, no negative levels)
 src_root_entry = {
-    "path": "",  # Always "" for root
+    "path": "/",  # Root path is "/" for clear identification
     "name": os.path.basename(src_folder_abs_path),
     "identifier": src_folder_abs_path,  # Absolute path for OS service
     "parent_id": "",  # Root has no parent
     "type": "folder",
     "level": 0,
-    "size": None,
+    "size": 0,
     "last_modified": "2025-01-01T00:00:00Z",
     "traversal_status": "pending",
     "upload_status": "pending",
@@ -51,13 +51,13 @@ src_root_entry = {
 }
 
 dst_root_entry = {
-    "path": "",  # Always "" for root
+    "path": "/",  # Root path is "/" for clear identification
     "name": os.path.basename(dst_folder_abs_path),
     "identifier": dst_folder_abs_path,  # Absolute path for OS service
     "parent_id": "",  # Root has no parent
     "type": "folder",
     "level": 0,
-    "size": None,
+    "size": 0,
     "last_modified": "2025-01-01T00:00:00Z",
     "traversal_status": "pending",
     "traversal_attempts": 0,

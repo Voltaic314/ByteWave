@@ -78,12 +78,27 @@ func (wq *WriteQueue) Flush(force ...bool) []typesdb.Batch {
 		wq.mu.Unlock()
 		return nil
 	}
-	// If we're not forcing a flush and there are not enough operations to write, don't flush
+
 	shouldForce := len(force) > 0 && force[0]
-	if !shouldForce && !wq.readyToWrite {
+	timeSinceLastFlush := time.Since(wq.lastFlushed)
+	timeBasedFlush := timeSinceLastFlush >= wq.flushTimer
+
+	// Check if we have any operations to flush
+	hasOperations := false
+	if wq.queueType == typesdb.LogWriteQueue {
+		hasOperations = len(wq.logQueue) > 0
+	} else {
+		hasOperations = len(wq.queue) > 0
+	}
+
+	// Flush if: forced, batch size reached, OR time interval passed (and we have operations)
+	shouldFlush := shouldForce || wq.readyToWrite || (timeBasedFlush && hasOperations)
+
+	if !shouldFlush {
 		wq.mu.Unlock()
 		return nil
 	}
+
 	wq.isWriting = true
 	wq.readyToWrite = false // Reset ready state after flush
 	wq.mu.Unlock()
