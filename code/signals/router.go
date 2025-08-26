@@ -9,15 +9,6 @@ import (
 	"github.com/google/uuid"
 )
 
-// TODO: This package is no longer used in the project.
-// I will port it over to its own repository soon for archive purposes.
-// It is a simple signal router that allows for subscribing to and publishing signals to topics.
-// It is used to coordinate the traversal of the source and destination queues.
-// It is also used to coordinate the workers and queues.
-// It is also used to coordinate the logging of the traversal.
-// It is also used to coordinate the writing of the traversal to the database.
-// It is also used to coordinate the writing of the traversal to the database.
-
 type AckMode int
 
 const (
