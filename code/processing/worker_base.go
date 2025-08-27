@@ -227,10 +227,6 @@ func (wb *WorkerBase) Run(process func(Task) error) {
 			}
 		}
 
-		logging.GlobalLogger.LogWorker("info", wb.ID, task.GetPath(), "Worker popped task from queue", map[string]any{
-			"queueType": wb.QueueType,
-		})
-
 		logging.GlobalLogger.LogWorker("info", wb.ID, task.GetPath(), "Worker acquired task", map[string]any{
 			"taskID": task.GetID(),
 		})

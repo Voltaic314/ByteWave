@@ -130,6 +130,9 @@ func (c *Conductor) monitorQueueCompletion() {
 
 		if queueCount == 0 {
 			logging.GlobalLogger.LogSystem("info", "Conductor", "All queues completed, stopping monitor", nil)
+			c.QP.Mutex.Lock()
+			c.QP.Running = false
+			c.QP.Mutex.Unlock()
 			break
 		}
 
@@ -231,18 +234,37 @@ func (c *Conductor) TeardownQueue(queueName string) {
 	}
 	queue.workers = idleWorkers
 	queue.cond.Broadcast() // Notify all workers to stop waiting
+	table := "source_nodes"
+	if queue.Type == UploadQueueType {
+		table = "destination_nodes"
+	} else if queue.SrcOrDst == "dst" {
+		table = "destination_nodes"
+	}
 	queue.mu.Unlock()
 
 	// Delete from all QP maps
+
+	// 🔒 Locking...
 	c.QP.Mutex.Lock()
-	delete(c.QP.Queues, queueName)
-	delete(c.QP.QueueLevels, queueName)
-	delete(c.QP.LastPathCursors, queueName)
-	delete(c.QP.ScanModes, queueName)
-	delete(c.QP.QueriesPerPhase, queueName)
+
+	// but before we do that... 
+	// Flush any remaining data out from the corresponding write queues.
+	c.QP.DB.ForceFlushTable("audit_log") // justttttt to be safe. :)
+	c.QP.DB.ForceFlushTable(table)
+
+	// Okay now delete the stuff! \o/
+
+	// temporarily disabling teardown deletions for now.
+	// delete(c.QP.Queues, queueName)
+	// delete(c.QP.QueueLevels, queueName)
+	// delete(c.QP.LastPathCursors, queueName)
+	// delete(c.QP.ScanModes, queueName)
+	// delete(c.QP.QueriesPerPhase, queueName)
+
+	// 🔓 Unlocking...
 	c.QP.Mutex.Unlock()
 
-	logging.GlobalLogger.LogMessage("info", "Queue teardown complete", map[string]any{
-		"queueID": queueName,
-	})
+	// logging.GlobalLogger.LogMessage("info", "Queue teardown complete", map[string]any{
+	// 	"queueID": queueName,
+	// })
 }

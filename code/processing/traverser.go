@@ -236,11 +236,12 @@ func (tw *TraverserWorker) LogSrcTraversalSuccess(task Task, files []filesystem.
 
 	// Create inserts for all the files found in the traversal
 	for _, file := range files {
+		path := tw.PathNormalizer(file.Path)
 		tw.DB.QueueWrite(table, `INSERT OR IGNORE INTO `+table+` (
 			path, name, identifier, parent_id, type, level, size, last_modified,
 			traversal_status, upload_status, traversal_attempts, upload_attempts, error_ids
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			tw.PathNormalizer(file.Path),
+			path,
 			file.Name,
 			file.Identifier,
 			task.GetFolder().Identifier, // Use parent's identifier (absolute path for OS service)
@@ -256,11 +257,12 @@ func (tw *TraverserWorker) LogSrcTraversalSuccess(task Task, files []filesystem.
 
 	// Create inserts for all the folders found in the traversal
 	for _, folder := range folders {
+		path := tw.PathNormalizer(folder.Path)
 		tw.DB.QueueWrite(table, `INSERT OR IGNORE INTO `+table+` (
 			path, name, identifier, parent_id, type, level, size, last_modified,
 			traversal_status, upload_status, traversal_attempts, upload_attempts, error_ids
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			tw.PathNormalizer(folder.Path),
+			path,
 			folder.Name,
 			folder.Identifier,
 			task.GetFolder().Identifier, // Use parent's identifier (absolute path for OS service)

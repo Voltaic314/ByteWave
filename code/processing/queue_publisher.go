@@ -22,6 +22,16 @@ const (
 	retryPass                 // second sweep for failed rows
 )
 
+// queueSnapshot holds queue data captured under mutex
+type queueSnapshot struct {
+	queueName       string
+	queue           *TaskQueue
+	currentLevel    int
+	queriesPerPhase int
+	srcOrDst        string
+	state           QueueState
+}
+
 // ConductorInterface defines the methods QP needs from Conductor
 type ConductorInterface interface {
 	SetupDestinationQueue()
@@ -103,10 +113,28 @@ func (qp *QueuePublisher) FlushTable(table string) {
 
 func (qp *QueuePublisher) Run() {
 	logging.GlobalLogger.LogSystem("info", "QP", "Starting QueuePublisher event-driven control", nil)
+	
+	qp.Mutex.Lock()
 	qp.Running = true
+	qp.Mutex.Unlock()
 
-	// Bootstrap: Publish initial tasks and set up event-driven mode
+	// Bootstrap: Set up signal listeners
 	qp.bootstrap()
+	
+	// This section of lock to get queue names portion is to avoid double locks
+	// because publish tasks also calls a lock on QP. Maybe we should do a refactor 
+	// or cleanup sometime soon. Soon™.
+	qp.Mutex.Lock()
+	queueNames := make([]string, 0, len(qp.Queues))
+	for queueName := range qp.Queues {
+		queueNames = append(queueNames, queueName)
+	}
+	qp.Mutex.Unlock()
+
+	// Publish initial tasks to all queues at startup
+	for _, queueName := range queueNames {
+		go qp.PublishTasks(queueName)
+	}
 
 	// Main event loop - respond to worker signals and monitor completion
 	for qp.Running {
@@ -124,28 +152,10 @@ func (qp *QueuePublisher) bootstrap() {
 	}
 	qp.Mutex.Unlock()
 
-	// Step 1: Publish initial tasks for all queues
-	logging.GlobalLogger.LogSystem("info", "QP", "Publishing initial tasks (bootstrap phase)", nil)
-	for _, queueName := range queueNames {
-		go qp.PublishTasks(queueName)
-	}
-
-	// Step 2: Brief delay for task processing
-	time.Sleep(100 * time.Millisecond)
-
-	// Step 3: Set up signal listeners for all queues
+	// Set up signal listeners for all queues
 	logging.GlobalLogger.LogSystem("info", "QP", "Setting up worker signal listeners", nil)
 	for _, queueName := range queueNames {
 		qp.setupQueueSignals(queueName)
-	}
-
-	// Step 4: Signal workers that QP is ready
-	logging.GlobalLogger.LogSystem("info", "QP", "Sending ready signal to all workers", nil)
-	for _, queueName := range queueNames {
-		signals.GlobalSR.Publish(signals.Signal{
-			Topic:   "qp_ready:" + queueName,
-			Payload: "QP signal listeners ready",
-		})
 	}
 
 	logging.GlobalLogger.LogSystem("info", "QP", "QP fully initialized - now responding to worker signals", nil)
@@ -167,28 +177,15 @@ func (qp *QueuePublisher) setupQueueSignals(queueName string) {
 	})
 }
 
-// queueSnapshot holds queue data captured under mutex
-type queueSnapshot struct {
-	queueName       string
-	queue           *TaskQueue
-	currentLevel    int
-	queriesPerPhase int
-	srcOrDst        string
-	state           QueueState
-}
-
 // manageQueueCompletion handles phase advancement and completion detection for all queues
 func (qp *QueuePublisher) manageQueueCompletion() {
 	// Step 1: Capture all queue data under mutex (snapshot pattern)
 	qp.Mutex.Lock()
-	srcLevel := qp.QueueLevels["src-traversal"]
 	var snapshots []queueSnapshot
-
 	for queueName, queue := range qp.Queues {
 		if queue.State != QueueRunning {
 			continue
 		}
-
 		snapshots = append(snapshots, queueSnapshot{
 			queueName:       queueName,
 			queue:           queue,
@@ -202,51 +199,36 @@ func (qp *QueuePublisher) manageQueueCompletion() {
 
 	// Step 2: Process snapshots without holding mutex
 	for _, snap := range snapshots {
-		logging.GlobalLogger.LogSystem("debug", "QP", "Checking queue completion", map[string]any{
+		logging.GlobalLogger.LogSystem("debug", "QP", "Checking queue advancement eligibility", map[string]any{
 			"queue":           snap.queueName,
 			"currentLevel":    snap.currentLevel,
 			"queriesPerPhase": snap.queriesPerPhase,
 		})
 
-		// Check if round is complete
-		if qp.isQueueRoundComplete(snap.queue) {
-			logging.GlobalLogger.LogSystem("info", "QP", "Round complete - checking traversal completion", map[string]any{
-				"queue":           snap.queueName,
-				"currentLevel":    snap.currentLevel,
-				"queriesPerPhase": snap.queriesPerPhase,
-			})
-
-			// Check if entire traversal is complete
-			if qp.isTraversalComplete(snap.queueName, snap.queue, snap.currentLevel, snap.queriesPerPhase) {
-				// Safely set queue state to complete
-				qp.Mutex.Lock()
-				if queue, exists := qp.Queues[snap.queueName]; exists && queue.State == QueueRunning {
-					queue.State = QueueComplete
-					logging.GlobalLogger.LogSystem("info", "QP", "Queue traversal complete", map[string]any{
-						"queue": snap.queueName,
-						"type":  snap.srcOrDst,
-					})
-				}
-				qp.Mutex.Unlock()
-			} else {
-				logging.GlobalLogger.LogSystem("info", "QP", "Traversal not complete - attempting phase advancement", map[string]any{
-					"queue":        snap.queueName,
-					"currentLevel": snap.currentLevel,
+		// 1. Check if entire traversal is complete
+		if qp.isTraversalComplete(snap.queueName, snap.queue, snap.currentLevel, snap.queriesPerPhase) {
+			// Safely set queue state to complete
+			qp.Mutex.Lock()
+			if queue, exists := qp.Queues[snap.queueName]; exists && queue.State == QueueRunning {
+				queue.State = QueueComplete
+				logging.GlobalLogger.LogSystem("info", "QP", "Queue traversal complete", map[string]any{
+					"queue": snap.queueName,
+					"type":  snap.srcOrDst,
 				})
-
-				// Advance to next phase if allowed
-				if qp.canAdvanceQueueSafe(snap.queueName, snap.srcOrDst, srcLevel) {
-					qp.advancePhaseWithMutex(snap.queueName)
-				} else {
-					logging.GlobalLogger.LogSystem("debug", "QP", "Cannot advance queue yet", map[string]any{
-						"queue":    snap.queueName,
-						"type":     snap.srcOrDst,
-						"srcLevel": srcLevel,
-					})
-				}
 			}
+			qp.Mutex.Unlock()
+			continue
+		}
+
+		// 2. If not complete, check if queue is ready to advance
+		if qp.isQueueReadyToAdvance(snap.queueName) {
+			logging.GlobalLogger.LogSystem("info", "QP", "Queue ready to advance phase", map[string]any{
+				"queue":        snap.queueName,
+				"currentLevel": snap.currentLevel,
+			})
+			qp.advancePhaseWithMutex(snap.queueName)
 		} else {
-			logging.GlobalLogger.LogSystem("debug", "QP", "Round not complete yet", map[string]any{
+			logging.GlobalLogger.LogSystem("debug", "QP", "Queue not ready to advance phase", map[string]any{
 				"queue": snap.queueName,
 			})
 		}
@@ -256,8 +238,17 @@ func (qp *QueuePublisher) manageQueueCompletion() {
 	qp.maybeCreateDestinationQueue()
 }
 
-// isQueueRoundComplete checks if a queue has completed its current round
-func (qp *QueuePublisher) isQueueRoundComplete(queue *TaskQueue) bool {
+// isQueueReadyToAdvance determines if a queue (src or dst) is ready to advance to the next phase.
+func (qp *QueuePublisher) isQueueReadyToAdvance(queueName string) bool {
+	qp.Mutex.Lock()
+	queue, exists := qp.Queues[queueName]
+	currentLevel := qp.QueueLevels[queueName]
+	srcLevel := qp.QueueLevels["src-traversal"]
+	qp.Mutex.Unlock()
+	if !exists || queue.State != QueueRunning {
+		return false
+	}
+
 	// Flush relevant tables first
 	if queue.Type == TraversalQueueType && queue.SrcOrDst == "src" {
 		qp.DB.ForceFlushTable("source_nodes")
@@ -265,75 +256,39 @@ func (qp *QueuePublisher) isQueueRoundComplete(queue *TaskQueue) bool {
 		qp.DB.ForceFlushTable("destination_nodes")
 		qp.DB.ForceFlushTable("source_nodes")
 	}
-	qp.DB.ForceFlushTable("audit_log") // forcing a flush to audit log for now so that we can avoid the issue of audit log not auto-flushing
-	// TODO: remove this once we have a better solution for audit log auto-flushing
+	qp.DB.ForceFlushTable("audit_log")
 
 	queue.mu.Lock()
 	queueSize := len(queue.tasks)
 	allWorkersIdle := true
-	workerStates := make([]string, len(queue.workers))
-	for i, worker := range queue.workers {
-		workerStates[i] = string(worker.State)
+	for _, worker := range queue.workers {
 		if worker.State != WorkerIdle {
 			allWorkersIdle = false
+			break
 		}
 	}
 	queue.mu.Unlock()
 
-	hasPending := qp.hasPendingAtLevel(queue.QueueID, queue.Phase)
-	isComplete := queueSize == 0 && allWorkersIdle && !hasPending
-
-	logging.GlobalLogger.LogSystem("debug", "QP", "Round completion check", map[string]any{
-		"queue":             queue.QueueID,
-		"queueSize":         queueSize,
-		"allWorkersIdle":    allWorkersIdle,
-		"workerStates":      workerStates,
-		"hasPendingAtLevel": hasPending,
-		"currentPhase":      queue.Phase,
-		"isRoundComplete":   isComplete,
-	})
-
-	return isComplete
-}
-
-// canAdvanceQueueSafe determines if a queue can advance to the next phase (SAFE - uses mutex)
-func (qp *QueuePublisher) canAdvanceQueueSafe(queueName, queueType string, srcLevel int) bool {
-	if queueType == "src" {
-		return true // Source can always advance
+	hasPending := qp.hasPendingAtLevel(queueName, queue.Phase)
+	if queueSize > 0 || !allWorkersIdle || hasPending {
+		return false
 	}
 
-	// Safely get destination level
-	qp.Mutex.Lock()
-	dstLevel, exists := qp.QueueLevels[queueName]
-	_, srcExists := qp.Queues["src-traversal"]
-	qp.Mutex.Unlock()
-
-	if !exists {
-		return false // Dst queue doesn't exist
+	// For dst, enforce N+2 rule
+	if queue.SrcOrDst == "dst" {
+		requiredSrcLevel := currentLevel + 2
+		srcQueue, srcExists := qp.Queues["src-traversal"]
+		if srcLevel < requiredSrcLevel && srcExists && srcQueue.State == QueueRunning {
+			logging.GlobalLogger.LogSystem("debug", "QP", "Dst queue cannot advance: src not far enough ahead", map[string]any{
+				"queue":            queueName,
+				"currentLevel":     currentLevel,
+				"srcLevel":         srcLevel,
+				"requiredSrcLevel": requiredSrcLevel,
+			})
+			return false
+		}
 	}
-
-	// If src queue doesn't exist anymore, src traversal is complete - dst can advance freely
-	if !srcExists {
-		logging.GlobalLogger.LogSystem("info", "QP", "Src traversal complete, dst can advance freely", map[string]any{
-			"dstLevel": dstLevel,
-		})
-		return true
-	}
-
-	// Dst can only advance if src has completed N+1 levels ahead
-	// For dst level 0: src must have completed level 1 (srcLevel >= 2)
-	// For dst level 1: src must have completed level 2 (srcLevel >= 3), etc.
-	requiredSrcLevel := dstLevel + 2
-	canAdvance := srcLevel >= requiredSrcLevel
-
-	logging.GlobalLogger.LogSystem("debug", "QP", "Dst advancement check", map[string]any{
-		"dstLevel":         dstLevel,
-		"srcLevel":         srcLevel,
-		"requiredSrcLevel": requiredSrcLevel,
-		"canAdvance":       canAdvance,
-	})
-
-	return canAdvance
+	return true 
 }
 
 // isTraversalComplete checks if the entire traversal is complete for a queue
@@ -343,14 +298,6 @@ func (qp *QueuePublisher) isTraversalComplete(queueName string, queue *TaskQueue
 		"currentLevel":    currentLevel,
 		"queriesPerPhase": queriesPerPhase,
 	})
-
-	if queriesPerPhase > 0 {
-		logging.GlobalLogger.LogSystem("debug", "QP", "Traversal not complete - still have pending queries", map[string]any{
-			"queue":           queueName,
-			"queriesPerPhase": queriesPerPhase,
-		})
-		return false // Still have pending work
-	}
 
 	table := "source_nodes"
 	statusColumn := "traversal_status"
@@ -391,7 +338,18 @@ func (qp *QueuePublisher) isTraversalComplete(queueName string, queue *TaskQueue
 		"isComplete":   count == 0,
 	})
 
-	return count == 0
+	/*
+	 This means we advanced the round and didn't see anything, which means we have exhausted max depth.
+	 
+	 NOTE:
+	 Technically there are scenarios where we didn't actually traverse the previous items, and thus didn't
+	 list out the children to traverse, thus it *thinks* we are done. But they should be caught in the
+	 retry logic and if it still failed after N retries then that's between you and god at that point. lol
+	 
+	 It will at least show this in the path review phase for traversal issues and post migration report 
+	 for traversal and / or upload issues.
+	*/
+	return count == 0 && queriesPerPhase < 2 && currentLevel > 0
 }
 
 // maybeCreateDestinationQueue creates destination queue when source has completed level 1 (srcLevel >= 2)
@@ -402,7 +360,7 @@ func (qp *QueuePublisher) maybeCreateDestinationQueue() {
 	qp.Mutex.Unlock()
 
 	// Dst level 0 requires src to have completed level 1 (N+2 rule: srcLevel >= 2)
-	if srcExists && !dstExists && srcLevel >= 2 && qp.Conductor != nil {
+	if (((srcExists && !dstExists) && srcLevel >= 2) || (!srcExists)) && qp.Conductor != nil {
 		logging.GlobalLogger.LogSystem("info", "QP", "Source completed level 1, creating destination queue", map[string]any{
 			"srcLevel":            srcLevel,
 			"dstCanStartAtLevel0": true,
@@ -418,12 +376,6 @@ func (qp *QueuePublisher) maybeCreateDestinationQueue() {
 		qp.Mutex.Unlock()
 
 		qp.setupQueueSignals("dst-traversal")
-		go qp.PublishTasks("dst-traversal")
-	} else if srcExists && !dstExists && srcLevel < 2 {
-		logging.GlobalLogger.LogSystem("debug", "QP", "Waiting for src to complete level 1 before starting dst", map[string]any{
-			"srcLevel":      srcLevel,
-			"needsSrcLevel": 2,
-		})
 	}
 }
 

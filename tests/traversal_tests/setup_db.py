@@ -191,4 +191,4 @@ conn.execute(dst_insert_query, (
 
 conn.close()
 print("✅ Tables created: source_nodes, destination_nodes, audit_log, src_nodes_errors, dst_nodes_errors")
-print(f"🎉 Test data inserted into DuckDB!")
+print("🎉 Test data inserted into DuckDB!")
