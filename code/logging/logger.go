@@ -26,6 +26,20 @@ type Logger struct {
 
 var GlobalLogger *Logger
 
+// QueueAcronyms maps queue names to logical acronyms for logging subtopic filtering.
+var QueueAcronyms = map[string]string{
+	"src-traversal": "src",
+	"dst-traversal": "dst",
+	"upload":        "upload",
+}
+
+// TableAcronyms maps table names to logical acronyms for logging subtopic filtering.
+var TableAcronyms = map[string]string{
+	"audit_log":          "logs",
+	"source_nodes":       "src",
+	"destination_nodes":  "dst",
+}
+
 func InitLogger(configPath string) {
 	ctx, cancel := context.WithCancel(context.Background())
 	logger := &Logger{
@@ -75,63 +89,41 @@ func (l *Logger) connectToUDP() {
 	l.udpConn = conn
 }
 
-func (l *Logger) LogMessage(level, message string, details map[string]any) {
-	l.logWithEntity(level, "", "", "", message, details)
-}
-
-// LogMessageWithEntity logs a message with entity information
-func (l *Logger) LogMessageWithEntity(level, entity, entityID, path, message string, details map[string]any) {
-	l.logWithEntity(level, entity, entityID, path, message, details)
-}
-
-// LogWorker logs a message from a worker
-func (l *Logger) LogWorker(level, workerID, path, message string, details map[string]any) {
-	l.logWithEntity(level, "worker", workerID, path, message, details)
-}
-
-// LogQP logs a message from QueuePublisher
-func (l *Logger) LogQP(level, queueName, path, message string, details map[string]any) {
-	l.logWithEntity(level, "QP", queueName, path, message, details)
-}
-
-// LogSystem logs a system-level message
-func (l *Logger) LogSystem(level, component, message string, details map[string]any) {
-	l.logWithEntity(level, "system", component, "", message, details)
-}
-
-// LogAPI logs a message from API interactions
-func (l *Logger) LogAPI(level, serviceID, path, message string, details map[string]any) {
-	l.logWithEntity(level, "API", serviceID, path, message, details)
-}
-
-// logWithEntity is the internal method that handles the actual logging
-func (l *Logger) logWithEntity(level, entity, entityID, path, message string, details map[string]any) {
-	if !l.shouldLog(level) {
-		return
+// Log logs a message with optional entity, entityID, and path information.
+// Pass empty strings for entity, entityID, or path if not applicable.
+func (l *Logger) Log(level, entity, entityID, message string, details map[string]any, action string, queue string) {
+	if details == nil {
+		details = make(map[string]any)
 	}
-	entry := logging.LogEntry{
+
+	e := logging.LogEntry{
 		Timestamp: time.Now(),
 		Level:     level,
 		Entity:    entity,
 		EntityID:  entityID,
-		Path:      path,
 		Message:   message,
 		Details:   details,
+		Action:    action,
+		Queue:     queue,
+	}
+
+	if !l.shouldLog(e.Level) {
+		return
 	}
 
 	// Send to UI listener (UDP)
 	if l.udpConn != nil {
 		go func() {
-			payload, _ := json.Marshal(entry)
+			payload, _ := json.Marshal(e)
 			l.udpConn.Write(payload)
 		}()
 	}
 
 	// Queue to DB
 	if l.logWQ != nil {
-		detailsJSON, _ := json.Marshal(details)
-		params := []any{uuid.New().String(), entry.Timestamp, level, entry.Entity, entry.EntityID, entry.Path, string(detailsJSON), message}
-		query := `INSERT INTO audit_log (id, timestamp, level, entity, entity_id, path, details, message) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+		detailsJSON, _ := json.Marshal(e.Details)
+		params := []any{uuid.New().String(), e.Timestamp, e.Level, e.Entity, e.EntityID, string(detailsJSON), e.Message, e.Action, e.Queue}
+		query := `INSERT INTO audit_log (id, timestamp, level, entity, entity_id, details, message, action, queue) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
 		l.enqueueLog(query, params)
 	}
 }

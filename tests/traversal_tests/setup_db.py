@@ -120,7 +120,7 @@ CREATE TABLE IF NOT EXISTS destination_nodes (
 """
 conn.execute(destination_nodes_schema)
 
-# Create audit_log table (same as before)
+# Create audit_log table (updated schema)
 audit_log_schema = """
 CREATE TABLE IF NOT EXISTS audit_log (
     id VARCHAR PRIMARY KEY, 
@@ -134,7 +134,12 @@ CREATE TABLE IF NOT EXISTS audit_log (
     path VARCHAR DEFAULT NULL,
     -- Optional path for task-related logs
     details VARCHAR DEFAULT NULL,
-    message VARCHAR NOT NULL
+    message VARCHAR NOT NULL,
+    action VARCHAR DEFAULT NULL,
+    -- Action like 'CREATE_WORKER' or 'INSERT_TASKS' capital snake case style 
+    topic VARCHAR DEFAULT NULL,
+    -- Topic like 'Traversal' and subtopic like 'src'
+    subtopic VARCHAR DEFAULT NULL
 );
 """
 conn.execute(audit_log_schema)

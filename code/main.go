@@ -53,10 +53,10 @@ func main() {
 	time.Sleep(3 * time.Second)
 
 	// 🔊 DEBUG: Send a test log to verify logger is working
-	logging.GlobalLogger.LogMessage("info", "Test log: Logger is alive and ready 🚦", map[string]any{
+	logging.GlobalLogger.Log("info", "System", "Logger", "Test log: Logger is alive and ready 🚦", map[string]any{
 		"origin": "main.go",
 		"status": "init-complete",
-	})
+	}, "SEND_LOG", "None")
 
 	// Start the Conductor — now self-contained (handles its own DB + logger)
 	dbPath := filepath.Join(cwd, "tests", "traversal_tests", "test_traversal.db")
