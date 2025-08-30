@@ -50,13 +50,15 @@ type TaskQueue struct {
 // NewTaskQueue initializes a new queue for traversal or upload.
 func NewTaskQueue(queueType QueueType, phase int, srcOrDst string, paginationSize int, runningLowThreshold int) *TaskQueue {
 	queueID := fmt.Sprintf("%s-%s", srcOrDst, queueType)
-	logging.GlobalLogger.LogMessage("info", "Creating new task queue", map[string]any{
+	logging.GlobalLogger.Log(
+		"info", "System", "Queue", "Creating new task queue", map[string]any{
 		"queueID":        queueID,
 		"type":           queueType,
 		"phase":          phase,
 		"srcOrDst":       srcOrDst,
 		"paginationSize": paginationSize,
-	})
+	}, "CREATE_NEW_TASK_QUEUE", "All",
+	)
 
 	q := &TaskQueue{
 		QueueID:             queueID,
@@ -78,9 +80,11 @@ func NewTaskQueue(queueType QueueType, phase int, srcOrDst string, paginationSiz
 	}
 	q.cond = sync.NewCond(&q.mu)
 
-	logging.GlobalLogger.LogMessage("info", "Task queue created successfully", map[string]any{
-		"queueID": queueID,
-	})
+	logging.GlobalLogger.Log(
+		"info", "System", "Queue", "Task queue created successfully", map[string]any{
+			"queueID": queueID,
+		}, "TASK_QUEUE_CREATED_SUCCESSFULLY", srcOrDst,
+	)
 	return q
 }
 
@@ -101,18 +105,24 @@ func (q *TaskQueue) WaitIfPaused() {
 
 	if q.State == QueuePaused {
 		q.Unlock()
-		logging.GlobalLogger.LogMessage("info", "Queue is paused, waiting for resume", map[string]any{
-			"queueID": q.QueueID,
-		})
+		logging.GlobalLogger.Log(
+			"info", "System", "Queue", "Queue is paused, waiting for resume", map[string]any{
+				"queueID": q.QueueID,
+			}, "QUEUE_PAUSED_WAITING_FOR_RESUME", q.SrcOrDst,
+		)
 		q.cond.Wait()
-		logging.GlobalLogger.LogMessage("info", "Queue resumed", map[string]any{
-			"queueID": q.QueueID,
-		})
+		logging.GlobalLogger.Log(
+			"info", "System", "Queue", "Queue resumed", map[string]any{
+				"queueID": q.QueueID,
+			}, "QUEUE_RESUMED", q.SrcOrDst,
+		)
 	} else {
 		q.Unlock()
-		logging.GlobalLogger.LogMessage("info", "Queue is running, no wait needed", map[string]any{
-			"queueID": q.QueueID,
-		})
+		logging.GlobalLogger.Log(
+			"info", "System", "Queue", "Queue is running, no wait needed", map[string]any{
+				"queueID": q.QueueID,
+			}, "QUEUE_RUNNING_NO_WAIT_NEEDED", q.SrcOrDst,
+		)
 	}
 }
 
@@ -139,9 +149,11 @@ func (q *TaskQueue) Pause() {
 	q.Lock()
 	defer q.Unlock()
 
-	logging.GlobalLogger.LogMessage("info", "Pausing queue", map[string]any{
-		"queueID": q.QueueID,
-	})
+	logging.GlobalLogger.Log(
+		"info", "System", "Queue", "Pausing queue", map[string]any{
+			"queueID": q.QueueID,
+		}, "PAUSING_QUEUE", q.SrcOrDst,
+	)
 	q.State = QueuePaused
 }
 
@@ -150,41 +162,31 @@ func (q *TaskQueue) Resume() {
 	q.Lock()
 	defer q.Unlock()
 
-	logging.GlobalLogger.LogMessage("info", "Resuming queue", map[string]any{
-		"queueID": q.QueueID,
-	})
+	logging.GlobalLogger.Log(
+		"info", "System", "Queue", "Resuming queue", map[string]any{
+			"queueID": q.QueueID,
+		}, "RESUMING_QUEUE", q.SrcOrDst,
+	)
 	q.State = QueueRunning
 	q.cond.Broadcast() // Wake up all workers assigned to this queue
 }
 
 // AddTask adds a task to the queue.
 func (q *TaskQueue) AddTask(task Task) {
-
-	logging.GlobalLogger.LogMessage("info", "Adding task to queue", map[string]any{
-		"queueID": q.QueueID,
-		"taskID":  task.GetID(),
-	})
 	q.Lock()
 	q.tasks = append(q.tasks, task)
 	q.Unlock()
 }
 
 func (q *TaskQueue) AddTasks(tasks []Task) {
-	logging.GlobalLogger.LogMessage("info", "Adding multiple tasks to queue", map[string]any{
-		"queueID":   q.QueueID,
-		"taskCount": len(tasks),
-	})
-
-	logging.GlobalLogger.LogMessage("debug", "🔒 LOCK for: add new tasks to queue", map[string]any{
-		"queueID": q.QueueID,
-		"adding":  len(tasks),
-	})
+	logging.GlobalLogger.Log(
+		"info", "System", "Queue", "Adding multiple tasks to queue", map[string]any{
+			"queueID":   q.QueueID,
+			"taskCount": len(tasks),
+		}, "ADDING_MULTIPLE_TASKS_TO_QUEUE", q.SrcOrDst,
+	)
 	q.Lock()
 	q.tasks = append(q.tasks, tasks...)
-	logging.GlobalLogger.LogMessage("debug", "🔓 UNLOCK: done adding tasks", map[string]any{
-		"queueID":  q.QueueID,
-		"newTotal": len(q.tasks),
-	})
 	q.Unlock()
 
 	// ✅ Signal workers via Signal Router instead of condition variables
@@ -194,11 +196,13 @@ func (q *TaskQueue) AddTasks(tasks []Task) {
 		Payload: len(q.tasks),
 	})
 
-	logging.GlobalLogger.LogMessage("debug", "📡 SIGNAL: published task notification", map[string]any{
-		"queueID":   q.QueueID,
-		"topic":     taskTopic,
-		"taskCount": len(q.tasks),
-	})
+	logging.GlobalLogger.Log(
+		"debug", "System", "Queue", "📡 SIGNAL: published task notification", map[string]any{
+			"queueID":   q.QueueID,
+			"topic":     taskTopic,
+			"taskCount": len(q.tasks),
+		}, "PUBLISHED_TASK_NOTIFICATION", q.SrcOrDst,
+	)
 }
 
 // ResetRunningLowTrigger is called by QP when new tasks are added.
@@ -209,15 +213,7 @@ func (q *TaskQueue) ResetRunningLowTrigger() {
 
 // PopTask retrieves the next available task, pausing workers if needed.
 func (q *TaskQueue) PopTask() Task {
-	logging.GlobalLogger.LogMessage("debug", "🔒 LOCK for: find and remove next task", map[string]any{
-		"queueID": q.QueueID,
-	})
 	q.Lock()
-	defer func() {
-		logging.GlobalLogger.LogMessage("debug", "🔓 UNLOCK: done removing task", map[string]any{
-			"queueID": q.QueueID,
-		})
-	}()
 	defer q.Unlock()
 
 	// Running‑low trigger removed - QP now handles task publishing proactively
@@ -233,11 +229,13 @@ func (q *TaskQueue) PopTask() Task {
 			// Add to in-progress list
 			q.inProgressTasks = append(q.inProgressTasks, task)
 
-			logging.GlobalLogger.LogMessage("info", "Task popped and added to in-progress", map[string]any{
-				"queueID": q.QueueID,
-				"taskID":  task.GetID(),
-				"path":    task.GetPath(),
-			})
+			logging.GlobalLogger.Log(
+				"info", "System", "Queue", "Task popped and added to in-progress", map[string]any{
+					"queueID": q.QueueID,
+					"taskID":  task.GetID(),
+					"path":    task.GetPath(),
+				}, "TASK_POPPED_AND_ADDED_TO_IN_PROGRESS", q.SrcOrDst,
+			)
 
 			return task
 		}
@@ -250,10 +248,6 @@ func (q *TaskQueue) UnlockTask(taskID string) {
 	q.Lock()
 	defer q.Unlock()
 
-	logging.GlobalLogger.LogMessage("info", "Unlocking task", map[string]any{
-		"queueID": q.QueueID,
-		"taskID":  taskID,
-	})
 	for _, task := range q.tasks {
 		if task.GetID() == taskID {
 			task.SetLocked(false)
@@ -264,22 +258,16 @@ func (q *TaskQueue) UnlockTask(taskID string) {
 
 // QueueSize returns the number of tasks in the queue.
 func (q *TaskQueue) QueueSize() int {
-	logging.GlobalLogger.LogMessage("debug", "🔒 LOCK for: read task count", map[string]any{
-		"queueID": q.QueueID,
-	})
 	q.Lock()
-	defer func() {
-		logging.GlobalLogger.LogMessage("debug", "🔓 UNLOCK: done reading task count", map[string]any{
-			"queueID": q.QueueID,
-		})
-	}()
 	defer q.Unlock()
 
 	size := len(q.tasks)
-	logging.GlobalLogger.LogMessage("info", "Queue size check", map[string]any{
-		"queueID": q.QueueID,
-		"size":    size,
-	})
+	logging.GlobalLogger.Log(
+		"info", "System", "Queue", "Queue size check", map[string]any{
+			"queueID": q.QueueID,
+			"size":    size,
+		}, "QUEUE_SIZE_CHECK", q.SrcOrDst,
+	)
 	return size
 }
 
@@ -288,11 +276,13 @@ func (q *TaskQueue) SetPaginationSize(newSize int) {
 	q.Lock()
 	defer q.Unlock()
 
-	logging.GlobalLogger.LogMessage("info", "Updating pagination size", map[string]any{
+	logging.GlobalLogger.Log(
+		"info", "System", "Queue", "Updating pagination size", map[string]any{
 		"queueID": q.QueueID,
 		"oldSize": q.PaginationSize,
 		"newSize": newSize,
-	})
+	}, "UPDATING_PAGINATION_SIZE", q.SrcOrDst,
+	)
 	q.PaginationSize = newSize
 	q.mu.Unlock()
 
@@ -314,10 +304,12 @@ func (q *TaskQueue) SetGlobalSetting(key string, value any) {
 	q.Lock()
 	defer q.Unlock()
 
-	logging.GlobalLogger.LogMessage("info", "Setting global setting", map[string]any{
-		"queueID": q.QueueID,
-		"key":     key,
-	})
+	logging.GlobalLogger.Log(
+		"info", "System", "Queue", "Setting global setting", map[string]any{
+			"queueID": q.QueueID,
+			"key":     key,
+		}, "SETTING_GLOBAL_SETTING", q.SrcOrDst,
+	)
 	q.GlobalSettings[key] = value
 }
 
@@ -327,11 +319,6 @@ func (q *TaskQueue) GetGlobalSetting(key string) (any, bool) {
 	defer q.Unlock()
 
 	value, exists := q.GlobalSettings[key]
-	logging.GlobalLogger.LogMessage("info", "Getting global setting", map[string]any{
-		"queueID": q.QueueID,
-		"key":     key,
-		"exists":  exists,
-	})
 	return value, exists
 }
 
@@ -348,29 +335,14 @@ func (q *TaskQueue) AreAllWorkersIdle() bool {
 		}
 	}
 
-	logging.GlobalLogger.LogMessage("info", "Checking worker idle status", map[string]any{
+	logging.GlobalLogger.Log(
+		"info", "System", "Queue", "Checking worker idle status", map[string]any{
 		"queueID":     q.QueueID,
 		"allIdle":     allIdle,
 		"workerCount": len(q.workers),
-	})
+	}, "CHECKING_IDLE_WORKERS", q.SrcOrDst,
+	)
 	return allIdle
-}
-
-// NotifyWorkers sets all idle workers to active.
-func (q *TaskQueue) NotifyWorkers() {
-	// NOTE: This method is now a no-op since workers use Signal Router for task notifications
-	// Tasks are published via "tasks_published:{queueID}" signals in AddTasks() method
-	logging.GlobalLogger.LogMessage("debug", "⚠️ NotifyWorkers called but is deprecated - using Signal Router instead", map[string]any{
-		"queueID": q.QueueID,
-	})
-}
-
-func (q *TaskQueue) WaitForWork() {
-	// NOTE: This method is now a no-op since workers use Signal Router for task notifications
-	// Workers subscribe to "tasks_published:{queueID}" signals instead of condition variables
-	logging.GlobalLogger.LogMessage("debug", "⚠️ WaitForWork called but is deprecated - workers should use Signal Router", map[string]any{
-		"queueID": q.QueueID,
-	})
 }
 
 // TrackedPaths returns a map of paths currently in the queue and optionally in-progress
@@ -396,13 +368,15 @@ func (q *TaskQueue) TrackedPaths(includeInProgress bool) map[string]bool {
 		}
 	}
 
-	logging.GlobalLogger.LogMessage("info", "Tracked paths retrieved", map[string]any{
+	logging.GlobalLogger.Log(
+		"info", "System", "Queue", "Tracked paths retrieved", map[string]any{
 		"queueID":           q.QueueID,
 		"includeInProgress": includeInProgress,
 		"trackedCount":      len(tracked),
 		"queuedCount":       len(q.tasks),
 		"inProgressCount":   len(q.inProgressTasks),
-	})
+	}, "TRACKED_PATHS_RETRIEVED", q.SrcOrDst,
+	)
 
 	return tracked
 }
@@ -414,11 +388,13 @@ func (q *TaskQueue) AddInProgressTask(task Task) {
 
 	q.inProgressTasks = append(q.inProgressTasks, task)
 
-	logging.GlobalLogger.LogMessage("info", "Task added to in-progress", map[string]any{
+	logging.GlobalLogger.Log(
+		"info", "System", "Queue", "Task added to in-progress", map[string]any{
 		"queueID": q.QueueID,
 		"taskID":  task.GetID(),
 		"path":    task.GetPath(),
-	})
+	}, "TASK_ADDED_TO_IN_PROGRESS", q.SrcOrDst,
+	)
 }
 
 // RemoveInProgressTask removes a task from the in-progress list
@@ -431,19 +407,23 @@ func (q *TaskQueue) RemoveInProgressTask(taskID string) {
 			// Remove from slice
 			q.inProgressTasks = append(q.inProgressTasks[:i], q.inProgressTasks[i+1:]...)
 
-			logging.GlobalLogger.LogMessage("info", "Task removed from in-progress", map[string]any{
+			logging.GlobalLogger.Log(
+				"info", "System", "Queue", "Task removed from in-progress", map[string]any{
 				"queueID": q.QueueID,
 				"taskID":  taskID,
 				"path":    task.GetPath(),
-			})
+			}, "TASK_REMOVED_FROM_IN_PROGRESS", q.SrcOrDst,
+			)
 			return
 		}
 	}
 
-	logging.GlobalLogger.LogMessage("warning", "Task not found in in-progress list", map[string]any{
-		"queueID": q.QueueID,
-		"taskID":  taskID,
-	})
+	logging.GlobalLogger.Log(
+		"warning", "System", "Queue", "Task not found in in-progress list", map[string]any{
+			"queueID": q.QueueID,
+			"taskID":  taskID,
+		}, "TASK_NOT_FOUND_IN_IN_PROGRESS_LIST", q.SrcOrDst,
+	)
 }
 
 // GetAllTaskPaths returns all paths from both queued and in-progress tasks

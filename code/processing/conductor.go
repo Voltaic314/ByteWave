@@ -24,7 +24,7 @@ func NewConductor(dbPath string, retryThreshold, batchSize int) *Conductor {
 	if err != nil {
 		logging.GlobalLogger.Log("error", "System", "Conductor", "Failed to initialize DB", map[string]any{
 			"error": err.Error(),
-		}, "CREATE_DB", "None")
+		}, "CREATE_DB", "All")
 		return nil
 	}
 	return &Conductor{
@@ -282,7 +282,4 @@ func (c *Conductor) TeardownQueue(queueName string) {
 	// 🔓 Unlocking...
 	c.QP.Mutex.Unlock()
 
-	// logging.GlobalLogger.LogMessage("info", "Queue teardown complete", map[string]any{
-	// 	"queueID": queueName,
-	// })
 }

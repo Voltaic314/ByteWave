@@ -90,17 +90,19 @@ func NewSrcTraversalTask(id string, folder *filesystem.Folder, parentTaskID *str
 
 // NewUploadTask initializes a new upload task (file or folder).
 func NewUploadTask(id string, file *filesystem.File, folder *filesystem.Folder, parentTaskID *string) (*UploadTask, error) {
-	logging.GlobalLogger.LogMessage("info", "Creating new upload task", map[string]any{
+	logging.GlobalLogger.Log("info", "System", "Task", "Creating new upload task", map[string]any{
 		"taskID":    id,
 		"hasFile":   file != nil,
 		"hasFolder": folder != nil,
 		"hasParent": parentTaskID != nil,
-	})
+	}, "CREATING_NEW_UPLOAD_TASK", "upload",
+	)
 
 	if file == nil && folder == nil {
-		logging.GlobalLogger.LogMessage("error", "Cannot create upload task without file or folder", map[string]any{
+		logging.GlobalLogger.Log("error", "System", "Task", "Cannot create upload task without file or folder", map[string]any{
 			"taskID": id,
-		})
+		}, "CREATING_NEW_UPLOAD_TASK", "upload",
+		)
 		return nil, fmt.Errorf("cannot create upload task without file or folder")
 	}
 
@@ -115,10 +117,11 @@ func NewUploadTask(id string, file *filesystem.File, folder *filesystem.Folder, 
 		},
 	}
 
-	logging.GlobalLogger.LogMessage("info", "Upload task created successfully", map[string]any{
+	logging.GlobalLogger.Log("info", "System", "Task", "Upload task created successfully", map[string]any{
 		"taskID": id,
 		"path":   task.GetPath(),
-	})
+	}, "UPLOAD_TASK_CREATED_SUCCESSFULLY", "upload",
+	)
 	return task, nil
 }
 

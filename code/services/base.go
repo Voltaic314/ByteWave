@@ -58,10 +58,11 @@ func NewBaseService(rulesPath string) (*BaseService, error) {
 
 	err := base.LoadMigrationRules()
 	if err != nil {
-		logging.GlobalLogger.LogMessage("error", "Failed to load migration rules", map[string]any{
+		logging.GlobalLogger.Log("error", "System", "BaseService", "Failed to load migration rules", map[string]any{
 			"file": rulesPath,
 			"err":  err.Error(),
-		})
+		}, "FAILED_TO_LOAD_MIGRATION_RULES", "base",
+		)
 		return nil, err
 	}
 

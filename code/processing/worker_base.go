@@ -29,9 +29,10 @@ type WorkerBase struct {
 
 // NewWorkerBase initializes a new WorkerBase with a unique ID.
 func NewWorkerBase(queue *TaskQueue, queueType string) *WorkerBase {
-	logging.GlobalLogger.LogSystem("info", "worker", "Creating new worker", map[string]any{
+	logging.GlobalLogger.Log("info", "System", "Worker", "Creating new worker", map[string]any{
 		"queueType": queueType,
-	})
+	}, "CREATING_NEW_WORKER", queueType,
+	)
 
 	workerBase := &WorkerBase{
 		Queue:          queue,
@@ -49,10 +50,11 @@ func NewWorkerBase(queue *TaskQueue, queueType string) *WorkerBase {
 		// Wake up the worker when tasks are published
 		select {
 		case workerBase.taskWakeupChan <- struct{}{}:
-			logging.GlobalLogger.LogWorker("debug", workerBase.ID, "", "Worker received task signal via On handler", map[string]any{
+			logging.GlobalLogger.Log("debug", "System", "Worker", "Worker received task signal via On handler", map[string]any{
 				"topic":     sig.Topic,
 				"taskCount": sig.Payload,
-			})
+			}, "WORKER_RECEIVED_TASK_SIGNAL_VIA_ON_HANDLER", workerBase.QueueType,
+			)
 		default:
 			// Channel already has a wake-up signal, no need to block
 		}
@@ -61,32 +63,33 @@ func NewWorkerBase(queue *TaskQueue, queueType string) *WorkerBase {
 	// Subscribe to QP ready signals to re-check queue status after QP startup
 	qpReadyTopic := "qp_ready:" + queue.QueueID
 	signals.GlobalSR.On(qpReadyTopic, func(sig signals.Signal) {
-		logging.GlobalLogger.LogWorker("info", workerBase.ID, "", "Worker received QP ready signal - re-checking queue status", map[string]any{
+		logging.GlobalLogger.Log("info", "System", "Worker", "Worker received QP ready signal - re-checking queue status", map[string]any{
 			"topic": sig.Topic,
-		})
+			"queueType": workerBase.QueueType,
+		}, "WORKER_RECEIVED_SIGNAL", workerBase.QueueType,
+		)
 		// Re-check if we need to send a running low signal now that QP is listening
 		workerBase.sendInitialRunningLowSignalIfNeeded()
 	})
 
-	logging.GlobalLogger.LogWorker("info", workerBase.ID, "", "Worker subscribed to task and QP ready signals", map[string]any{
+	logging.GlobalLogger.Log("info", "System", "Worker", "Worker subscribed to task and QP ready signals", map[string]any{
 		"taskTopic":    taskTopic,
 		"qpReadyTopic": qpReadyTopic,
-	})
+		"queueType":    workerBase.QueueType,
+	}, "WORKER_SUBSCRIBED_TO_SIGNAL", workerBase.QueueType,
+	)
 
-	logging.GlobalLogger.LogWorker("info", workerBase.ID, "", "Worker base created", map[string]any{
+	logging.GlobalLogger.Log("info", "System", "Worker", "Worker base created", map[string]any{
 		"queueType": queueType,
 		"state":     workerBase.State,
-	})
+	}, "WORKER_BASE_CREATED", workerBase.QueueType,
+	)
 	return workerBase
 }
 
 // GenerateID generates a unique identifier using UUID.
 func (wb *WorkerBase) GenerateID() string {
-	logging.GlobalLogger.LogSystem("info", "worker", "Generating worker ID using UUID", nil)
-
 	id := uuid.New().String()
-
-	logging.GlobalLogger.LogWorker("info", id, "", "Worker ID generated", nil)
 	return id
 }
 
@@ -103,12 +106,13 @@ func (wb *WorkerBase) checkAndSignalRunningLowWithSize(queueSize int) {
 
 		wb.runningLowSent = true // Prevent spam until reset
 
-		logging.GlobalLogger.LogWorker("info", wb.ID, "", "Worker sent running low signal to QP", map[string]any{
+		logging.GlobalLogger.Log("info", "System", "Worker", "Worker sent running low signal to QP", map[string]any{
 			"queueID":   wb.Queue.QueueID,
 			"queueSize": queueSize,
 			"threshold": wb.Queue.RunningLowThreshold,
 			"topic":     runningLowTopic,
-		})
+		}, "WORKER_SENT_SIGNAL", wb.QueueType,
+		)
 	}
 }
 
@@ -127,12 +131,13 @@ func (wb *WorkerBase) sendInitialRunningLowSignalIfNeeded() {
 
 		wb.runningLowSent = true // Set flag to prevent immediate re-sending
 
-		logging.GlobalLogger.LogWorker("info", wb.ID, "", "Worker sent initial running low signal (post-startup)", map[string]any{
+		logging.GlobalLogger.Log("info", "System", "Worker", "Worker sent initial running low signal (post-startup)", map[string]any{
 			"queueID":   wb.Queue.QueueID,
 			"queueSize": queueSize,
 			"threshold": wb.Queue.RunningLowThreshold,
 			"topic":     runningLowTopic,
-		})
+		}, "WORKER_SENT_SIGNAL", wb.QueueType,
+		)
 	}
 }
 
@@ -140,9 +145,11 @@ func (wb *WorkerBase) sendInitialRunningLowSignalIfNeeded() {
 func (wb *WorkerBase) resetRunningLowFlag() {
 	if wb.runningLowSent {
 		wb.runningLowSent = false
-		logging.GlobalLogger.LogWorker("debug", wb.ID, "", "Worker reset running low flag", map[string]any{
+		logging.GlobalLogger.Log("debug", "System", "Worker", "Worker reset running low flag", map[string]any{
 			"queueID": wb.Queue.QueueID,
-		})
+			"flag":    "runningLowSent",
+		}, "WORKER_RESET_FLAG", wb.QueueType,
+		)
 	}
 }
 
@@ -156,16 +163,18 @@ func (wb *WorkerBase) Run(process func(Task) error) {
 		// })
 
 		if wb.Queue.State != QueueRunning {
-			logging.GlobalLogger.LogWorker("info", wb.ID, "", "Queue is no longer running, stopping worker", nil)
+			logging.GlobalLogger.Log("info", "System", "Worker", "Queue is no longer running, stopping worker", nil, "WORKER_STOPPING", wb.QueueType,
+			)
 			return
 		}
 
 		wb.Queue.WaitIfPaused()
 
 		// ✅ Check queue size once and use cached value for all checks
-		logging.GlobalLogger.LogWorker("debug", wb.ID, "", "WORKER checking queue size", map[string]any{
+		logging.GlobalLogger.Log("debug", "System", "Worker", "WORKER checking queue size", map[string]any{
 			"queueID": wb.Queue.QueueID,
-		})
+		}, "QUEUE_SIZE_CHECK", wb.QueueType,
+		)
 
 		queueSize := wb.Queue.QueueSize()
 
@@ -175,29 +184,29 @@ func (wb *WorkerBase) Run(process func(Task) error) {
 		if queueSize == 0 {
 			wb.State = WorkerIdle
 			// Wait for task publication signal via Signal Router On handler
-			logging.GlobalLogger.LogWorker("debug", wb.ID, "", "WORKER waiting for task signal", map[string]any{
+			logging.GlobalLogger.Log("debug", "System", "Worker", "WORKER waiting for task signal", map[string]any{
 				"queueID": wb.Queue.QueueID,
-			})
+			}, "WORKER_WAITING_FOR_TASK", wb.QueueType,
+			)
 
 			select {
 			case <-wb.taskWakeupChan:
-				logging.GlobalLogger.LogWorker("debug", wb.ID, "", "WORKER received task wake-up signal", map[string]any{
+				logging.GlobalLogger.Log("debug", "System", "Worker", "WORKER received task wake-up signal", map[string]any{
 					"queueID": wb.Queue.QueueID,
-				})
+				}, "WORKER_RECEIVED_TASK_WAKE_UP_SIGNAL", wb.QueueType,
+				)
 				// Reset running low flag since new tasks are available
 				wb.resetRunningLowFlag()
 				continue
 			case <-wb.Queue.StopChan:
-				logging.GlobalLogger.LogWorker("info", wb.ID, "", "WORKER received stop signal", map[string]any{
+				logging.GlobalLogger.Log("info", "System", "Worker", "WORKER received stop signal", map[string]any{
 					"queueID": wb.Queue.QueueID,
-				})
+				}, "WORKER_RECEIVED_STOP_SIGNAL", wb.QueueType,
+				)
 				return
 			}
 		}
 
-		logging.GlobalLogger.LogWorker("debug", wb.ID, "", "WORKER calling PopTask()", map[string]any{
-			"queueID": wb.Queue.QueueID,
-		})
 		task := wb.Queue.PopTask()
 
 		if task == nil {
@@ -207,42 +216,48 @@ func (wb *WorkerBase) Run(process func(Task) error) {
 			wb.checkAndSignalRunningLowWithSize(0)
 
 			// Wait for task publication signal via Signal Router On handler
-			logging.GlobalLogger.LogWorker("debug", wb.ID, "", "WORKER waiting for task signal (PopTask returned nil)", map[string]any{
+			logging.GlobalLogger.Log("debug", "System", "Worker", "WORKER waiting for task signal (PopTask returned nil)", map[string]any{
 				"queueID": wb.Queue.QueueID,
-			})
+			}, "WORKER_WAITING_FOR_TASK_SIGNAL", wb.QueueType,
+			)
 
 			select {
 			case <-wb.taskWakeupChan:
-				logging.GlobalLogger.LogWorker("debug", wb.ID, "", "WORKER received task wake-up signal (after PopTask nil)", map[string]any{
+				logging.GlobalLogger.Log("debug", "System", "Worker", "WORKER received task wake-up signal (after PopTask nil)", map[string]any{
 					"queueID": wb.Queue.QueueID,
-				})
+				}, "WORKER_RECEIVED_TASK_WAKE_UP_SIGNAL", wb.QueueType,
+				)
 				// Reset running low flag since new tasks are available
 				wb.resetRunningLowFlag()
 				continue
 			case <-wb.Queue.StopChan:
-				logging.GlobalLogger.LogWorker("info", wb.ID, "", "WORKER received stop signal (after PopTask nil)", map[string]any{
+				logging.GlobalLogger.Log("info", "System", "Worker", "WORKER received stop signal (after PopTask nil)", map[string]any{
 					"queueID": wb.Queue.QueueID,
-				})
+				}, "WORKER_RECEIVED_STOP_SIGNAL", wb.QueueType,
+				)
 				return
 			}
 		}
 
-		logging.GlobalLogger.LogWorker("info", wb.ID, task.GetPath(), "Worker acquired task", map[string]any{
+		logging.GlobalLogger.Log("info", "System", "Worker", "Worker acquired task", map[string]any{
 			"taskID": task.GetID(),
-		})
+		}, "WORKER_ACQUIRED_TASK", wb.QueueType,
+		)
 
 		wb.State = WorkerActive
 		wb.TaskReady = false
 
 		if err := process(task); err != nil {
-			logging.GlobalLogger.LogWorker("error", wb.ID, task.GetPath(), "Worker task failed", map[string]any{
+			logging.GlobalLogger.Log("error", "System", "Worker", "Worker task failed", map[string]any{
 				"taskID": task.GetID(),
 				"error":  err.Error(),
-			})
+			}, "WORKER_TASK_FAILED", wb.QueueType,
+			)
 		} else {
-			logging.GlobalLogger.LogWorker("info", wb.ID, task.GetPath(), "Worker completed task", map[string]any{
+			logging.GlobalLogger.Log("info", "System", "Worker", "Worker completed task", map[string]any{
 				"taskID": task.GetID(),
-			})
+			}, "WORKER_TASK_COMPLETED", wb.QueueType,
+			)
 		}
 
 		// Remove task from in-progress list (whether successful or failed)
