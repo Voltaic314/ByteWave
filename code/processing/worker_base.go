@@ -60,22 +60,9 @@ func NewWorkerBase(queue *TaskQueue, queueType string) *WorkerBase {
 		}
 	})
 
-	// Subscribe to QP ready signals to re-check queue status after QP startup
-	qpReadyTopic := "qp_ready:" + queue.QueueID
-	signals.GlobalSR.On(qpReadyTopic, func(sig signals.Signal) {
-		logging.GlobalLogger.Log("info", "System", "Worker", "Worker received QP ready signal - re-checking queue status", map[string]any{
-			"topic": sig.Topic,
-			"queueType": workerBase.QueueType,
-		}, "WORKER_RECEIVED_SIGNAL", workerBase.QueueType,
-		)
-		// Re-check if we need to send a running low signal now that QP is listening
-		workerBase.sendInitialRunningLowSignalIfNeeded()
-	})
-
-	logging.GlobalLogger.Log("info", "System", "Worker", "Worker subscribed to task and QP ready signals", map[string]any{
-		"taskTopic":    taskTopic,
-		"qpReadyTopic": qpReadyTopic,
-		"queueType":    workerBase.QueueType,
+	logging.GlobalLogger.Log("info", "System", "Worker", "Worker subscribed to task signals", map[string]any{
+		"taskTopic": taskTopic,
+		"queueType": workerBase.QueueType,
 	}, "WORKER_SUBSCRIBED_TO_SIGNAL", workerBase.QueueType,
 	)
 
@@ -91,54 +78,6 @@ func NewWorkerBase(queue *TaskQueue, queueType string) *WorkerBase {
 func (wb *WorkerBase) GenerateID() string {
 	id := uuid.New().String()
 	return id
-}
-
-// checkAndSignalRunningLowWithSize uses a cached queue size to avoid multiple mutex locks
-func (wb *WorkerBase) checkAndSignalRunningLowWithSize(queueSize int) {
-	// Send signal if queue is below threshold and we haven't sent one recently
-	if queueSize <= wb.Queue.RunningLowThreshold && !wb.runningLowSent {
-		runningLowTopic := "tasks_running_low:" + wb.Queue.QueueID
-
-		signals.GlobalSR.Publish(signals.Signal{
-			Topic:   runningLowTopic,
-			Payload: queueSize,
-		})
-
-		wb.runningLowSent = true // Prevent spam until reset
-
-		logging.GlobalLogger.Log("info", "System", "Worker", "Worker sent running low signal to QP", map[string]any{
-			"queueID":   wb.Queue.QueueID,
-			"queueSize": queueSize,
-			"threshold": wb.Queue.RunningLowThreshold,
-			"topic":     runningLowTopic,
-		}, "WORKER_SENT_SIGNAL", wb.QueueType,
-		)
-	}
-}
-
-// sendInitialRunningLowSignalIfNeeded sends a running low signal after QP is ready (called after startup delay)
-func (wb *WorkerBase) sendInitialRunningLowSignalIfNeeded() {
-	queueSize := wb.Queue.QueueSize()
-
-	// If queue is still below threshold after QP startup, send signal regardless of flag
-	if queueSize <= wb.Queue.RunningLowThreshold {
-		runningLowTopic := "tasks_running_low:" + wb.Queue.QueueID
-
-		signals.GlobalSR.Publish(signals.Signal{
-			Topic:   runningLowTopic,
-			Payload: queueSize,
-		})
-
-		wb.runningLowSent = true // Set flag to prevent immediate re-sending
-
-		logging.GlobalLogger.Log("info", "System", "Worker", "Worker sent initial running low signal (post-startup)", map[string]any{
-			"queueID":   wb.Queue.QueueID,
-			"queueSize": queueSize,
-			"threshold": wb.Queue.RunningLowThreshold,
-			"topic":     runningLowTopic,
-		}, "WORKER_SENT_SIGNAL", wb.QueueType,
-		)
-	}
 }
 
 // resetRunningLowFlag resets the flag when new tasks are available
@@ -178,9 +117,6 @@ func (wb *WorkerBase) Run(process func(Task) error) {
 
 		queueSize := wb.Queue.QueueSize()
 
-		// Signal QP if queue is running low (using cached size)
-		wb.checkAndSignalRunningLowWithSize(queueSize)
-
 		if queueSize == 0 {
 			wb.State = WorkerIdle
 			// Wait for task publication signal via Signal Router On handler
@@ -212,8 +148,6 @@ func (wb *WorkerBase) Run(process func(Task) error) {
 		if task == nil {
 			wb.State = WorkerIdle
 			wb.TaskReady = true
-			// Signal QP if queue is running low (PopTask returned nil, queue size is 0)
-			wb.checkAndSignalRunningLowWithSize(0)
 
 			// Wait for task publication signal via Signal Router On handler
 			logging.GlobalLogger.Log("debug", "System", "Worker", "WORKER waiting for task signal (PopTask returned nil)", map[string]any{

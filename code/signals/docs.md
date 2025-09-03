@@ -4,7 +4,7 @@
 
 The **Signal Router (SR)** in ByteWave is a centralized event signaling system designed to decouple communication between key components such as the Conductor, QueuePublisher, TaskQueues, and Workers.
 
-It replaces hardcoded channel maps and point-to-point communication with a flexible, topic-based fan-out architecture that includes sophisticated acknowledgment handling.
+It replaces hardcoded channel maps and point-to-point communication with a flexible, topic-based fan-out architecture.
 
 Inspired by event buses and pub/sub patterns, the Signal Router allows for easier scaling, better maintainability, and cleaner control flow across ByteWave's coordination layers.
 
@@ -13,7 +13,6 @@ Inspired by event buses and pub/sub patterns, the Signal Router allows for easie
 * **Topic-based routing**: Components can publish to and subscribe from named topics (e.g., `running_low:src`, `idle:dst`, `traversal:complete:phase2`).
 * **Fan-out**: When a signal is published to a topic, all subscribers receive it.
 * **Centralized control**: All cross-component signals are funneled through a single, importable global router (`signals.GlobalSR`).
-* **Acknowledgment management**: Supports configurable acknowledgment modes for reliable signal delivery.
 
 ## Example Use Cases
 
@@ -50,40 +49,31 @@ Control flow and event-driven behaviors are now centralized and observable throu
 
 No more maintaining multiple `chan int` maps or listener-specific logic in every struct.
 
-### ✅ **Reliable Acknowledgment**
-
-Built-in acknowledgment system prevents signal loss and enables coordinated multi-party communication.
-
 ---
 
 ## Current Implementation Details
 
 * The SR is a singleton: `signals.GlobalSR`
+
 * Topics are strings (e.g., `"running_low:src"`, `"idle:dst"`)
+
 * **UPDATED**: Subscribers register handlers using:
 
   ```go
   signals.GlobalSR.On(topic, handler)
   ```
-* Publishers can use acknowledgment modes:
+
+* Subscribers can also be explicitly removed using:
 
   ```go
-  signals.GlobalSR.PublishWithAck(signal, timeout)
+  signals.GlobalSR.Unsubscribe(topic, actorID)
   ```
 
-### Acknowledgment System
+* Entire topics can be closed (tearing down their input loop and dropping all subscribers) using:
 
-The Signal Router now supports three acknowledgment modes:
-
-* **`AckNone`**: No acknowledgments required (fire-and-forget)
-* **`AckAny`**: Any single subscriber acknowledgment completes the signal
-* **`AckAll`**: All subscribers must acknowledge before completion
-
-**Owl Pattern**: For `AckAny` and `AckAll` modes, the system creates a middleman acknowledgment layer that:
-- Assigns unique `actorID` to each subscriber
-- Prevents duplicate acknowledgments from the same actor
-- Ensures non-blocking operation
-- Maintains clean separation between signal delivery and acknowledgment handling
+  ```go
+  signals.GlobalSR.CloseTopic(topic)
+  ```
 
 ### Signal Structure
 
@@ -91,8 +81,6 @@ The Signal Router now supports three acknowledgment modes:
 type Signal struct {
   Topic     string
   Payload   any
-  Ack       chan struct{}  // Acknowledgment channel
-  AckMode   AckMode        // How acks should be handled
   Timestamp time.Time
   ID        string
 }
@@ -100,10 +88,13 @@ type Signal struct {
 
 ### Internals
 
-* **UPDATED**: SR now stores `map[string]*topicHub` with structured subscribers
-* Each subscriber has a unique `actorID` for acknowledgment deduplication
-* Acknowledgment aggregation happens in dedicated goroutines to prevent blocking
-* Subscriber management uses `[]subscriber` instead of raw channel slices
+* **UPDATED**: SR now stores `map[string]*topicHub` with structured subscribers.
+* Each subscriber has:
+
+  * A unique `actorID` (UUID) for identification and removal.
+  * A mailbox channel for delivering signals.
+* `Unsubscribe` removes a single subscriber by `actorID`.
+* `CloseTopic` closes the hub for a topic and removes all subscribers at once.
 
 ---
 
@@ -117,19 +108,6 @@ signals.GlobalSR.Publish(signals.Signal{
     Topic:   "worker:started",
     Payload: workerID,
 })
-
-// Signal requiring acknowledgment
-signal := signals.Signal{
-    Topic:   "phase:complete",
-    Payload: phaseNumber,
-    AckMode: signals.AckAll,
-    Ack:     make(chan struct{}),
-}
-
-err := signals.GlobalSR.PublishWithAck(signal, 30*time.Second)
-if err != nil {
-    // Handle timeout or error
-}
 ```
 
 ### Handler Registration
@@ -139,12 +117,26 @@ if err != nil {
 signals.GlobalSR.On("queue:running_low", func(sig signals.Signal) {
     queueName := sig.Payload.(string)
     // Handle running low condition
-    
-    // Acknowledge if required
-    if sig.Ack != nil {
-        close(sig.Ack)
-    }
 })
+```
+
+### Explicit Unsubscribe
+
+```go
+// Subscribe manually, capture actorID
+actorID := signals.GlobalSR.On("queue:idle", func(sig signals.Signal) {
+    fmt.Println("Queue idle detected!")
+})
+
+// Later, unsubscribe when the worker shuts down
+signals.GlobalSR.Unsubscribe("queue:idle", actorID)
+```
+
+### Close a Topic
+
+```go
+// Conductor can close an entire topic when a queue is torn down
+signals.GlobalSR.CloseTopic("queue:running_low")
 ```
 
 ---
@@ -197,17 +189,4 @@ Advanced routing based on payload content, subscriber metadata, or dynamic condi
 
 The Signal Router is a key architectural improvement to ByteWave's coordination model. It removes brittle channel wiring in favor of a clean, centralized abstraction that scales better and is easier to reason about.
 
-The new acknowledgment system adds reliability and coordination capabilities, making it suitable for complex multi-party workflows where signal delivery confirmation is critical.
-
 It plays a foundational role in enabling phase-based coordination, worker queue responsiveness, and dynamic task orchestration — and leaves room for future enhancements like signal replay, observability, and conditional routing.
-
----
-
-## Migration Notes
-
-If you're updating existing code from the old channel-based system:
-
-1. Replace `signals.GlobalSR.Subscribe(topic, handlerChan)` with `signals.GlobalSR.On(topic, handler)`
-2. Update signal handling to use the new `Signal` struct format
-3. Add acknowledgment handling where required using `sig.Ack` channel
-4. Use `PublishWithAck` for signals that require confirmation

@@ -126,24 +126,6 @@ func (q *TaskQueue) WaitIfPaused() {
 	}
 }
 
-// CheckAndTriggerQP checks the queue size and signals QP if tasks are low.
-// NOTE: This method is now a no-op since QP uses direct polling instead of signals
-func (q *TaskQueue) CheckAndTriggerQP() {
-	// No-op: QP now proactively manages task publishing via polling
-}
-
-// SignalWorkerIdle signals that a worker has gone idle and may need more tasks
-// NOTE: This method is now a no-op since QP uses direct polling instead of signals
-func (q *TaskQueue) SignalWorkerIdle() {
-	// No-op: QP now proactively manages task publishing via polling
-}
-
-// ResetIdleTrigger is called by QP when new tasks are added
-// NOTE: This method is now a no-op since QP uses direct polling instead of signals
-func (q *TaskQueue) ResetIdleTrigger() {
-	// No-op: QP now proactively manages task publishing via polling
-}
-
 // Pause the queue (workers will stop picking up tasks)
 func (q *TaskQueue) Pause() {
 	q.Lock()
@@ -168,6 +150,10 @@ func (q *TaskQueue) Resume() {
 		}, "RESUMING_QUEUE", q.SrcOrDst,
 	)
 	q.State = QueueRunning
+	/* 
+		TODO: This needs to change to workers subscribing to a signal 
+		and broadcasting to that signal instead
+	*/
 	q.cond.Broadcast() // Wake up all workers assigned to this queue
 }
 
@@ -203,12 +189,6 @@ func (q *TaskQueue) AddTasks(tasks []Task) {
 			"taskCount": len(q.tasks),
 		}, "PUBLISHED_TASK_NOTIFICATION", q.SrcOrDst,
 	)
-}
-
-// ResetRunningLowTrigger is called by QP when new tasks are added.
-// NOTE: This method is now a no-op since QP uses direct polling instead of signals
-func (q *TaskQueue) ResetRunningLowTrigger() {
-	// No-op: QP now proactively manages task publishing via polling
 }
 
 // PopTask retrieves the next available task, pausing workers if needed.
@@ -296,6 +276,8 @@ func (q *TaskQueue) SetPaginationSize(newSize int) {
 
 // GetPaginationChan provides the pagination size stream.
 func (q *TaskQueue) GetPaginationChan() <-chan int {
+	q.Lock()
+	defer q.Unlock()
 	return q.PaginationChan
 }
 
