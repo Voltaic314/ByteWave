@@ -157,16 +157,9 @@ func (q *TaskQueue) Resume() {
 	q.cond.Broadcast() // Wake up all workers assigned to this queue
 }
 
-// AddTask adds a task to the queue.
-func (q *TaskQueue) AddTask(task Task) {
-	q.Lock()
-	q.tasks = append(q.tasks, task)
-	q.Unlock()
-}
-
 func (q *TaskQueue) AddTasks(tasks []Task) {
 	logging.GlobalLogger.Log(
-		"info", "System", "Queue", "Adding multiple tasks to queue", map[string]any{
+		"info", "System", "Queue", "Adding tasks to queue", map[string]any{
 			"queueID":   q.QueueID,
 			"taskCount": len(tasks),
 		}, "ADDING_MULTIPLE_TASKS_TO_QUEUE", q.SrcOrDst,
@@ -430,4 +423,31 @@ func (q *TaskQueue) GetAllTaskPaths() []string {
 	}
 
 	return paths
+}
+
+
+func (q *TaskQueue) resetRunningLowFlag() {
+	q.Lock()
+	defer q.Unlock()
+
+	q.RunningLowTriggered = false
+}
+
+
+func (q *TaskQueue) TasksEmpty() bool {
+	q.Lock()
+	defer q.Unlock()
+
+	return q.QueueSize() == 0
+}
+
+func (q *TaskQueue) TasksRunningLow() bool {
+	q.Lock()
+	defer q.Unlock()
+
+	if q.State != QueueRunning {
+		return false
+	}
+
+	return q.QueueSize() < q.RunningLowThreshold
 }

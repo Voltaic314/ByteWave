@@ -117,6 +117,13 @@ func (sr *SignalRouter) Publish(sig Signal) {
 		sig.ID = uuid.New().String()
 	}
 
+	// log that we are sending a signal
+	logging.GlobalLogger.Log("debug", "System", "SignalRouter", "Sending signal", map[string]any{
+		"topic":   sig.Topic,
+		"id":      sig.ID,
+		"payload": sig.Payload,
+	}, "SENDING_SIGNAL", "None")
+
 	sr.mu.RLock()
 	hub, exists := sr.topics[sig.Topic]
 	sr.mu.RUnlock()

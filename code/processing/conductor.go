@@ -1,13 +1,12 @@
-
 package processing
 
 import (
-   "time"
+	"time"
 
-   "github.com/Voltaic314/ByteWave/code/db"
-   "github.com/Voltaic314/ByteWave/code/logging"
-   "github.com/Voltaic314/ByteWave/code/pv"
-   "github.com/Voltaic314/ByteWave/code/services"
+	"github.com/Voltaic314/ByteWave/code/db"
+	"github.com/Voltaic314/ByteWave/code/logging"
+	"github.com/Voltaic314/ByteWave/code/pv"
+	"github.com/Voltaic314/ByteWave/code/services"
 )
 
 // The Boss 😎 - Responsible for setting up QP, queues, and workers
@@ -50,7 +49,7 @@ func (c *Conductor) StartTraversal() {
 	num_of_workers := 1
 
 	// Create source workers only - destination workers will be created when dst queue is set up
-	for range num_of_workers {
+	for i := 0; i < num_of_workers; i++ {
 		tw := &TraverserWorker{
 			WorkerBase: c.AddWorker(srcQueueName, "src"),
 			DB:         c.DB,
@@ -136,7 +135,7 @@ func (c *Conductor) monitorQueueCompletion() {
 
 		if queueCount == 0 {
 			logging.GlobalLogger.Log("info", "System", "Conductor", "All queues completed, stopping monitor", map[string]any{},
-			"LOG_COMPLETION", "All")
+				"LOG_COMPLETION", "All")
 			c.QP.Mutex.Lock()
 			c.QP.Running = false
 			c.QP.Mutex.Unlock()
@@ -167,23 +166,23 @@ func (c *Conductor) SetupQueue(name string, queueType QueueType, phase int, srcO
 // AddWorker assigns a new worker to a queue
 func (c *Conductor) AddWorker(queueName string, queueType string) *WorkerBase {
 
-	   queue, exists := c.QP.Queues[queueName]
-	   if !exists {
-		   subtopic := logging.QueueAcronyms[queueName]
-		   if subtopic == "" {
-			   subtopic = queueName // fallback if not mapped
-		   }
-		   logging.GlobalLogger.Log(
-			   "error",                                    // level
-			   "System",                                   // entity
-			   "Conductor",                                // entityID
-			   "Queue not found",                          // message
-			   map[string]any{"queueName": queueName},     // details
-			   "ADD_WORKER",                               // action
-			   logging.QueueAcronyms[queueName],           // queue
-		   )
-		   return nil
-	   }
+	queue, exists := c.QP.Queues[queueName]
+	if !exists {
+		subtopic := logging.QueueAcronyms[queueName]
+		if subtopic == "" {
+			subtopic = queueName // fallback if not mapped
+		}
+		logging.GlobalLogger.Log(
+			"error",                                // level
+			"System",                               // entity
+			"Conductor",                            // entityID
+			"Queue not found",                      // message
+			map[string]any{"queueName": queueName}, // details
+			"ADD_WORKER",                           // action
+			logging.QueueAcronyms[queueName],       // queue
+		)
+		return nil
+	}
 
 	worker := NewWorkerBase(queue, queueType)
 
@@ -265,7 +264,7 @@ func (c *Conductor) TeardownQueue(queueName string) {
 	// 🔒 Locking...
 	c.QP.Mutex.Lock()
 
-	// but before we do that... 
+	// but before we do that...
 	// Flush any remaining data out from the corresponding write queues.
 	c.QP.DB.ForceFlushTable("audit_log") // justttttt to be safe. :)
 	c.QP.DB.ForceFlushTable(table)

@@ -73,7 +73,7 @@ func NewQueuePublisher(db *db.DB, retryThreshold, batchSize int) *QueuePublisher
 		DB:              db,
 		Queues:          make(map[string]*TaskQueue),
 		QueueLevels:     make(map[string]int),
-		Running:         false,
+		Running:         true,
 		LastPathCursors: make(map[string]string),
 		LastDBPaths:     make(map[string]string),
 		RetryThreshold:  retryThreshold,
@@ -867,11 +867,6 @@ func (qp *QueuePublisher) fetchExpectedSourceChildrenBatch(dstPaths []string) ma
 }
 
 func (qp *QueuePublisher) PublishTasks(queueName string) {
-	logging.GlobalLogger.Log(
-		"debug", "System", "QP", "PublishTasks called", map[string]any{},
-		"PUBLISH_TASKS", logging.QueueAcronyms[queueName],
-	)
-
 	qp.Mutex.Lock()
 	queue, exists := qp.Queues[queueName]
 	qp.Mutex.Unlock()
@@ -905,14 +900,6 @@ func (qp *QueuePublisher) PublishTasks(queueName string) {
 	qp.Mutex.Unlock()
 
 	// Normal task fetching from DB for ALL levels - no special cases
-	logging.GlobalLogger.Log(
-		"debug", "System", "QP", "Fetching tasks from DB", map[string]any{
-		"currentLevel": currentLevel,
-		"mode":         mode,
-		"lastPath":     lastPath,
-		"table":        table,
-	}, "FETCH_TASKS_FROM_DB", logging.QueueAcronyms[queueName],
-	)
 	tasks := qp.FetchTasksFromDB(table, queue.Type, currentLevel, lastPath, queueName)
 
 	if len(tasks) > 0 {
@@ -1170,16 +1157,8 @@ func (qp *QueuePublisher) FetchTasksFromDB(table string, queueType QueueType, cu
 	query += ` ORDER BY path LIMIT ?`
 	params = append(params, qp.BatchSize)
 
-	// Debug log the query
-	logging.GlobalLogger.Log(
-		"info", "System", "QP", "Executing query", map[string]any{
-		"query":    query,
-		"params":   params,
-		"scanMode": scanMode,
-	}, "EXECUTE_QUERY", logging.QueueAcronyms[queueName],
-	)
-
-	return qp.runTaskQuery(table, query, params, currentLevel, queueName)
+	results := qp.runTaskQuery(table, query, params, currentLevel, queueName)
+	return results
 }
 
 // runTaskQuery executes the query and returns a list of tasks.
