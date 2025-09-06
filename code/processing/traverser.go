@@ -51,7 +51,6 @@ func (tw *TraverserWorker) FetchAndProcessTask() {
 			}, "TASK_ACQUIRED_PROCESSING", tw.QueueType,
 			)
 
-			tw.TaskReady = false
 			tw.State = WorkerActive
 
 			err := tw.ProcessTraversalTask(task)
@@ -60,18 +59,10 @@ func (tw *TraverserWorker) FetchAndProcessTask() {
 					"taskID": task.GetID(),
 					"error":  err.Error(),
 				}, "ERROR_DURING_TRAVERSAL_TASK", tw.QueueType,
-			)
+				)
 			}
 
 			continue
-		}
-
-		if tw.TaskReady {
-			logging.GlobalLogger.Log("info", "System", "Traverser", "Worker still ready but no task available", map[string]any{
-				"queueType": tw.QueueType,
-			}, "WORKER_STILL_READY_BUT_NO_TASK_AVAILABLE", tw.QueueType,
-			)
-			tw.TaskReady = false
 		}
 
 		tw.State = WorkerIdle
@@ -247,7 +238,7 @@ func (tw *TraverserWorker) LogSrcTraversalSuccess(task Task, files []filesystem.
 	// Create inserts for all the files found in the traversal
 	for _, file := range files {
 		path := tw.PathNormalizer(file.Path)
-		tw.DB.QueueWrite(table, `INSERT OR IGNORE INTO `+table+` (
+		tw.DB.QueueWrite(table, `INSERT INTO `+table+` (
 			path, name, identifier, parent_id, type, level, size, last_modified,
 			traversal_status, upload_status, traversal_attempts, upload_attempts, error_ids
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -268,7 +259,7 @@ func (tw *TraverserWorker) LogSrcTraversalSuccess(task Task, files []filesystem.
 	// Create inserts for all the folders found in the traversal
 	for _, folder := range folders {
 		path := tw.PathNormalizer(folder.Path)
-		tw.DB.QueueWrite(table, `INSERT OR IGNORE INTO `+table+` (
+		tw.DB.QueueWrite(table, `INSERT INTO `+table+` (
 			path, name, identifier, parent_id, type, level, size, last_modified,
 			traversal_status, upload_status, traversal_attempts, upload_attempts, error_ids
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -327,12 +318,12 @@ func (tw *TraverserWorker) LogDstTraversalSuccess(task Task, files []filesystem.
 
 	table := "destination_nodes"
 
-	// Log all discovered items to destination_nodes table
+	// Log all discovered items to destination_nodes table - Match canonical destination_nodes schema
 	for _, file := range files {
-		tw.DB.QueueWrite(table, `INSERT OR IGNORE INTO `+table+` (
+		tw.DB.QueueWrite(table, `INSERT INTO `+table+` (
 			path, name, identifier, parent_id, type, level, size, last_modified,
-			traversal_status, upload_status, traversal_attempts, upload_attempts, error_ids
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			traversal_status, traversal_attempts, error_ids
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			tw.PathNormalizer(file.Path),
 			file.Name,
 			file.Identifier,
@@ -342,16 +333,15 @@ func (tw *TraverserWorker) LogDstTraversalSuccess(task Task, files []filesystem.
 			file.Size,
 			file.LastModified,
 			"successful", // we don't traverse files so this is always successful
-			"pending",
-			0, 0, nil,
+			0, nil,
 		)
 	}
 
 	for _, folder := range folders {
-		tw.DB.QueueWrite(table, `INSERT OR IGNORE INTO `+table+` (
+		tw.DB.QueueWrite(table, `INSERT INTO `+table+` (
 			path, name, identifier, parent_id, type, level, size, last_modified,
-			traversal_status, upload_status, traversal_attempts, upload_attempts, error_ids
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			traversal_status, traversal_attempts, error_ids
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			tw.PathNormalizer(folder.Path),
 			folder.Name,
 			folder.Identifier,
@@ -361,8 +351,7 @@ func (tw *TraverserWorker) LogDstTraversalSuccess(task Task, files []filesystem.
 			0, // Size = 0 for folders
 			folder.LastModified,
 			"pending",
-			"pending",
-			0, 0, nil,
+			0, nil,
 		)
 	}
 

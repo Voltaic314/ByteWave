@@ -120,7 +120,7 @@ CREATE TABLE IF NOT EXISTS destination_nodes (
 """
 conn.execute(destination_nodes_schema)
 
-# Create audit_log table (updated schema)
+# Create audit_log table - Match canonical schema from code/db/tables/audit_log.go
 audit_log_schema = """
 CREATE TABLE IF NOT EXISTS audit_log (
     id VARCHAR PRIMARY KEY, 
@@ -131,15 +131,14 @@ CREATE TABLE IF NOT EXISTS audit_log (
     -- Entity type: 'worker', 'user', 'system', 'QP', 'Conductor', 'API', 'cloud storage service', etc.
     entity_id VARCHAR DEFAULT NULL,
     -- Unique identifier for the entity (worker ID, service ID, etc.)
-    path VARCHAR DEFAULT NULL,
-    -- Optional path for task-related logs
     details VARCHAR DEFAULT NULL,
     message VARCHAR NOT NULL,
     action VARCHAR DEFAULT NULL,
     -- Action like 'CREATE_WORKER' or 'INSERT_TASKS' capital snake case style 
     topic VARCHAR DEFAULT NULL,
     -- Topic like 'Traversal' and subtopic like 'src'
-    subtopic VARCHAR DEFAULT NULL
+    subtopic VARCHAR DEFAULT NULL,
+    queue VARCHAR DEFAULT NULL
 );
 """
 conn.execute(audit_log_schema)
@@ -149,7 +148,7 @@ print("📥 Inserting root data into nodes tables...")
 
 # Insert source root entry
 src_insert_query = """
-INSERT OR IGNORE INTO source_nodes (
+INSERT INTO source_nodes (
     path, name, identifier, parent_id, type, level, size,
     last_modified, traversal_status, upload_status,
     traversal_attempts, upload_attempts, error_ids
@@ -174,7 +173,7 @@ conn.execute(src_insert_query, (
 
 # Insert destination root entry
 dst_insert_query = """
-INSERT OR IGNORE INTO destination_nodes (
+INSERT INTO destination_nodes (
     path, name, identifier, parent_id, type, level, size,
     last_modified, traversal_status, traversal_attempts, error_ids
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)

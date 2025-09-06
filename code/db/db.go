@@ -1,10 +1,10 @@
 package db
 
 import (
-	"fmt"
-	"encoding/json"
 	"context"
 	"database/sql"
+	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/Voltaic314/ByteWave/code/types/logging"
@@ -84,6 +84,13 @@ func (db *DB) flushWriteQueue(wq *WriteQueue, tableName string, force bool) {
 			ps[i] = op.Params
 		}
 		if err := batchExecute(db.conn, map[string][]string{tableName: qs}, map[string][][]any{tableName: ps}); err != nil {
+			// Log the error instead of silently ignoring it
+			fmt.Printf("❌ Database batch execution failed for table %s: %v\n", tableName, err)
+			sampleCount := len(qs)
+			if sampleCount > 3 {
+				sampleCount = 3
+			}
+			fmt.Printf("   Query samples: %v\n", qs[:sampleCount]) // Show first 3 queries for debugging
 		}
 	}
 }
@@ -97,6 +104,10 @@ func (db *DB) QueueWrite(tableName, query string, params ...any) {
 			Params: params,
 			OpType: "insert",
 		})
+		// if we are now above threshold, flush the queue
+		wq.Flush() // Do not pass in force flush True here
+		// because we want to flush the queue if it is ready
+		// to be flushed, not because we are forcing a flush
 	}
 }
 
@@ -109,6 +120,8 @@ func (db *DB) QueueWriteWithPath(tableName, path, query string, params ...any) {
 			Params: params,
 			OpType: "update",
 		})
+		// ✅ FIX: Add flush call like QueueWrite has
+		wq.Flush()
 	}
 }
 
@@ -155,17 +168,25 @@ func batchExecute(conn *sql.DB, tableQueries map[string][]string, tableParams ma
 		return err
 	}
 
+	// Ensure rollback happens on error
+	defer func() {
+		if err != nil {
+			tx.Rollback()
+		}
+	}()
+
 	for table, queries := range tableQueries {
 		params := tableParams[table]
 		for i, query := range queries {
-			_, err := tx.Exec(query, params[i]...)
+			_, err = tx.Exec(query, params[i]...)
 			if err != nil {
-				return err
+				return fmt.Errorf("failed to execute query for table %s: %w", table, err)
 			}
 		}
 	}
 
-	return tx.Commit()
+	err = tx.Commit()
+	return err
 }
 
 func (db *DB) ExecuteBatchCommands(batches []typesdb.Batch) {
@@ -181,6 +202,8 @@ func (db *DB) ExecuteBatchCommands(batches []typesdb.Batch) {
 		}
 
 		if err := db.WriteBatch(tableQueries, tableParams); err != nil {
+			// Log the error instead of silently ignoring it
+			fmt.Printf("❌ Database batch write failed for table %s: %v\n", b.Table, err)
 		}
 	}
 }
@@ -192,7 +215,7 @@ func (db *DB) startQueueListener(tableName string, queue *WriteQueue) {
 	for {
 		select {
 		case <-timer.C:
-			db.flushWriteQueue(queue, tableName, false)
+			db.flushWriteQueue(queue, tableName, true)
 			timer.Reset(queue.GetFlushInterval())
 		case <-db.ctx.Done():
 			return
@@ -200,15 +223,17 @@ func (db *DB) startQueueListener(tableName string, queue *WriteQueue) {
 	}
 }
 
-
-
 // WriteLog inserts a log entry into the audit log table asynchronously.
 func (db *DB) WriteLog(entry logging.LogEntry) {
 	go func() {
+		// Match the canonical audit_log schema from tables/audit_log.go
 		query := `
-			INSERT OR IGNORE INTO audit_log (timestamp, level, details, message)
-			VALUES (?, ?, ?, ?)
+			INSERT INTO audit_log (id, timestamp, level, entity, entity_id, details, message, action, topic, subtopic, queue)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`
+		// Generate UUID for primary key
+		id := fmt.Sprintf("log_%d", entry.Timestamp.UnixNano())
+
 		// Format timestamp in ISO 8601 format that DuckDB expects
 		timestamp := entry.Timestamp.Format("2006-01-02 15:04:05.000000")
 
@@ -218,7 +243,7 @@ func (db *DB) WriteLog(entry logging.LogEntry) {
 			detailsJSON = "null"
 		}
 
-		db.QueueWrite("audit_log", query, timestamp, entry.Level, detailsJSON, entry.Message)
+		db.QueueWrite("audit_log", query, id, timestamp, entry.Level, entry.Entity, entry.EntityID, detailsJSON, entry.Message, entry.Action, nil, nil, entry.Queue)
 	}()
 }
 

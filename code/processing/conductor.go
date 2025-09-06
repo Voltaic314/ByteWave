@@ -7,6 +7,8 @@ import (
 	"github.com/Voltaic314/ByteWave/code/logging"
 	"github.com/Voltaic314/ByteWave/code/pv"
 	"github.com/Voltaic314/ByteWave/code/services"
+	"github.com/Voltaic314/ByteWave/code/signals"
+	typesdb "github.com/Voltaic314/ByteWave/code/types/db"
 )
 
 // The Boss 😎 - Responsible for setting up QP, queues, and workers
@@ -161,6 +163,17 @@ func (c *Conductor) SetupQueue(name string, queueType QueueType, phase int, srcO
 	}
 
 	c.QP.LastPathCursors[name] = "" // Add path-based cursor for this queue
+
+	var tableName string
+	switch srcOrDst {
+	case "src":
+		tableName = "source_nodes"
+	default:
+		tableName = "destination_nodes"
+	}
+
+	// init a new write queue for batch ops
+	c.DB.InitWriteQueue(tableName, typesdb.NodeWriteQueue, 100, 5*time.Second)
 }
 
 // AddWorker assigns a new worker to a queue
@@ -237,8 +250,12 @@ func (c *Conductor) TeardownQueue(queueName string) {
 		return
 	}
 
-	// Close StopChan to signal goroutines to stop
-	close(queue.StopChan)
+	// Send stop signal via Signal Router to all workers 🛑
+	stopTopic := "stop:" + queue.QueueID
+	signals.GlobalSR.Publish(signals.Signal{
+		Topic:   stopTopic,
+		Payload: "teardown",
+	})
 
 	// Remove idle workers
 	queue.mu.Lock()
@@ -270,13 +287,11 @@ func (c *Conductor) TeardownQueue(queueName string) {
 	c.QP.DB.ForceFlushTable(table)
 
 	// Okay now delete the stuff! \o/
-
-	// temporarily disabling teardown deletions for now.
-	// delete(c.QP.Queues, queueName)
-	// delete(c.QP.QueueLevels, queueName)
-	// delete(c.QP.LastPathCursors, queueName)
-	// delete(c.QP.ScanModes, queueName)
-	// delete(c.QP.QueriesPerPhase, queueName)
+	delete(c.QP.Queues, queueName)
+	delete(c.QP.QueueLevels, queueName)
+	delete(c.QP.LastPathCursors, queueName)
+	delete(c.QP.ScanModes, queueName)
+	delete(c.QP.QueriesPerPhase, queueName)
 
 	// 🔓 Unlocking...
 	c.QP.Mutex.Unlock()

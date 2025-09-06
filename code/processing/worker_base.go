@@ -18,39 +18,30 @@ const (
 
 // WorkerBase provides shared fields and logic for all worker types.
 type WorkerBase struct {
-	ID             string // Unique identifier for the worker
-	Queue          *TaskQueue
-	QueueType      string      // "src" or "dst"
-	State          WorkerState // Idle or Active
-	TaskReady      bool
-	taskWakeupChan chan struct{} // Simple wake-up channel for task notifications
-	signalActorID  signals.ActorID
+	ID        string // Unique identifier for the worker
+	Queue     *TaskQueue
+	QueueType string      // "src" or "dst"
+	State     WorkerState // Idle or Active
 }
 
 // NewWorkerBase initializes a new WorkerBase with a unique ID.
 func NewWorkerBase(queue *TaskQueue, queueType string) *WorkerBase {
 	logging.GlobalLogger.Log("info", "System", "Worker", "Creating new worker", map[string]any{
 		"queueType": queueType,
-	}, "CREATING_NEW_WORKER", queueType,
-	)
+	}, "CREATING_NEW_WORKER", queueType)
 
 	workerBase := &WorkerBase{
-		Queue:          queue,
-		QueueType:      queueType,
-		State:          WorkerIdle,
-		TaskReady:      false,
-		taskWakeupChan: make(chan struct{}, 1), // Non-blocking wake-up channel
+		Queue:     queue,
+		QueueType: queueType,
+		State:     WorkerIdle,
 	}
 	workerBase.ID = workerBase.GenerateID()
-
-	// Subscribe to signals
-	workerBase.SubscribeToSignals()
 
 	logging.GlobalLogger.Log("info", "System", "Worker", "Worker base created", map[string]any{
 		"queueType": queueType,
 		"state":     workerBase.State,
-	}, "WORKER_BASE_CREATED", workerBase.QueueType,
-	)
+	}, "WORKER_BASE_CREATED", workerBase.QueueType)
+
 	return workerBase
 }
 
@@ -60,40 +51,38 @@ func (wb *WorkerBase) GenerateID() string {
 	return id
 }
 
-func (wb *WorkerBase) SubscribeToSignals() {
-	taskTopic := "tasks_published:" + wb.Queue.QueueID
-	wb.signalActorID = signals.GlobalSR.On(taskTopic, func(sig signals.Signal) {
-		select {
-		case wb.taskWakeupChan <- struct{}{}:
-			logging.GlobalLogger.Log("debug", "System", "Worker", "Worker received task signal via On handler", map[string]any{
-				"topic":     sig.Topic,
-				"taskCount": sig.Payload,
-			}, "WORKER_RECEIVED_TASK_SIGNAL_VIA_ON_HANDLER", wb.QueueType)
-		default:
-			// Channel already has a wake-up signal, no need to block
-		}
-	})
-	logging.GlobalLogger.Log("info", "System", "Worker", "Worker subscribed to task signals", map[string]any{
-		"taskTopic": taskTopic,
-		"queueType": wb.QueueType,
-	}, "WORKER_SUBSCRIBED_TO_SIGNAL", wb.QueueType)
-}
-
-// Run is a generic polling loop that can be called by any worker type.
+// Run starts the worker using the Signal Router for clean event handling
 func (wb *WorkerBase) Run(process func(Task) error) {
-	for {
-		select {
-		case <-wb.taskWakeupChan:
-			logging.GlobalLogger.Log("debug", "System", "Worker", "Worker received task wake-up signal", map[string]any{
-				"queueID": wb.Queue.QueueID,
-			}, "WORKER_RECEIVED_TASK_WAKE_UP_SIGNAL", wb.QueueType)
+	// Channel to coordinate shutdown between signal handlers
+	shutdownChan := make(chan struct{})
 
+	// Subscribe to task signals using the beautiful new Signal Router! 📮
+	taskTopic := "tasks_published:" + wb.Queue.QueueID
+	signals.GlobalSR.On(taskTopic, func(sig signals.Signal) {
+		logging.GlobalLogger.Log("debug", "System", "Worker", "Worker received task wake-up signal", map[string]any{
+			"queueID": wb.Queue.QueueID,
+		}, "WORKER_RECEIVED_TASK_WAKE_UP_SIGNAL", wb.QueueType)
+
+		// 🔄 NEW: Continuous task processing loop
+		for {
 			task := wb.Queue.PopTask()
 			if task == nil {
-				continue
+				// No more tasks available - go idle and wait for next signal
+				logging.GlobalLogger.Log("debug", "System", "Worker", "No more tasks available, worker going idle", map[string]any{
+					"queueID": wb.Queue.QueueID,
+				}, "WORKER_GOING_IDLE", wb.QueueType)
+				wb.State = WorkerIdle
+				return
 			}
 
+			// Task found - process it
 			wb.State = WorkerActive
+			logging.GlobalLogger.Log("debug", "System", "Worker", "Worker processing task", map[string]any{
+				"queueID": wb.Queue.QueueID,
+				"taskID":  task.GetID(),
+				"path":    task.GetPath(),
+			}, "WORKER_PROCESSING_TASK", wb.QueueType)
+
 			if err := process(task); err != nil {
 				logging.GlobalLogger.Log("error", "System", "Worker", "Worker task failed", map[string]any{
 					"taskID": task.GetID(),
@@ -105,13 +94,31 @@ func (wb *WorkerBase) Run(process func(Task) error) {
 				}, "WORKER_TASK_COMPLETED", wb.QueueType)
 			}
 			wb.Queue.RemoveInProgressTask(task.GetID())
-			wb.State = WorkerIdle
 
-		case <-wb.Queue.StopChan:
-			logging.GlobalLogger.Log("info", "System", "Worker", "Worker received stop signal", map[string]any{
+			// ✨ Key improvement: Continue loop to check for more tasks
+			// instead of returning/going idle immediately
+			logging.GlobalLogger.Log("debug", "System", "Worker", "Task completed, checking for more tasks", map[string]any{
 				"queueID": wb.Queue.QueueID,
-			}, "WORKER_RECEIVED_STOP_SIGNAL", wb.QueueType)
-			return
+			}, "WORKER_CHECKING_FOR_MORE_TASKS", wb.QueueType)
 		}
-	}
+	})
+
+	// Subscribe to stop signals via Signal Router! 🛑
+	stopTopic := "stop:" + wb.Queue.QueueID
+	signals.GlobalSR.On(stopTopic, func(sig signals.Signal) {
+		logging.GlobalLogger.Log("info", "System", "Worker", "Worker received stop signal", map[string]any{
+			"queueID": wb.Queue.QueueID,
+		}, "WORKER_RECEIVED_STOP_SIGNAL", wb.QueueType)
+
+		// Safe close - won't panic if already closed
+		select {
+		case <-shutdownChan:
+			// Already closed, do nothing
+		default:
+			close(shutdownChan)
+		}
+	})
+
+	// Wait for shutdown signal from stop handler
+	<-shutdownChan
 }

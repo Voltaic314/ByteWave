@@ -27,7 +27,7 @@ import (
 func main() {
 	fmt.Println("🚀 ByteWave is starting up...")
 
-	fmt.Println("🔖 Licensed under the ByteWave License v1.0 — see LICENSE.txt or visit https://github.com/Voltaic314/ByteWave/blob/main/LICENSE.md")
+	fmt.Println("🔖 Licensed under the ByteWave License v1.0 — see LICENSE.md or visit https://github.com/Voltaic314/ByteWave/blob/main/LICENSE.md")
 
 	// Spawn UDP log viewer
 	err := cli.SpawnReceiverTerminal()
@@ -52,12 +52,6 @@ func main() {
 	// Give the log terminal a sec to boot up
 	time.Sleep(3 * time.Second)
 
-	// 🔊 DEBUG: Send a test log to verify logger is working
-	logging.GlobalLogger.Log("info", "System", "Logger", "Test log: Logger is alive and ready 🚦", map[string]any{
-		"origin": "main.go",
-		"status": "init-complete",
-	}, "SEND_LOG", "None")
-
 	// Start the Conductor — now self-contained (handles its own DB + logger)
 	dbPath := filepath.Join(cwd, "tests", "traversal_tests", "test_traversal.db")
 	conductor := processing.NewConductor(
@@ -73,8 +67,6 @@ func main() {
 
 	// Initialize write queues before starting traversal
 	conductor.DB.InitWriteQueue("audit_log", typesdb.LogWriteQueue, 50, 5*time.Second)
-	conductor.DB.InitWriteQueue("source_nodes", typesdb.NodeWriteQueue, 100, 5*time.Second)
-	conductor.DB.InitWriteQueue("destination_nodes", typesdb.NodeWriteQueue, 100, 5*time.Second)
 
 	// Register the logger with the DB
 	// This is basically so that the logger can write logs persistently to the DB
@@ -91,7 +83,7 @@ func main() {
 		time.Sleep(50 * time.Millisecond)
 
 		// Check if all processing is done (traversal complete)
-		if !conductor.QP.Running {
+		if conductor.QP != nil && !conductor.QP.Running {
 			endTime := time.Now()
 			duration := endTime.Sub(startTime)
 			fmt.Printf("✅ All traversals complete! ByteWave shutting down...\n")

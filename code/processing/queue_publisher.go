@@ -1,7 +1,6 @@
 package processing
 
 import (
-	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -277,15 +276,6 @@ func (qp *QueuePublisher) isQueueReadyToAdvance(queueName string) bool {
 		return false
 	}
 
-	// Flush relevant tables first
-	if queue.Type == TraversalQueueType && queue.SrcOrDst == "src" {
-		qp.DB.ForceFlushTable("source_nodes")
-	} else if queue.SrcOrDst == "dst" {
-		qp.DB.ForceFlushTable("destination_nodes")
-		qp.DB.ForceFlushTable("source_nodes")
-	}
-	qp.DB.ForceFlushTable("audit_log")
-
 	queue.mu.Lock()
 	queueSize := len(queue.tasks)
 	allWorkersIdle := true
@@ -408,6 +398,7 @@ func (qp *QueuePublisher) maybeCreateDestinationQueue() {
 		qp.Mutex.Unlock()
 
 		qp.setupQueueSignals("dst-traversal")
+		go qp.PublishTasks("dst-traversal")
 	}
 }
 
@@ -432,23 +423,18 @@ func (qp *QueuePublisher) PublishDestinationTasks(queueName string) {
 		return
 	}
 
-	// Force flush both tables before cross-table queries to ensure data consistency
-	qp.DB.ForceFlushTable("source_nodes")      // Need to see source children
-	qp.DB.ForceFlushTable("destination_nodes") // Need to see destination folders
-	qp.DB.ForceFlushTable("audit_log")
-
 	// Normal batch approach for ALL levels - no special cases needed
 	tasks := qp.FetchDestinationTasksFromDB(currentLevel, lastPath, queueName)
 
 	if len(tasks) > 0 {
 		logging.GlobalLogger.Log(
 			"debug", "System", "QP", "Tasks fetched from DB (dst)", map[string]any{
-			"taskCount":    len(tasks),
-			"scanMode":     mode,
-			"level":        currentLevel,
-			"lastSeenPath": lastPath,
-		}, "TASKS_FETCHED", logging.QueueAcronyms[queueName],
-	)
+				"taskCount":    len(tasks),
+				"scanMode":     mode,
+				"level":        currentLevel,
+				"lastSeenPath": lastPath,
+			}, "TASKS_FETCHED", logging.QueueAcronyms[queueName],
+		)
 
 		queue.AddTasks(tasks)
 		qp.Mutex.Lock()
@@ -472,11 +458,11 @@ func (qp *QueuePublisher) PublishDestinationTasks(queueName string) {
 	} else {
 		logging.GlobalLogger.Log(
 			"debug", "System", "QP", "No tasks fetched from DB (dst)", map[string]any{
-			"scanMode":     mode,
-			"level":        currentLevel,
-			"lastSeenPath": lastPath,
-		}, "NO_TASKS_FETCHED", logging.QueueAcronyms[queueName],
-	)
+				"scanMode":     mode,
+				"level":        currentLevel,
+				"lastSeenPath": lastPath,
+			}, "NO_TASKS_FETCHED", logging.QueueAcronyms[queueName],
+		)
 
 		// Switch to retry mode if we found no tasks in first pass
 		if mode == firstPass {
@@ -499,13 +485,8 @@ func (qp *QueuePublisher) FetchDestinationTasksFromDB(currentLevel int, lastSeen
 
 	// Same retry/pagination logic as src traversal
 	qp.Mutex.Lock()
-	isRetryMode := qp.ScanModes[queueName] == retryPass
 	scanMode := qp.ScanModes[queueName]
 	qp.Mutex.Unlock()
-
-	if isRetryMode {
-		qp.DB.ForceFlushTable("destination_nodes")
-	}
 
 	// QUERY 1: Get dst folders at current level with same pagination logic as src
 	query1 := `SELECT path, name, identifier, parent_id, last_modified 
@@ -567,10 +548,10 @@ func (qp *QueuePublisher) FetchDestinationTasksFromDB(currentLevel int, lastSeen
 	// Debug log the query
 	logging.GlobalLogger.Log(
 		"info", "System", "QP", "Executing dst query", map[string]any{
-		"query":    query1,
-		"params":   params1,
-		"scanMode": scanMode,
-	}, "EXECUTE_QUERY", logging.QueueAcronyms[queueName],
+			"query":    query1,
+			"params":   params1,
+			"scanMode": scanMode,
+		}, "EXECUTE_QUERY", logging.QueueAcronyms[queueName],
 	)
 
 	// ADDITIONAL DEBUG: Check what's actually in the dst table at this level
@@ -646,13 +627,13 @@ func (qp *QueuePublisher) FetchDestinationTasksFromDB(currentLevel int, lastSeen
 	if len(dstFolders) == 0 {
 		logging.GlobalLogger.Log(
 			"warning", "System", "QP", "No dst folders found despite hasPendingAtLevel returning true", map[string]any{
-			"currentLevel": currentLevel,
-			"lastSeenPath": lastSeenPath,
-			"query":        query1,
-			"params":       params1,
-			"scanMode":     scanMode,
-		}, "NO_FOLDERS_FOUND", logging.QueueAcronyms[queueName],
-	)
+				"currentLevel": currentLevel,
+				"lastSeenPath": lastSeenPath,
+				"query":        query1,
+				"params":       params1,
+				"scanMode":     scanMode,
+			}, "NO_FOLDERS_FOUND", logging.QueueAcronyms[queueName],
+		)
 		return nil
 	}
 
@@ -689,10 +670,10 @@ func (qp *QueuePublisher) FetchDestinationTasksFromDB(currentLevel int, lastSeen
 
 	logging.GlobalLogger.Log(
 		"info", "System", "QP", "Created destination tasks efficiently", map[string]any{
-		"dstFoldersFound": len(dstFolders),
-		"tasksCreated":    len(tasks),
-		"totalQueries":    3, // Efficient: 1 for dst folders + 2 for expected children lookup (path match + children)
-	}, "TASKS_CREATED", logging.QueueAcronyms[queueName],
+			"dstFoldersFound": len(dstFolders),
+			"tasksCreated":    len(tasks),
+			"totalQueries":    3, // Efficient: 1 for dst folders + 2 for expected children lookup (path match + children)
+		}, "TASKS_CREATED", logging.QueueAcronyms[queueName],
 	)
 
 	return tasks
@@ -722,13 +703,6 @@ func (qp *QueuePublisher) fetchExpectedSourceChildrenBatch(dstPaths []string) ma
 
 	// Query src table to find items with matching paths
 	srcQuery := `SELECT path, identifier FROM source_nodes WHERE path IN (` + strings.Join(placeholders, ", ") + `)`
-
-	logging.GlobalLogger.Log(
-		"info", "System", "QP", "Step 1: Finding src items with matching dst paths", map[string]any{
-			"dstPathCount": len(dstPaths),
-			"query":        srcQuery,
-		}, "STEP_1", logging.QueueAcronyms["src-traversal"],
-	)
 
 	srcRows, err := qp.DB.Query("source_nodes", srcQuery, params...)
 	if err != nil {
@@ -777,13 +751,6 @@ func (qp *QueuePublisher) fetchExpectedSourceChildrenBatch(dstPaths []string) ma
 	          FROM source_nodes 
 	          WHERE parent_id IN (` + strings.Join(childPlaceholders, ", ") + `)
 	          ORDER BY parent_id, type, name`
-
-	logging.GlobalLogger.Log(
-		"info", "System", "QP", "Step 2: Getting children of matched src items", map[string]any{
-			"srcIdentifierCount": len(srcIdentifiers),
-			"query":              query,
-		}, "STEP_2", logging.QueueAcronyms["src-traversal"],
-	)
 
 	rows, err := qp.DB.Query("source_nodes", query, childParams...)
 	if err != nil {
@@ -854,15 +821,6 @@ func (qp *QueuePublisher) fetchExpectedSourceChildrenBatch(dstPaths []string) ma
 		}
 	}
 
-	logging.GlobalLogger.Log(
-		"info", "System", "QP", "Batch expected children lookup completed", map[string]any{
-		"dstPathsQueried":  len(dstPaths),
-		"srcItemsMatched":  len(srcIdentifiers),
-		"parentPathsFound": len(result),
-		"queryEfficiency":  fmt.Sprintf("2 queries instead of %d queries", len(dstPaths)),
-	}, "BATCH_EXPECTED_CHILDREN_LOOKUP_COMPLETED", logging.QueueAcronyms["src-traversal"],
-	)
-
 	return result
 }
 
@@ -905,11 +863,11 @@ func (qp *QueuePublisher) PublishTasks(queueName string) {
 	if len(tasks) > 0 {
 		logging.GlobalLogger.Log(
 			"debug", "System", "QP", "Tasks fetched from DB", map[string]any{
-			"taskCount":    len(tasks),
-			"scanMode":     mode,
-			"level":        currentLevel,
-			"lastSeenPath": lastPath,
-		}, "TASKS_FETCHED_FROM_DB", logging.QueueAcronyms[queueName],
+				"taskCount":    len(tasks),
+				"scanMode":     mode,
+				"level":        currentLevel,
+				"lastSeenPath": lastPath,
+			}, "TASKS_FETCHED_FROM_DB", logging.QueueAcronyms[queueName],
 		)
 
 		queue.AddTasks(tasks)
@@ -967,7 +925,7 @@ func (qp *QueuePublisher) advancePhaseWithMutex(queueName string) {
 
 	logging.GlobalLogger.Log(
 		"info", "System", "QP", "Advancing to next phase", map[string]any{
-		"queue": queueName,
+			"queue": queueName,
 			"phase": queue.Phase,
 			"level": syncedLevel,
 		}, "PHASE_ADVANCED", logging.QueueAcronyms[queueName],
@@ -1003,31 +961,28 @@ func (qp *QueuePublisher) hasPendingAtLevel(queueName string, level int) bool {
 		typeFilter = " AND type = 'folder'"
 	}
 
-	// Ensure pending writes are flushed before checking
-	qp.FlushTable(table)
-
 	// Make the query consistent with the actual fetch query
 	query := `SELECT COUNT(*) FROM ` + table + ` WHERE ` + statusColumn + ` = 'pending' AND level = ?` + typeFilter
 
 	logging.GlobalLogger.Log(
 		"debug", "System", "QP", "hasPendingAtLevel query", map[string]any{
-		"queue":      queueName,
-		"level":      level,
-		"table":      table,
-		"query":      query,
-		"typeFilter": typeFilter,
-	}, "HAS_PENDING_AT_LEVEL_QUERY", logging.QueueAcronyms[queueName],
+			"queue":      queueName,
+			"level":      level,
+			"table":      table,
+			"query":      query,
+			"typeFilter": typeFilter,
+		}, "HAS_PENDING_AT_LEVEL_QUERY", logging.QueueAcronyms[queueName],
 	)
 
 	rows, err := qp.DB.Query(table, query, level)
 	if err != nil {
 		logging.GlobalLogger.Log(
 			"error", "System", "QP", "hasPendingAtLevel query failed", map[string]any{
-			"queue": queueName,
-			"level": level,
-			"error": err.Error(),
-			"query": query,
-		}, "ERROR", logging.QueueAcronyms[queueName],
+				"queue": queueName,
+				"level": level,
+				"error": err.Error(),
+				"query": query,
+			}, "ERROR", logging.QueueAcronyms[queueName],
 		)
 		// Be conservative: assume pending exists so we don't advance too early
 		return true
@@ -1039,10 +994,10 @@ func (qp *QueuePublisher) hasPendingAtLevel(queueName string, level int) bool {
 		if err := rows.Scan(&count); err != nil {
 			logging.GlobalLogger.Log(
 				"error", "System", "QP", "hasPendingAtLevel scan failed", map[string]any{
-				"queue": queueName,
-				"level": level,
-				"error": err.Error(),
-			}, "ERROR", logging.QueueAcronyms[queueName],
+					"queue": queueName,
+					"level": level,
+					"error": err.Error(),
+				}, "ERROR", logging.QueueAcronyms[queueName],
 			)
 			return true
 		}
@@ -1050,12 +1005,12 @@ func (qp *QueuePublisher) hasPendingAtLevel(queueName string, level int) bool {
 
 	logging.GlobalLogger.Log(
 		"info", "System", "QP", "hasPendingAtLevel result", map[string]any{
-		"queue":    queueName,
-		"level":    level,
-		"pending":  count,
-		"table":    table,
-		"hasItems": count > 0,
-	}, "HAS_PENDING_AT_LEVEL_RESULT", logging.QueueAcronyms[queueName],
+			"queue":    queueName,
+			"level":    level,
+			"pending":  count,
+			"table":    table,
+			"hasItems": count > 0,
+		}, "HAS_PENDING_AT_LEVEL_RESULT", logging.QueueAcronyms[queueName],
 	)
 	return count > 0
 }
@@ -1063,22 +1018,19 @@ func (qp *QueuePublisher) hasPendingAtLevel(queueName string, level int) bool {
 func (qp *QueuePublisher) FetchTasksFromDB(table string, queueType QueueType, currentLevel int, lastSeenPath string, queueName string) []Task {
 	logging.GlobalLogger.Log(
 		"info", "System", "QP", "Fetching tasks from DB", map[string]any{
-		"table":        table,
-		"queueType":    queueType,
-		"currentLevel": currentLevel,
-		"lastSeenPath": lastSeenPath,
-	}, "FETCH_TASKS_FROM_DB", logging.QueueAcronyms[queueName],
+			"table":        table,
+			"queueType":    queueType,
+			"currentLevel": currentLevel,
+			"lastSeenPath": lastSeenPath,
+		}, "FETCH_TASKS_FROM_DB", logging.QueueAcronyms[queueName],
 	)
 
 	// Force flush in retry mode to see latest failure states
 	qp.Mutex.Lock()
-	isRetryMode := qp.ScanModes[queueName] == retryPass
 	scanMode := qp.ScanModes[queueName]
 	qp.Mutex.Unlock()
 
-	if isRetryMode {
-		qp.DB.ForceFlushTable(table)
-	}
+	// DB.Query will automatically flush the table when queried in retry mode
 
 	statusColumn := "traversal_status"
 	retryColumn := "traversal_attempts"
@@ -1140,9 +1092,9 @@ func (qp *QueuePublisher) FetchTasksFromDB(table string, queueType QueueType, cu
 
 				logging.GlobalLogger.Log(
 					"info", "System", "QP", "Retry mode filtering applied", map[string]any{
-					"queueName":     queueName,
-					"excludedPaths": len(pathList),
-				}, "RETRY_MODE_FILTERING_APPLIED", logging.QueueAcronyms[queueName],
+						"queueName":     queueName,
+						"excludedPaths": len(pathList),
+					}, "RETRY_MODE_FILTERING_APPLIED", logging.QueueAcronyms[queueName],
 				)
 			}
 		}
@@ -1167,9 +1119,9 @@ func (qp *QueuePublisher) runTaskQuery(table, query string, params []any, curren
 	if err != nil {
 		logging.GlobalLogger.Log(
 			"error", "System", "QP", "DB query failed", map[string]any{
-			"table": table,
-			"err":   err.Error(),
-		}, "ERROR", logging.QueueAcronyms[queueName],
+				"table": table,
+				"err":   err.Error(),
+			}, "ERROR", logging.QueueAcronyms[queueName],
 		)
 		return nil
 	}
@@ -1185,8 +1137,8 @@ func (qp *QueuePublisher) runTaskQuery(table, query string, params []any, curren
 		if err := rows.Scan(&path, &name, &identifier, &parentID, &nodeType, &lastModified); err != nil {
 			logging.GlobalLogger.Log(
 				"error", "System", "QP", "Failed to scan row", map[string]any{
-				"err": err.Error(),
-			}, "ERROR", logging.QueueAcronyms[queueName],
+					"err": err.Error(),
+				}, "ERROR", logging.QueueAcronyms[queueName],
 			)
 			continue
 		}
@@ -1248,8 +1200,8 @@ func (qp *QueuePublisher) DebugPendingFolders(table string, paths []string) {
 	if err != nil {
 		logging.GlobalLogger.Log(
 			"error", "System", "QP", "Failed to debug pending folders", map[string]any{
-			"error": err.Error(),
-		}, "ERROR", "All",
+				"error": err.Error(),
+			}, "ERROR", "All",
 		)
 		return
 	}
@@ -1264,12 +1216,12 @@ func (qp *QueuePublisher) DebugPendingFolders(table string, paths []string) {
 
 		logging.GlobalLogger.Log(
 			"debug", "System", "QP", "Pending folder details", map[string]any{
-			"path":     path,
-			"status":   status,
-			"attempts": attempts,
-			"level":    level,
-			"type":     nodeType,
-		}, "PENDING_FOLDER_DETAILS", "All",
+				"path":     path,
+				"status":   status,
+				"attempts": attempts,
+				"level":    level,
+				"type":     nodeType,
+			}, "PENDING_FOLDER_DETAILS", "All",
 		)
 	}
 }

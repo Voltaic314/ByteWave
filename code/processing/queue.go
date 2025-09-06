@@ -44,7 +44,6 @@ type TaskQueue struct {
 	RunningLowTriggered bool           // Prevents duplicate RunningLow signals
 	RunningLowThreshold int            // Threshold for triggering RunningLow signals
 	IdleTriggered       bool           // Prevents duplicate idle signals
-	StopChan            chan struct{}  // Channel to signal goroutines to stop
 }
 
 // NewTaskQueue initializes a new queue for traversal or upload.
@@ -52,12 +51,12 @@ func NewTaskQueue(queueType QueueType, phase int, srcOrDst string, paginationSiz
 	queueID := fmt.Sprintf("%s-%s", srcOrDst, queueType)
 	logging.GlobalLogger.Log(
 		"info", "System", "Queue", "Creating new task queue", map[string]any{
-		"queueID":        queueID,
-		"type":           queueType,
-		"phase":          phase,
-		"srcOrDst":       srcOrDst,
-		"paginationSize": paginationSize,
-	}, "CREATE_NEW_TASK_QUEUE", "All",
+			"queueID":        queueID,
+			"type":           queueType,
+			"phase":          phase,
+			"srcOrDst":       srcOrDst,
+			"paginationSize": paginationSize,
+		}, "CREATE_NEW_TASK_QUEUE", "All",
 	)
 
 	q := &TaskQueue{
@@ -76,7 +75,6 @@ func NewTaskQueue(queueType QueueType, phase int, srcOrDst string, paginationSiz
 		RunningLowTriggered: false,
 		RunningLowThreshold: runningLowThreshold,
 		IdleTriggered:       false,
-		StopChan:            make(chan struct{}),
 	}
 	q.cond = sync.NewCond(&q.mu)
 
@@ -150,8 +148,8 @@ func (q *TaskQueue) Resume() {
 		}, "RESUMING_QUEUE", q.SrcOrDst,
 	)
 	q.State = QueueRunning
-	/* 
-		TODO: This needs to change to workers subscribing to a signal 
+	/*
+		TODO: This needs to change to workers subscribing to a signal
 		and broadcasting to that signal instead
 	*/
 	q.cond.Broadcast() // Wake up all workers assigned to this queue
@@ -251,10 +249,10 @@ func (q *TaskQueue) SetPaginationSize(newSize int) {
 
 	logging.GlobalLogger.Log(
 		"info", "System", "Queue", "Updating pagination size", map[string]any{
-		"queueID": q.QueueID,
-		"oldSize": q.PaginationSize,
-		"newSize": newSize,
-	}, "UPDATING_PAGINATION_SIZE", q.SrcOrDst,
+			"queueID": q.QueueID,
+			"oldSize": q.PaginationSize,
+			"newSize": newSize,
+		}, "UPDATING_PAGINATION_SIZE", q.SrcOrDst,
 	)
 	q.PaginationSize = newSize
 	q.mu.Unlock()
@@ -312,10 +310,10 @@ func (q *TaskQueue) AreAllWorkersIdle() bool {
 
 	logging.GlobalLogger.Log(
 		"info", "System", "Queue", "Checking worker idle status", map[string]any{
-		"queueID":     q.QueueID,
-		"allIdle":     allIdle,
-		"workerCount": len(q.workers),
-	}, "CHECKING_IDLE_WORKERS", q.SrcOrDst,
+			"queueID":     q.QueueID,
+			"allIdle":     allIdle,
+			"workerCount": len(q.workers),
+		}, "CHECKING_IDLE_WORKERS", q.SrcOrDst,
 	)
 	return allIdle
 }
@@ -345,12 +343,12 @@ func (q *TaskQueue) TrackedPaths(includeInProgress bool) map[string]bool {
 
 	logging.GlobalLogger.Log(
 		"info", "System", "Queue", "Tracked paths retrieved", map[string]any{
-		"queueID":           q.QueueID,
-		"includeInProgress": includeInProgress,
-		"trackedCount":      len(tracked),
-		"queuedCount":       len(q.tasks),
-		"inProgressCount":   len(q.inProgressTasks),
-	}, "TRACKED_PATHS_RETRIEVED", q.SrcOrDst,
+			"queueID":           q.QueueID,
+			"includeInProgress": includeInProgress,
+			"trackedCount":      len(tracked),
+			"queuedCount":       len(q.tasks),
+			"inProgressCount":   len(q.inProgressTasks),
+		}, "TRACKED_PATHS_RETRIEVED", q.SrcOrDst,
 	)
 
 	return tracked
@@ -365,10 +363,10 @@ func (q *TaskQueue) AddInProgressTask(task Task) {
 
 	logging.GlobalLogger.Log(
 		"info", "System", "Queue", "Task added to in-progress", map[string]any{
-		"queueID": q.QueueID,
-		"taskID":  task.GetID(),
-		"path":    task.GetPath(),
-	}, "TASK_ADDED_TO_IN_PROGRESS", q.SrcOrDst,
+			"queueID": q.QueueID,
+			"taskID":  task.GetID(),
+			"path":    task.GetPath(),
+		}, "TASK_ADDED_TO_IN_PROGRESS", q.SrcOrDst,
 	)
 }
 
@@ -384,10 +382,10 @@ func (q *TaskQueue) RemoveInProgressTask(taskID string) {
 
 			logging.GlobalLogger.Log(
 				"info", "System", "Queue", "Task removed from in-progress", map[string]any{
-				"queueID": q.QueueID,
-				"taskID":  taskID,
-				"path":    task.GetPath(),
-			}, "TASK_REMOVED_FROM_IN_PROGRESS", q.SrcOrDst,
+					"queueID": q.QueueID,
+					"taskID":  taskID,
+					"path":    task.GetPath(),
+				}, "TASK_REMOVED_FROM_IN_PROGRESS", q.SrcOrDst,
 			)
 			return
 		}
@@ -425,14 +423,12 @@ func (q *TaskQueue) GetAllTaskPaths() []string {
 	return paths
 }
 
-
-func (q *TaskQueue) resetRunningLowFlag() {
+func (q *TaskQueue) ResetRunningLowFlag() {
 	q.Lock()
 	defer q.Unlock()
 
 	q.RunningLowTriggered = false
 }
-
 
 func (q *TaskQueue) TasksEmpty() bool {
 	q.Lock()

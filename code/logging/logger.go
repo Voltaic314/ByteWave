@@ -35,9 +35,9 @@ var QueueAcronyms = map[string]string{
 
 // TableAcronyms maps table names to logical acronyms for logging subtopic filtering.
 var TableAcronyms = map[string]string{
-	"audit_log":          "logs",
-	"source_nodes":       "src",
-	"destination_nodes":  "dst",
+	"audit_log":         "logs",
+	"source_nodes":      "src",
+	"destination_nodes": "dst",
 }
 
 func InitLogger(configPath string) {
@@ -119,11 +119,11 @@ func (l *Logger) Log(level, entity, entityID, message string, details map[string
 		}()
 	}
 
-	// Queue to DB
+	// Queue to DB - Match canonical audit_log schema from tables/audit_log.go
 	if l.logWQ != nil {
 		detailsJSON, _ := json.Marshal(e.Details)
-		params := []any{uuid.New().String(), e.Timestamp, e.Level, e.Entity, e.EntityID, string(detailsJSON), e.Message, e.Action, e.Queue}
-		query := `INSERT INTO audit_log (id, timestamp, level, entity, entity_id, details, message, action, queue) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		params := []any{uuid.New().String(), e.Timestamp, e.Level, e.Entity, e.EntityID, string(detailsJSON), e.Message, e.Action, nil, nil, e.Queue}
+		query := `INSERT INTO audit_log (id, timestamp, level, entity, entity_id, details, message, action, topic, subtopic, queue) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 		l.enqueueLog(query, params)
 	}
 }
