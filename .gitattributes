@@ -1,0 +1,7 @@
+# Tell GitHub Linguist to ignore vendored C/C++ code
+*.c linguist-vendored
+*.cpp linguist-vendored
+*.h linguist-vendored
+*.hpp linguist-vendored
+/tests/** linguist-vendored
+/venv/** linguist-vendored
