@@ -36,7 +36,7 @@ func NewConductor(dbPath string, retryThreshold, batchSize int) *Conductor {
 }
 
 // StartTraversal initializes QP, sets up queues/workers, and starts the system
-func (c *Conductor) StartTraversal() {
+func (c *Conductor) StartTraversal(num_of_workers ...int) {
 	// Initialize QP after DB and other components are ready
 	c.QP = NewQueuePublisher(c.DB, c.retryThreshold, c.batchSize)
 	c.QP.SetConductor(c) // Set conductor reference for dynamic queue creation
@@ -48,10 +48,13 @@ func (c *Conductor) StartTraversal() {
 	// Create workers FIRST before starting QP to avoid startup race condition
 	var os_svc services.BaseServiceInterface = services.NewOSService()
 	pv_obj := pv.NewPathValidator()
-	num_of_workers := 1
+	nWorkers := 1
+	if len(num_of_workers) > 0 {
+		nWorkers = num_of_workers[0]
+	}
 
 	// Create source workers only - destination workers will be created when dst queue is set up
-	for i := 0; i < num_of_workers; i++ {
+	for i := 0; i < nWorkers; i++ {
 		tw := &TraverserWorker{
 			WorkerBase: c.AddWorker(srcQueueName, "src"),
 			DB:         c.DB,
@@ -72,7 +75,7 @@ func (c *Conductor) StartTraversal() {
 }
 
 // SetupDestinationQueue creates the destination queue and workers when source reaches level 1
-func (c *Conductor) SetupDestinationQueue() {
+func (c *Conductor) SetupDestinationQueue(num_of_workers ...int) {
 	dstQueueName := "dst-traversal"
 
 	// Create destination queue
@@ -81,9 +84,12 @@ func (c *Conductor) SetupDestinationQueue() {
 	// Create destination workers
 	var os_svc services.BaseServiceInterface = services.NewOSService()
 	pv_obj := pv.NewPathValidator()
-	num_of_workers := 1
+	nWorkers := 1
+	if len(num_of_workers) > 0 {
+		nWorkers = num_of_workers[0]
+	}
 
-	for range num_of_workers {
+	for range nWorkers {
 		tw := &TraverserWorker{
 			WorkerBase: c.AddWorker(dstQueueName, "dst"),
 			DB:         c.DB,

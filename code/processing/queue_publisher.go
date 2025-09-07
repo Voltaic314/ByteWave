@@ -33,7 +33,7 @@ type queueSnapshot struct {
 
 // ConductorInterface defines the methods QP needs from Conductor
 type ConductorInterface interface {
-	SetupDestinationQueue()
+	SetupDestinationQueue(num_of_workers ...int)
 }
 
 // QueuePublisher manages multiple queues dynamically.
