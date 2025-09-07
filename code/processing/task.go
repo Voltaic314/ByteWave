@@ -11,80 +11,134 @@ import (
 type TaskType string
 
 const (
-	TaskTraversal TaskType = "traversal"
-	TaskUpload    TaskType = "upload"
+	TaskSrcTraversal TaskType = "src_traversal"
+	TaskDstTraversal TaskType = "dst_traversal"
+	TaskUpload       TaskType = "upload"
 )
 
-type Task struct {
+// Task interface that all task types must implement
+type Task interface {
+	GetID() string
+	GetType() TaskType
+	GetPath() string
+	GetFolder() *filesystem.Folder
+	GetFile() *filesystem.File
+	GetParentTaskID() *string
+	IsLocked() bool
+	SetLocked(bool)
+}
+
+// BaseTask contains common fields for all task types
+type BaseTask struct {
 	ID           string             // Unique task identifier
-	Type         TaskType           // Task type (traversal, upload)
+	Type         TaskType           // Task type (src_traversal, dst_traversal, upload)
 	Folder       *filesystem.Folder // Pointer to Folder (nullable for upload tasks)
 	File         *filesystem.File   // Pointer to File (nullable for traversal tasks)
 	ParentTaskID *string            // Parent task ID (nullable for root tasks)
 	Locked       bool               // Lock state to prevent race conditions
 }
 
-func NewTraversalTask(id string, folder *filesystem.Folder, parentTaskID *string) (*Task, error) {
+// TraversalSrcTask represents a source traversal task
+type TraversalSrcTask struct {
+	BaseTask
+}
 
-	// Perform basic validation
-	if folder.Path == "" {
-		logging.GlobalLogger.LogMessage("error", "Invalid folder path", map[string]any{
-			"taskID": id,
-		})
-		return nil, fmt.Errorf("invalid folder: path is empty")
+// TraversalDstTask represents a destination traversal task with expected source children
+type TraversalDstTask struct {
+	BaseTask
+	ExpectedSrcChildren []*filesystem.Folder // Expected source children for comparison
+	ExpectedSrcFiles    []*filesystem.File   // Expected source files for comparison
+}
+
+// UploadTask represents an upload task
+type UploadTask struct {
+	BaseTask
+}
+
+// Interface implementation for BaseTask
+func (bt *BaseTask) GetID() string                 { return bt.ID }
+func (bt *BaseTask) GetType() TaskType             { return bt.Type }
+func (bt *BaseTask) GetFolder() *filesystem.Folder { return bt.Folder }
+func (bt *BaseTask) GetFile() *filesystem.File     { return bt.File }
+func (bt *BaseTask) GetParentTaskID() *string      { return bt.ParentTaskID }
+func (bt *BaseTask) IsLocked() bool                { return bt.Locked }
+func (bt *BaseTask) SetLocked(locked bool)         { bt.Locked = locked }
+
+func (bt *BaseTask) GetPath() string {
+	if bt.Folder != nil {
+		return bt.Folder.Path
 	}
-
-	task := &Task{
-		ID:           id,
-		Type:         TaskTraversal,
-		Folder:       folder,
-		File:         nil,
-		ParentTaskID: parentTaskID,
-		Locked:       false,
+	if bt.File != nil {
+		return bt.File.Path
 	}
+	return ""
+}
 
-	return task, nil
+func NewSrcTraversalTask(id string, folder *filesystem.Folder, parentTaskID *string) (*TraversalSrcTask, error) {
+
+	return &TraversalSrcTask{
+		BaseTask: BaseTask{
+			ID:           id,
+			Type:         TaskSrcTraversal,
+			Folder:       folder,
+			File:         nil,
+			ParentTaskID: parentTaskID,
+			Locked:       false,
+		},
+	}, nil
 }
 
 // NewUploadTask initializes a new upload task (file or folder).
-func NewUploadTask(id string, file *filesystem.File, folder *filesystem.Folder, parentTaskID *string) (*Task, error) {
-	logging.GlobalLogger.LogMessage("info", "Creating new upload task", map[string]any{
+func NewUploadTask(id string, file *filesystem.File, folder *filesystem.Folder, parentTaskID *string) (*UploadTask, error) {
+	logging.GlobalLogger.Log("info", "System", "Task", "Creating new upload task", map[string]any{
 		"taskID":    id,
 		"hasFile":   file != nil,
 		"hasFolder": folder != nil,
 		"hasParent": parentTaskID != nil,
-	})
+	}, "CREATING_NEW_UPLOAD_TASK", "upload",
+	)
 
 	if file == nil && folder == nil {
-		logging.GlobalLogger.LogMessage("error", "Cannot create upload task without file or folder", map[string]any{
+		logging.GlobalLogger.Log("error", "System", "Task", "Cannot create upload task without file or folder", map[string]any{
 			"taskID": id,
-		})
+		}, "CREATING_NEW_UPLOAD_TASK", "upload",
+		)
 		return nil, fmt.Errorf("cannot create upload task without file or folder")
 	}
 
-	task := &Task{
-		ID:           id,
-		Type:         TaskUpload,
-		Folder:       folder,
-		File:         file,
-		ParentTaskID: parentTaskID,
-		Locked:       false,
+	task := &UploadTask{
+		BaseTask: BaseTask{
+			ID:           id,
+			Type:         TaskUpload,
+			Folder:       folder,
+			File:         file,
+			ParentTaskID: parentTaskID,
+			Locked:       false,
+		},
 	}
 
-	logging.GlobalLogger.LogMessage("info", "Upload task created successfully", map[string]any{
+	logging.GlobalLogger.Log("info", "System", "Task", "Upload task created successfully", map[string]any{
 		"taskID": id,
 		"path":   task.GetPath(),
-	})
+	}, "UPLOAD_TASK_CREATED_SUCCESSFULLY", "upload",
+	)
 	return task, nil
 }
 
-func (t *Task) GetPath() string {
+// NewDstTraversalTask creates a task specifically for destination traversal
+func NewDstTraversalTask(id string, folder *filesystem.Folder, parentTaskID *string,
+	expectedSrcChildren []*filesystem.Folder, expectedSrcFiles []*filesystem.File) (*TraversalDstTask, error) {
 
-	if t.Folder != nil {
-		return t.Folder.Path
-	}
-	if t.File != nil {
-		return t.File.Path
-	}
-	return ""
+	return &TraversalDstTask{
+		BaseTask: BaseTask{
+			ID:           id,
+			Type:         TaskDstTraversal,
+			Folder:       folder,
+			File:         nil,
+			ParentTaskID: parentTaskID,
+			Locked:       false,
+		},
+		ExpectedSrcChildren: expectedSrcChildren,
+		ExpectedSrcFiles:    expectedSrcFiles,
+	}, nil
 }

@@ -30,6 +30,7 @@ func NewWriteQueue(tableName string, queueType typesdb.WriteQueueType, batchSize
 		lastFlushed: time.Now(),
 		batchSize:   batchSize,
 		flushTimer:  flushTimer,
+		isWriting:   false,
 	}
 }
 
@@ -45,7 +46,12 @@ func (wq *WriteQueue) Add(path string, op typesdb.WriteOp) {
 		}
 	} else {
 		wq.queue[path] = append(wq.queue[path], op)
-		if len(wq.queue) >= wq.batchSize {
+		// Count total operations across all paths, not just unique paths
+		totalOps := 0
+		for _, ops := range wq.queue {
+			totalOps += len(ops)
+		}
+		if totalOps >= wq.batchSize {
 			wq.readyToWrite = true
 		}
 	}
@@ -60,6 +66,8 @@ func (wq *WriteQueue) IsReadyToWrite() bool {
 
 // GetFlushInterval returns the current flush interval
 func (wq *WriteQueue) GetFlushInterval() time.Duration {
+	wq.mu.Lock()
+	defer wq.mu.Unlock()
 	return wq.flushTimer
 }
 
@@ -72,126 +80,133 @@ func (wq *WriteQueue) SetFlushInterval(interval time.Duration) {
 
 // Flush processes all queued operations and returns the batches
 func (wq *WriteQueue) Flush(force ...bool) []typesdb.Batch {
-	wq.mu.Lock()
-	// If we're already writing, don't flush
-	if wq.isWriting {
-		wq.mu.Unlock()
+	// 1. Check if we should flush (with proper locking)
+	// CAREFUL. This function LOCKS the mutex.
+	shouldFlush := wq.ShouldFlush(force...)
+	if !shouldFlush {
 		return nil
 	}
-	// If we're not forcing a flush and there are not enough operations to write, don't flush
-	shouldForce := len(force) > 0 && force[0]
-	if !shouldForce && !wq.readyToWrite {
-		wq.mu.Unlock()
-		return nil
-	}
-	wq.isWriting = true
-	wq.readyToWrite = false // Reset ready state after flush
-	wq.mu.Unlock()
 
+	// 2. Execute the flush (each method handles its own locking)
+	wq.mu.Lock()
 	if wq.queueType == typesdb.LogWriteQueue {
-		return wq.flushLogQueue()
-	}
-	return wq.flushNodeQueue()
-}
+		wq.mu.Unlock()
 
-func (wq *WriteQueue) flushLogQueue() []typesdb.Batch {
-	wq.mu.Lock()
-	if len(wq.logQueue) == 0 {
+		// CAREFUL. This function LOCKS the mutex.
+		batches := wq.flushLogQueue()
+
+		// Reset isWriting flag now that flush is complete
+		wq.mu.Lock()
 		wq.isWriting = false
 		wq.mu.Unlock()
-		return nil
+
+		return batches
 	}
-	queue := wq.logQueue
-	wq.logQueue = nil
 	wq.mu.Unlock()
 
-	// Create a single batch for all operations
-	batch := typesdb.Batch{
-		Table:  wq.tableName,
-		OpType: "insert",
-		Ops:    make([]typesdb.WriteOp, len(queue)),
-	}
-	copy(batch.Ops, queue)
+	// CAREFUL. This function LOCKS the mutex.
+	batches := wq.flushNodeQueue()
 
+	// Reset isWriting flag now that flush is complete
 	wq.mu.Lock()
-	wq.lastFlushed = time.Now()
 	wq.isWriting = false
 	wq.mu.Unlock()
 
-	batches := []typesdb.Batch{batch}
 	return batches
+}
+
+// ShouldFlush determines if a flush should occur and sets up the writing state
+// Returns (ShouldFlush bool)
+func (wq *WriteQueue) ShouldFlush(force ...bool) bool {
+	wq.mu.Lock()
+	defer wq.mu.Unlock()
+
+	ShouldForce := len(force) > 0 && force[0]
+
+	// If we're already writing, don't flush
+	if wq.isWriting {
+		return false
+	}
+
+	// Check timing and operations
+	timeSinceLastFlush := time.Since(wq.lastFlushed)
+	timeBasedFlush := timeSinceLastFlush >= wq.flushTimer
+
+	hasOperations := false
+	if wq.queueType == typesdb.LogWriteQueue {
+		hasOperations = len(wq.logQueue) > 0
+	} else {
+		hasOperations = len(wq.queue) > 0
+	}
+
+	// Flush if: forced, batch size reached, OR time interval passed (and we have operations)
+	ShouldFlush := ShouldForce || wq.readyToWrite || (timeBasedFlush && hasOperations)
+
+	if !ShouldFlush {
+		return false
+	}
+
+	// Set up for writing (only if we're going to flush)
+	wq.isWriting = true
+	wq.readyToWrite = false
+
+	return true
+}
+
+func (wq *WriteQueue) flushLogQueue() []typesdb.Batch {
+	// 1. Snapshot and clear the queue
+	wq.mu.Lock()
+	if len(wq.logQueue) == 0 {
+		wq.mu.Unlock()
+		return nil
+	}
+
+	// Take snapshot of operations and clear the queue
+	operations := make([]typesdb.WriteOp, len(wq.logQueue))
+	copy(operations, wq.logQueue)
+	wq.logQueue = nil
+	wq.lastFlushed = time.Now()
+	wq.mu.Unlock()
+
+	// 2. Create batch outside of lock
+	batch := typesdb.Batch{
+		Table:  wq.tableName,
+		OpType: "insert",
+		Ops:    operations,
+	}
+
+	return []typesdb.Batch{batch}
 }
 
 func (wq *WriteQueue) flushNodeQueue() []typesdb.Batch {
 	wq.mu.Lock()
 	if len(wq.queue) == 0 {
-		wq.isWriting = false
 		wq.mu.Unlock()
 		return nil
 	}
-	// snapshot the keys under lock to avoid concurrent map iteration
-	keys := make([]string, 0, len(wq.queue))
-	for p := range wq.queue {
-		keys = append(keys, p)
-	}
-	wq.mu.Unlock()
 
-	var all []typesdb.Batch
-	// drain round-by-round
-	for {
-		round := wq.drainRound(keys)
-		if len(round) == 0 {
-			break
-		}
-		all = append(all, round...)
-	}
-
-	wq.mu.Lock()
-	wq.isWriting = false
-	wq.mu.Unlock()
-
-	return all
-}
-
-/*
-drainRound processes one operation per path, grouped by operation type
-
-NOTE: This complex path-based batching logic was originally designed to prevent
-write conflicts when multiple operations could target the same path concurrently.
-With the new phase-based traversal design, each path is only written to once
-per phase, making this logic technically redundant. However, we keep it as
-defensive programming - it provides an extra safety layer and doesn't hurt
-performance too much. If you ever need to support concurrent writes to the
-same path again, this logic is already in place.
-*/
-func (wq *WriteQueue) drainRound(keys []string) []typesdb.Batch {
-	wq.mu.Lock()
-	defer wq.mu.Unlock()
-
+	// Collect all operations grouped by type
 	byType := make(map[string][]typesdb.WriteOp)
-	for _, p := range keys {
-		ops, ok := wq.queue[p]
-		if !ok || len(ops) == 0 {
-			continue
-		}
-		first := ops[0]
-		byType[first.OpType] = append(byType[first.OpType], first)
-		wq.queue[p] = ops[1:]
-		if len(wq.queue[p]) == 0 {
-			delete(wq.queue, p)
+	for _, ops := range wq.queue {
+		for _, op := range ops {
+			byType[op.OpType] = append(byType[op.OpType], op)
 		}
 	}
 
+	// Clear the entire queue
+	wq.queue = make(map[string][]typesdb.WriteOp)
 	wq.lastFlushed = time.Now()
+	wq.mu.Unlock()
 
-	// build Batch slices
-	out := make([]typesdb.Batch, 0, len(byType))
-	for typ, ops := range byType {
-		out = append(out, typesdb.Batch{
+	// Create batches directly from all operations
+	batches := make([]typesdb.Batch, 0, len(byType))
+	for opType, ops := range byType {
+		batches = append(batches, typesdb.Batch{
 			Table:  wq.tableName,
-			OpType: typ,
+			OpType: opType,
 			Ops:    ops,
 		})
 	}
-	return out
+
+	return batches
 }

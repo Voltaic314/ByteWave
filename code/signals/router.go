@@ -1,7 +1,6 @@
 package signals
 
 import (
-	"fmt"
 	"sync"
 	"time"
 
@@ -9,19 +8,9 @@ import (
 	"github.com/google/uuid"
 )
 
-type AckMode int
-
-const (
-	AckNone AckMode = iota
-	AckAny
-	AckAll
-)
-
 type Signal struct {
 	Topic     string
 	Payload   any
-	Ack       chan struct{}
-	AckMode   AckMode
 	Timestamp time.Time
 	ID        string
 }
@@ -33,13 +22,20 @@ type SignalRouter struct {
 
 type topicHub struct {
 	input       chan Signal
-	subscribers []subscriber
+	subscribers map[string]subscriber // keyed by actorID for easy Unsubscribe
 	mu          sync.RWMutex
+	closed      bool
 }
 
 type subscriber struct {
 	mailbox chan Signal
 	actorID string
+}
+
+// UnsubscribeResult provides details about an unsubscribe attempt
+type UnsubscribeResult struct {
+	Found   bool
+	Removed bool
 }
 
 var GlobalSR *SignalRouter
@@ -48,10 +44,13 @@ func InitSignalRouter() {
 	GlobalSR = &SignalRouter{
 		topics: make(map[string]*topicHub),
 	}
-	logging.GlobalLogger.LogSystem("info", "SignalRouter", "✅ SignalRouter initialized", nil)
+	logging.GlobalLogger.Log("info", "System", "SignalRouter", "✅ SignalRouter initialized", nil, "SIGNAL_ROUTER_INITIALIZED", "None")
 }
 
-func (sr *SignalRouter) Subscribe(topic string, mailbox chan Signal) {
+// Subscribe assigns a mailbox (PO box) to an entity for a topic
+// Returns actorID for the mailbox
+// Optional mailboxSize parameter (default: 1)
+func (sr *SignalRouter) Subscribe(topic string, mailboxSize ...int) string {
 	sr.mu.Lock()
 	defer sr.mu.Unlock()
 
@@ -59,207 +58,275 @@ func (sr *SignalRouter) Subscribe(topic string, mailbox chan Signal) {
 	if !exists {
 		hub = &topicHub{
 			input:       make(chan Signal, 64),
-			subscribers: make([]subscriber, 0),
+			subscribers: make(map[string]subscriber),
+			closed:      false,
 		}
 		sr.topics[topic] = hub
 		go hub.runFanOut(topic)
-		logging.GlobalLogger.LogSystem("debug", "SignalRouter", fmt.Sprintf("Initialized topic hub: %s", topic), nil)
+		logging.GlobalLogger.Log("debug", "System", "SignalRouter", "Initialized topic hub", map[string]any{
+			"topic": topic,
+		}, "INITIALIZED_TOPIC_HUB", "None")
 	}
 
 	hub.mu.Lock()
 	defer hub.mu.Unlock()
-	hub.subscribers = append(hub.subscribers, subscriber{mailbox: mailbox, actorID: uuid.New().String()})
-	logging.GlobalLogger.LogSystem("trace", "SignalRouter", fmt.Sprintf("Subscribed mailbox to topic: %s", topic), map[string]any{
-		"mailbox_size": cap(mailbox),
-	})
+	actorID := uuid.New().String()
+
+	// Use provided mailbox size or default to 1
+	size := 1
+	if len(mailboxSize) > 0 && mailboxSize[0] > 0 {
+		size = mailboxSize[0]
+	}
+
+	mailbox := make(chan Signal, size) // SR manages the channel internally
+	hub.subscribers[actorID] = subscriber{mailbox: mailbox, actorID: actorID}
+
+	logging.GlobalLogger.Log("trace", "System", "SignalRouter", "Mailbox assigned", map[string]any{
+		"topic":       topic,
+		"actorID":     actorID,
+		"mailboxSize": size,
+	}, "MAILBOX_ASSIGNED", "None")
+
+	return actorID
+}
+
+// CheckMail checks mailbox for new mail (non-blocking)
+// Returns signal if available, nil if no mail
+func (sr *SignalRouter) CheckMail(topic string, actorID string) *Signal {
+	sr.mu.RLock()
+	hub, exists := sr.topics[topic]
+	sr.mu.RUnlock()
+	if !exists {
+		return nil
+	}
+
+	hub.mu.RLock()
+	sub, exists := hub.subscribers[actorID]
+	hub.mu.RUnlock()
+	if !exists {
+		return nil
+	}
+
+	select {
+	case sig := <-sub.mailbox:
+		return &sig
+	default:
+		return nil // No mail
+	}
+}
+
+// WaitForMail waits for mail in mailbox (blocking)
+// Returns signal when available, or nil if topic/mailbox was closed
+func (sr *SignalRouter) WaitForMail(topic string, actorID string) *Signal {
+	sr.mu.RLock()
+	hub, exists := sr.topics[topic]
+	sr.mu.RUnlock()
+	if !exists {
+		return nil
+	}
+
+	hub.mu.RLock()
+	sub, exists := hub.subscribers[actorID]
+	hub.mu.RUnlock()
+	if !exists {
+		return nil
+	}
+
+	sig, ok := <-sub.mailbox
+	if !ok {
+		return nil // Channel closed
+	}
+	return &sig
+}
+
+// Unsubscribe removes a subscriber by actorID from a topic.
+// Returns a result struct indicating whether it was found/removed and an error if something went wrong.
+func (sr *SignalRouter) Unsubscribe(topic string, actorID string) (UnsubscribeResult, error) {
+	sr.mu.RLock()
+	hub, exists := sr.topics[topic]
+	sr.mu.RUnlock()
+	if !exists {
+		return UnsubscribeResult{Found: false, Removed: false}, nil
+	}
+
+	hub.mu.Lock()
+	defer hub.mu.Unlock()
+
+	sub, ok := hub.subscribers[actorID]
+	if !ok {
+		return UnsubscribeResult{Found: false, Removed: false}, nil
+	}
+
+	// Close the mailbox channel and remove from subscribers
+	close(sub.mailbox)
+	delete(hub.subscribers, actorID)
+
+	logging.GlobalLogger.Log("debug", "System", "SignalRouter", "Unsubscribed actor from topic", map[string]any{
+		"topic":   topic,
+		"actorID": actorID,
+	}, "UNSUBSCRIBED_ACTOR_FROM_TOPIC", "None")
+
+	return UnsubscribeResult{Found: true, Removed: true}, nil
 }
 
 func (sr *SignalRouter) Publish(sig Signal) {
-	// Set timestamp if not already set
 	if sig.Timestamp.IsZero() {
 		sig.Timestamp = time.Now()
 	}
-
-	// Generate ID if not provided
 	if sig.ID == "" {
 		sig.ID = uuid.New().String()
 	}
 
-	sr.mu.RLock()
-	defer sr.mu.RUnlock()
+	// log that we are sending a signal
+	logging.GlobalLogger.Log("debug", "System", "SignalRouter", "Sending signal", map[string]any{
+		"topic":   sig.Topic,
+		"id":      sig.ID,
+		"payload": sig.Payload,
+	}, "SENDING_SIGNAL", "None")
 
+	sr.mu.RLock()
 	hub, exists := sr.topics[sig.Topic]
+	sr.mu.RUnlock()
 	if !exists {
-		logging.GlobalLogger.LogSystem("warning", "SignalRouter", "Signal dropped (no hub exists)", map[string]any{
+		logging.GlobalLogger.Log("warning", "System", "SignalRouter", "Signal dropped (no hub exists)", map[string]any{
 			"topic": sig.Topic,
 			"id":    sig.ID,
-		})
+		}, "SIGNAL_DROPPED_NO_HUB_EXISTS", "None")
 		return
 	}
 
 	select {
 	case hub.input <- sig:
-		logging.GlobalLogger.LogSystem("trace", "SignalRouter", "Signal enqueued to topic", map[string]any{
-			"topic":   sig.Topic,
-			"id":      sig.ID,
-			"ackMode": sig.AckMode,
-		})
-	default:
-		logging.GlobalLogger.LogSystem("warning", "SignalRouter", "Signal dropped (hub input full)", map[string]any{
+		logging.GlobalLogger.Log("trace", "System", "SignalRouter", "Signal enqueued to topic", map[string]any{
 			"topic": sig.Topic,
 			"id":    sig.ID,
-		})
-	}
-}
-
-func (sr *SignalRouter) PublishWithAck(sig Signal, timeout time.Duration) error {
-	if sig.AckMode == AckNone {
-		sr.Publish(sig)
-		return nil
-	}
-
-	// Set timestamp if not already set
-	if sig.Timestamp.IsZero() {
-		sig.Timestamp = time.Now()
-	}
-
-	// Generate ID if not provided
-	if sig.ID == "" {
-		sig.ID = uuid.New().String()
-	}
-
-	sig.Ack = make(chan struct{})
-	sr.Publish(sig)
-
-	select {
-	case <-sig.Ack:
-		logging.GlobalLogger.LogSystem("debug", "SignalRouter", "Signal acknowledged", map[string]any{
-			"topic":   sig.Topic,
-			"id":      sig.ID,
-			"ackMode": sig.AckMode,
-		})
-		return nil
-	case <-time.After(timeout):
-		logging.GlobalLogger.LogSystem("warning", "SignalRouter", "Signal ack timed out", map[string]any{
-			"topic":   sig.Topic,
-			"id":      sig.ID,
-			"ackMode": sig.AckMode,
-		})
-		return fmt.Errorf("signal ack timed out: topic=%s ID=%s", sig.Topic, sig.ID)
+		}, "SIGNAL_ENQUEUED_TO_TOPIC", "None")
+	default:
+		logging.GlobalLogger.Log("warning", "System", "SignalRouter", "Signal dropped (hub input full)", map[string]any{
+			"topic": sig.Topic,
+			"id":    sig.ID,
+		}, "SIGNAL_DROPPED_HUB_INPUT_FULL", "None")
 	}
 }
 
 func (hub *topicHub) runFanOut(topic string) {
 	for sig := range hub.input {
 		hub.mu.RLock()
-		subs := make([]subscriber, len(hub.subscribers))
-		copy(subs, hub.subscribers)
+		if hub.closed {
+			hub.mu.RUnlock()
+			return
+		}
+		subs := make([]subscriber, 0, len(hub.subscribers))
+		for _, s := range hub.subscribers {
+			subs = append(subs, s)
+		}
 		hub.mu.RUnlock()
-
-		// Build and deliver per-subscriber signals
-		var acks []ackEntry
 
 		for i, s := range subs {
 			sigToSend := sig
-			if sig.AckMode != AckNone {
-				sigToSend.Ack = make(chan struct{}, 1) // one-shot
-				acks = append(acks, ackEntry{id: s.actorID, ch: sigToSend.Ack})
-			}
-
 			select {
 			case s.mailbox <- sigToSend:
-				logging.GlobalLogger.LogSystem("trace", "SignalRouter", "Signal delivered to subscriber", map[string]any{
+				logging.GlobalLogger.Log("trace", "System", "SignalRouter", "Signal delivered to subscriber", map[string]any{
 					"topic":    topic,
 					"id":       sig.ID,
 					"subIndex": i,
-				})
+					"actorID":  s.actorID,
+				}, "SIGNAL_DELIVERED_TO_SUBSCRIBER", "None")
 			default:
-				logging.GlobalLogger.LogSystem("warning", "SignalRouter", "Mailbox full, dropping signal", map[string]any{
+				logging.GlobalLogger.Log("warning", "System", "SignalRouter", "Mailbox full, dropping signal", map[string]any{
 					"topic":    topic,
 					"id":       sig.ID,
 					"subIndex": i,
-				})
+					"actorID":  s.actorID,
+				}, "MAILBOX_FULL_DROPPING_SIGNAL", "None")
 			}
-		}
-
-		// Aggregate acknowledgments when required
-		if sig.AckMode == AckAny || sig.AckMode == AckAll {
-			go aggregateAcks(sig, acks)
 		}
 	}
 }
 
-// On registers a handler for a topic. If async is true, handler runs in a separate goroutine.
-func (sr *SignalRouter) On(topic string, handler func(Signal), async ...bool) {
-	ch := make(chan Signal, 8)
-	sr.Subscribe(topic, ch)
-
+func (sr *SignalRouter) On(topic string, handler func(Signal), async ...bool) string {
+	actorID := sr.Subscribe(topic)
 	runAsync := len(async) > 0 && async[0]
 
 	go func() {
-		for sig := range ch {
-			logging.GlobalLogger.LogSystem("trace", "SignalRouter", "Handler triggered", map[string]any{
-				"topic": topic,
-				"id":    sig.ID,
-				"async": runAsync,
-			})
+		for {
+			// Wait for mail (blocking)
+			sig := sr.WaitForMail(topic, actorID)
+			if sig == nil {
+				// Topic closed or mailbox removed
+				return
+			}
+
+			logging.GlobalLogger.Log("trace", "System", "SignalRouter", "Handler triggered", map[string]any{
+				"topic":   topic,
+				"id":      sig.ID,
+				"async":   runAsync,
+				"actorID": actorID,
+			}, "HANDLER_TRIGGERED", "None")
 
 			if runAsync {
-				go handler(sig)
+				go handler(*sig)
 			} else {
-				handler(sig)
+				handler(*sig)
 			}
 		}
 	}()
+
+	return actorID
 }
 
-type ackEntry struct {
-	id string
-	ch chan struct{}
-}
+// CloseTopic closes a single topic and all its subscribers.
+func (sr *SignalRouter) CloseTopic(topic string) {
+	sr.mu.Lock()
+	hub, exists := sr.topics[topic]
+	if exists {
+		delete(sr.topics, topic)
+	}
+	sr.mu.Unlock()
 
-func aggregateAcks(root Signal, acks []ackEntry) {
-	if root.AckMode == AckNone || len(acks) == 0 {
+	if !exists {
 		return
 	}
 
-	target := 1
-	if root.AckMode == AckAll {
-		target = len(acks)
-	}
-
-	seen := make(map[string]struct{}, len(acks))
-	done := make(chan string, len(acks))
-
-	for _, a := range acks {
-		a := a
-		go func() {
-			<-a.ch
-			done <- a.id
-		}()
-	}
-
-	remaining := target
-	for remaining > 0 {
-		id := <-done
-		if _, dup := seen[id]; dup {
-			continue
+	hub.mu.Lock()
+	if !hub.closed {
+		hub.closed = true
+		close(hub.input)
+		// Close all subscriber mailboxes
+		for _, sub := range hub.subscribers {
+			close(sub.mailbox)
 		}
-		seen[id] = struct{}{}
-		remaining--
+		hub.subscribers = make(map[string]subscriber)
+		logging.GlobalLogger.Log("info", "System", "SignalRouter", "Topic closed", map[string]any{
+			"topic": topic,
+		}, "TOPIC_CLOSED", "None")
 	}
+	hub.mu.Unlock()
+}
 
-	if root.Ack != nil {
-		select {
-		case root.Ack <- struct{}{}:
-		default:
+// Close shuts down the entire router and all topics.
+func (sr *SignalRouter) Close() {
+	sr.mu.Lock()
+	topics := sr.topics
+	sr.topics = make(map[string]*topicHub)
+	sr.mu.Unlock()
+
+	for name, hub := range topics {
+		hub.mu.Lock()
+		if !hub.closed {
+			hub.closed = true
+			close(hub.input)
+			// Close all subscriber mailboxes
+			for _, sub := range hub.subscribers {
+				close(sub.mailbox)
+			}
+			hub.subscribers = make(map[string]subscriber)
+			logging.GlobalLogger.Log("info", "System", "SignalRouter", "Topic closed during global shutdown", map[string]any{
+				"topic": name,
+			}, "TOPIC_CLOSED_GLOBAL", "None")
 		}
+		hub.mu.Unlock()
 	}
 
-	logging.GlobalLogger.LogSystem("debug", "SignalRouter", "Ack aggregation completed", map[string]any{
-		"topic":  root.Topic,
-		"id":     root.ID,
-		"mode":   root.AckMode,
-		"needed": target,
-	})
+	logging.GlobalLogger.Log("info", "System", "SignalRouter", "✅ Global SignalRouter closed", nil, "SIGNAL_ROUTER_CLOSED", "None")
 }

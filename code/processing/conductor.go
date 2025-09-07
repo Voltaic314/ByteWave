@@ -1,7 +1,6 @@
 package processing
 
 import (
-	"fmt"
 	"time"
 
 	"github.com/Voltaic314/ByteWave/code/db"
@@ -9,6 +8,7 @@ import (
 	"github.com/Voltaic314/ByteWave/code/pv"
 	"github.com/Voltaic314/ByteWave/code/services"
 	"github.com/Voltaic314/ByteWave/code/signals"
+	typesdb "github.com/Voltaic314/ByteWave/code/types/db"
 )
 
 // The Boss 😎 - Responsible for setting up QP, queues, and workers
@@ -23,9 +23,9 @@ type Conductor struct {
 func NewConductor(dbPath string, retryThreshold, batchSize int) *Conductor {
 	dbInstance, err := db.NewDB(dbPath) // Creates DB connection
 	if err != nil {
-		logging.GlobalLogger.LogMessage("error", "Failed to initialize DB", map[string]any{
+		logging.GlobalLogger.Log("error", "System", "Conductor", "Failed to initialize DB", map[string]any{
 			"error": err.Error(),
-		})
+		}, "CREATE_DB", "All")
 		return nil
 	}
 	return &Conductor{
@@ -39,56 +39,113 @@ func NewConductor(dbPath string, retryThreshold, batchSize int) *Conductor {
 func (c *Conductor) StartTraversal() {
 	// Initialize QP after DB and other components are ready
 	c.QP = NewQueuePublisher(c.DB, c.retryThreshold, c.batchSize)
+	c.QP.SetConductor(c) // Set conductor reference for dynamic queue creation
 
-	// Setup queues
-	name := "src-traversal"
-	c.SetupQueue(name, TraversalQueueType, 0, "src", 1000)
+	// Setup source queue only - destination queue will be created when source reaches level 1
+	srcQueueName := "src-traversal"
+	c.SetupQueue(srcQueueName, TraversalQueueType, 0, "src", 1000)
 
+	// Create workers FIRST before starting QP to avoid startup race condition
 	var os_svc services.BaseServiceInterface = services.NewOSService()
 	pv_obj := pv.NewPathValidator()
+	num_of_workers := 1
 
-	// Create the workers and assign them to the queue! 🤖
-	num_of_workers := 10
-	for range num_of_workers {
+	// Create source workers only - destination workers will be created when dst queue is set up
+	for i := 0; i < num_of_workers; i++ {
 		tw := &TraverserWorker{
-			WorkerBase: c.AddWorker("src-traversal", "src"),
+			WorkerBase: c.AddWorker(srcQueueName, "src"),
 			DB:         c.DB,
-			Service:    os_svc, // Or whatever service you need
-			pv:         pv_obj, // Or load actual rules if available
+			Service:    os_svc,
+			pv:         pv_obj,
 		}
-		// register worker to the queue
-
 		go tw.Run(tw.ProcessTraversalTask)
 	}
 
-	// Start QP listening loop
-	c.StartAll()
+	// Small delay to let workers settle into their WaitForWork state
+	time.Sleep(50 * time.Millisecond)
 
-	time.Sleep(25 * time.Millisecond) // Give QP a moment to initialize
+	// Now start QP main control loop after workers are ready
+	go c.QP.Run()
 
-	// kick start the first phase manually
-	signals.GlobalSR.Publish(signals.Signal{
-		Topic:   "qp:phase_updated",
-		Payload: 0,
-	})
+	// Start monitoring for queue completion
+	go c.monitorQueueCompletion()
+}
 
-	// Listen for traversal complete signals
-	// This is a separate goroutine to handle traversal completion signals
-	signals.GlobalSR.On("qp:traversal_complete:src-traversal", func(sig signals.Signal) {
-		queueName, ok := sig.Payload.(string)
-		if !ok {
-			logging.GlobalLogger.LogSystem("error", "Conductor", "Invalid traversal.complete payload", map[string]any{
-				"payload_type": fmt.Sprintf("%T", sig.Payload),
-			})
-			return
+// SetupDestinationQueue creates the destination queue and workers when source reaches level 1
+func (c *Conductor) SetupDestinationQueue() {
+	dstQueueName := "dst-traversal"
+
+	// Create destination queue
+	c.SetupQueue(dstQueueName, TraversalQueueType, 0, "dst", 1000)
+
+	// Create destination workers
+	var os_svc services.BaseServiceInterface = services.NewOSService()
+	pv_obj := pv.NewPathValidator()
+	num_of_workers := 1
+
+	for range num_of_workers {
+		tw := &TraverserWorker{
+			WorkerBase: c.AddWorker(dstQueueName, "dst"),
+			DB:         c.DB,
+			Service:    os_svc,
+			pv:         pv_obj, // TODO: dst doesn't need pv, this should be removed when we build out the actual pv logic.
+		}
+		go tw.Run(tw.ProcessTraversalTask)
+	}
+
+	logging.GlobalLogger.Log("info", "System", "Conductor", "Destination queue and workers created", map[string]any{
+		"queue":   dstQueueName,
+		"workers": num_of_workers,
+	}, "CREATE_QUEUE", "dst")
+}
+
+// monitorQueueCompletion polls for queue completion instead of using signals
+func (c *Conductor) monitorQueueCompletion() {
+	for {
+		// Check if QP exists
+		if c.QP == nil {
+			break
 		}
 
-		logging.GlobalLogger.LogSystem("info", "Conductor", "Traversal complete received", map[string]any{
-			"queue": queueName,
-		})
+		// Poll for completed queues
+		c.QP.Mutex.Lock()
+		completedQueues := make([]string, 0)
+		for queueName, queue := range c.QP.Queues {
+			if queue.State == QueueComplete {
+				completedQueues = append(completedQueues, queueName)
+			}
+		}
+		c.QP.Mutex.Unlock()
 
-		c.TeardownQueue(queueName)
-	})
+		queueAcronyms := map[string]string{
+			"src-traversal": "src",
+			"dst-traversal": "dst",
+		}
+
+		// Teardown completed queues
+		for _, queueName := range completedQueues {
+			logging.GlobalLogger.Log("info", "System", "Conductor", "Queue completion detected", map[string]any{
+				"queue": queueName,
+			}, "CHECK_QUEUE_COMPLETION", queueAcronyms[queueName])
+			c.TeardownQueue(queueName)
+		}
+
+		// Stop monitoring if no queues remain
+		c.QP.Mutex.Lock()
+		queueCount := len(c.QP.Queues)
+		c.QP.Mutex.Unlock()
+
+		if queueCount == 0 {
+			logging.GlobalLogger.Log("info", "System", "Conductor", "All queues completed, stopping monitor", map[string]any{},
+				"LOG_COMPLETION", "All")
+			c.QP.Mutex.Lock()
+			c.QP.Running = false
+			c.QP.Mutex.Unlock()
+			break
+		}
+
+		time.Sleep(200 * time.Millisecond) // Poll every 200ms
+	}
 }
 
 // SetupQueue initializes a queue and registers it with QP
@@ -97,17 +154,46 @@ func (c *Conductor) SetupQueue(name string, queueType QueueType, phase int, srcO
 	queue := NewTaskQueue(queueType, phase, srcOrDst, paginationSize, RunningLowThreshold)
 
 	c.QP.Queues[name] = queue
-	c.QP.QueueLevels[name] = phase
-	c.QP.LastPathCursors[name] = "" // 🆕 Add path-based cursor for this queue
+
+	// Only set initial queue level for source queues
+	// Destination queues should start when triggered by source progress
+	if srcOrDst == "src" {
+		c.QP.QueueLevels[name] = phase
+		c.QP.ScanModes[name] = firstPass // Initialize scan mode
+	}
+
+	c.QP.LastPathCursors[name] = "" // Add path-based cursor for this queue
+
+	var tableName string
+	switch srcOrDst {
+	case "src":
+		tableName = "source_nodes"
+	default:
+		tableName = "destination_nodes"
+	}
+
+	// init a new write queue for batch ops
+	c.DB.InitWriteQueue(tableName, typesdb.NodeWriteQueue, 100, 5*time.Second)
 }
 
 // AddWorker assigns a new worker to a queue
 func (c *Conductor) AddWorker(queueName string, queueType string) *WorkerBase {
+
 	queue, exists := c.QP.Queues[queueName]
 	if !exists {
-		logging.GlobalLogger.LogMessage("error", "Queue not found", map[string]any{
-			"queueName": queueName,
-		})
+		subtopic := logging.QueueAcronyms[queueName]
+		if subtopic == "" {
+			subtopic = queueName // fallback if not mapped
+		}
+		logging.GlobalLogger.Log(
+			"error",                                // level
+			"System",                               // entity
+			"Conductor",                            // entityID
+			"Queue not found",                      // message
+			map[string]any{"queueName": queueName}, // details
+			"ADD_WORKER",                           // action
+			logging.QueueAcronyms[queueName],       // queue
+		)
 		return nil
 	}
 
@@ -156,25 +242,20 @@ func (c *Conductor) SetWorkerState(queueName string, workerID string, state Work
 }
 
 func (c *Conductor) TeardownQueue(queueName string) {
+	c.QP.Mutex.Lock()
 	queue, exists := c.QP.Queues[queueName]
+	c.QP.Mutex.Unlock()
+
 	if !exists {
 		return
 	}
 
-	// Stop polling if active
-	if controller, ok := c.QP.PollingControllers[queueName]; ok {
-		controller.Mutex.Lock()
-		if controller.IsPolling {
-			controller.CancelFunc()
-		}
-		controller.Mutex.Unlock()
-		delete(c.QP.PollingControllers, queueName)
-	}
-
-	// Close StopChan to signal goroutines to stop
-	close(queue.StopChan)
-
-	// SignalRouter handles cleanup for signal-based communication
+	// Send stop signal via Signal Router to all workers 🛑
+	stopTopic := "stop:" + queue.QueueID
+	signals.GlobalSR.Publish(signals.Signal{
+		Topic:   stopTopic,
+		Payload: "teardown",
+	})
 
 	// Remove idle workers
 	queue.mu.Lock()
@@ -187,21 +268,32 @@ func (c *Conductor) TeardownQueue(queueName string) {
 	}
 	queue.workers = idleWorkers
 	queue.cond.Broadcast() // Notify all workers to stop waiting
+	table := "source_nodes"
+	if queue.Type == UploadQueueType {
+		table = "destination_nodes"
+	} else if queue.SrcOrDst == "dst" {
+		table = "destination_nodes"
+	}
 	queue.mu.Unlock()
 
 	// Delete from all QP maps
+
+	// 🔒 Locking...
+	c.QP.Mutex.Lock()
+
+	// but before we do that...
+	// Flush any remaining data out from the corresponding write queues.
+	c.QP.DB.ForceFlushTable("audit_log") // justttttt to be safe. :)
+	c.QP.DB.ForceFlushTable(table)
+
+	// Okay now delete the stuff! \o/
 	delete(c.QP.Queues, queueName)
 	delete(c.QP.QueueLevels, queueName)
 	delete(c.QP.LastPathCursors, queueName)
 	delete(c.QP.ScanModes, queueName)
 	delete(c.QP.QueriesPerPhase, queueName)
 
-	logging.GlobalLogger.LogMessage("info", "Queue teardown complete", map[string]any{
-		"queueID": queueName,
-	})
-}
+	// 🔓 Unlocking...
+	c.QP.Mutex.Unlock()
 
-// StartAll starts QP and any other necessary processes
-func (c *Conductor) StartAll() {
-	go c.QP.StartListening()
 }

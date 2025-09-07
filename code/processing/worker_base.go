@@ -5,6 +5,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/Voltaic314/ByteWave/code/logging"
+	"github.com/Voltaic314/ByteWave/code/signals"
 )
 
 // WorkerState defines the possible states of a worker.
@@ -21,104 +22,103 @@ type WorkerBase struct {
 	Queue     *TaskQueue
 	QueueType string      // "src" or "dst"
 	State     WorkerState // Idle or Active
-	TaskReady bool
 }
 
 // NewWorkerBase initializes a new WorkerBase with a unique ID.
 func NewWorkerBase(queue *TaskQueue, queueType string) *WorkerBase {
-	logging.GlobalLogger.LogSystem("info", "worker", "Creating new worker", map[string]any{
+	logging.GlobalLogger.Log("info", "System", "Worker", "Creating new worker", map[string]any{
 		"queueType": queueType,
-	})
+	}, "CREATING_NEW_WORKER", queueType)
 
 	workerBase := &WorkerBase{
 		Queue:     queue,
 		QueueType: queueType,
 		State:     WorkerIdle,
-		TaskReady: false,
 	}
 	workerBase.ID = workerBase.GenerateID()
 
-	logging.GlobalLogger.LogWorker("info", workerBase.ID, "", "Worker base created", map[string]any{
+	logging.GlobalLogger.Log("info", "System", "Worker", "Worker base created", map[string]any{
 		"queueType": queueType,
 		"state":     workerBase.State,
-	})
+	}, "WORKER_BASE_CREATED", workerBase.QueueType)
+
 	return workerBase
 }
 
 // GenerateID generates a unique identifier using UUID.
 func (wb *WorkerBase) GenerateID() string {
-	logging.GlobalLogger.LogSystem("info", "worker", "Generating worker ID using UUID", nil)
-
 	id := uuid.New().String()
-
-	logging.GlobalLogger.LogWorker("info", id, "", "Worker ID generated", nil)
 	return id
 }
 
-// RunMainLoop is a generic polling loop that can be called by any worker type.
-func (wb *WorkerBase) Run(process func(*Task) error) {
-	for {
-		// logging.GlobalLogger.LogMessage("info", "Worker entering polling cycle", map[string]any{
-		// 	"workerID":  wb.ID,
-		// 	"queueType": wb.QueueType,
-		// 	"state":     wb.State,
-		// })
+// Run starts the worker using the Signal Router for clean event handling
+func (wb *WorkerBase) Run(process func(Task) error) {
+	// Channel to coordinate shutdown between signal handlers
+	shutdownChan := make(chan struct{})
 
-		if wb.Queue.State != QueueRunning {
-			logging.GlobalLogger.LogWorker("info", wb.ID, "", "Queue is no longer running, stopping worker", nil)
-			return
+	// Subscribe to task signals using the beautiful new Signal Router! 📮
+	taskTopic := "tasks_published:" + wb.Queue.QueueID
+	signals.GlobalSR.On(taskTopic, func(sig signals.Signal) {
+		logging.GlobalLogger.Log("debug", "System", "Worker", "Worker received task wake-up signal", map[string]any{
+			"queueID": wb.Queue.QueueID,
+		}, "WORKER_RECEIVED_TASK_WAKE_UP_SIGNAL", wb.QueueType)
+
+		// 🔄 NEW: Continuous task processing loop
+		for {
+			task := wb.Queue.PopTask()
+			if task == nil {
+				// No more tasks available - go idle and wait for next signal
+				logging.GlobalLogger.Log("debug", "System", "Worker", "No more tasks available, worker going idle", map[string]any{
+					"queueID": wb.Queue.QueueID,
+				}, "WORKER_GOING_IDLE", wb.QueueType)
+				wb.State = WorkerIdle
+				return
+			}
+
+			// Task found - process it
+			wb.State = WorkerActive
+			logging.GlobalLogger.Log("debug", "System", "Worker", "Worker processing task", map[string]any{
+				"queueID": wb.Queue.QueueID,
+				"taskID":  task.GetID(),
+				"path":    task.GetPath(),
+			}, "WORKER_PROCESSING_TASK", wb.QueueType)
+
+			if err := process(task); err != nil {
+				logging.GlobalLogger.Log("error", "System", "Worker", "Worker task failed", map[string]any{
+					"taskID": task.GetID(),
+					"error":  err.Error(),
+				}, "WORKER_TASK_FAILED", wb.QueueType)
+			} else {
+				logging.GlobalLogger.Log("info", "System", "Worker", "Worker completed task", map[string]any{
+					"taskID": task.GetID(),
+				}, "WORKER_TASK_COMPLETED", wb.QueueType)
+			}
+			wb.Queue.RemoveInProgressTask(task.GetID())
+
+			// ✨ Key improvement: Continue loop to check for more tasks
+			// instead of returning/going idle immediately
+			logging.GlobalLogger.Log("debug", "System", "Worker", "Task completed, checking for more tasks", map[string]any{
+				"queueID": wb.Queue.QueueID,
+			}, "WORKER_CHECKING_FOR_MORE_TASKS", wb.QueueType)
 		}
+	})
 
-		wb.Queue.WaitIfPaused()
+	// Subscribe to stop signals via Signal Router! 🛑
+	stopTopic := "stop:" + wb.Queue.QueueID
+	signals.GlobalSR.On(stopTopic, func(sig signals.Signal) {
+		logging.GlobalLogger.Log("info", "System", "Worker", "Worker received stop signal", map[string]any{
+			"queueID": wb.Queue.QueueID,
+		}, "WORKER_RECEIVED_STOP_SIGNAL", wb.QueueType)
 
-		// ✅ Lockless check (fast path)
-		if wb.Queue.QueueSize() == 0 {
-			wb.State = WorkerIdle
-			// 🆕 NEW: Signal that worker is idle and may need more tasks
-			wb.Queue.SignalWorkerIdle()
-			// logging.GlobalLogger.LogMessage("info", "Queue empty, worker entering wait state", map[string]any{
-			// 	"workerID": wb.ID,
-			// 	"state":    wb.State,
-			// })
-			// This will block until QP calls cond.Broadcast()
-			wb.Queue.WaitForWork()
-			continue
+		// Safe close - won't panic if already closed
+		select {
+		case <-shutdownChan:
+			// Already closed, do nothing
+		default:
+			close(shutdownChan)
 		}
+	})
 
-		task := wb.Queue.PopTask()
-
-		if task == nil {
-			wb.State = WorkerIdle
-			wb.TaskReady = true
-			// 🆕 NEW: Signal that worker is idle and may need more tasks
-			wb.Queue.SignalWorkerIdle()
-			wb.Queue.WaitForWork()
-			continue // skip sleep - just like my college days...
-		}
-
-		logging.GlobalLogger.LogWorker("info", wb.ID, task.GetPath(), "Worker popped task from queue", map[string]any{
-			"queueType": wb.QueueType,
-		})
-
-		logging.GlobalLogger.LogWorker("info", wb.ID, task.GetPath(), "Worker acquired task", map[string]any{
-			"taskID": task.ID,
-		})
-
-		wb.State = WorkerActive
-		wb.TaskReady = false
-
-		if err := process(task); err != nil {
-			logging.GlobalLogger.LogWorker("error", wb.ID, task.GetPath(), "Worker task failed", map[string]any{
-				"taskID": task.ID,
-				"error":  err.Error(),
-			})
-		} else {
-			logging.GlobalLogger.LogWorker("info", wb.ID, task.GetPath(), "Worker completed task", map[string]any{
-				"taskID": task.ID,
-			})
-		}
-
-		// Remove task from in-progress list (whether successful or failed)
-		wb.Queue.RemoveInProgressTask(task.ID)
-	}
+	// Wait for shutdown signal from stop handler
+	<-shutdownChan
 }

@@ -3,6 +3,7 @@ package services
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -43,16 +44,6 @@ func (osSvc *OSService) GetRootPath() string {
 	return osSvc.rootPath
 }
 
-func (osSvc *OSService) relativize(path string) string {
-	normalized := osSvc.NormalizePath(path)
-	root := osSvc.GetRootPath()
-	if strings.HasPrefix(normalized, root) {
-		rel := strings.TrimPrefix(normalized, root)
-		return strings.TrimPrefix(rel, "/")
-	}
-	return normalized // fallback
-}
-
 // IsDirectory returns a channel that asynchronously sends whether the given path is a directory.
 func (osSvc *OSService) IsDirectory(path string) <-chan bool {
 	result := make(chan bool, 1)
@@ -61,10 +52,11 @@ func (osSvc *OSService) IsDirectory(path string) <-chan bool {
 		osSvc.TotalDiskReads++
 		info, err := os.Stat(path)
 		if err != nil {
-			logging.GlobalLogger.LogMessage("error", "Failed to check directory status", map[string]any{
+			logging.GlobalLogger.Log("error", "Services", "OSService", "Failed to check directory status", map[string]any{
 				"path": path,
 				"err":  err.Error(),
-			})
+			}, "FAILED_TO_CHECK_DIRECTORY_STATUS", "None",
+			)
 			result <- false
 			return
 		}
@@ -96,13 +88,14 @@ func (osSvc *OSService) GetAllItems(folder filesystem.Folder, _ <-chan int) (<-c
 		defer close(errChan)
 
 		osSvc.TotalDiskReads++
-		normalizedPath := osSvc.NormalizePath(folder.Path)
+		normalizedPath := osSvc.NormalizePath(folder.Identifier)
 		entries, err := os.ReadDir(normalizedPath)
 		if err != nil {
-			logging.GlobalLogger.LogMessage("error", "Failed to read directory", map[string]any{
+			logging.GlobalLogger.Log("error", "Services", "OSService", "Failed to read directory", map[string]any{
 				"folderPath": folder.Path,
 				"err":        err.Error(),
-			})
+			}, "FAILED_TO_READ_DIRECTORY", "None",
+			)
 			errChan <- err
 			return
 		}
@@ -114,30 +107,53 @@ func (osSvc *OSService) GetAllItems(folder filesystem.Folder, _ <-chan int) (<-c
 			itemPath := filepath.Join(normalizedPath, item.Name())
 			info, statErr := os.Stat(itemPath)
 			if statErr != nil {
-				logging.GlobalLogger.LogMessage("error", "Failed to stat file/folder", map[string]any{
+				logging.GlobalLogger.Log("error", "Services", "OSService", "Failed to stat file/folder", map[string]any{
 					"itemPath": itemPath,
 					"err":      statErr.Error(),
-				})
+				}, "FAILED_TO_STAT_FILE_FOLDER", "None",
+				)
 				continue
 			}
 
 			metadata := osSvc.ConvertFileInfoToMap(info, itemPath)
-			identifier := filepath.Clean(strings.ReplaceAll(metadata["identifier"].(string), "/", "\\"))
+
+			// Normalize identifier: all slashes to OS-native
+			identifier := filepath.Clean(itemPath)
+
+			// Fix path construction to handle root case properly
+			var relPath string
+			if folder.Path == "/" {
+				// Root case: path should be "/item_name" (not "//item_name")
+				relPath = folder.Path + item.Name() // end result is "/{item_name}"
+			} else {
+				// Non-root case: path should be "/parent_path/item_name"
+				parentPath := strings.TrimLeft(folder.Path, "/")
+				relPath = fmt.Sprintf("/%s/%s", parentPath, item.Name())
+			}
+
+			logging.GlobalLogger.Log("info", "Services", "OSService", "Item Found", map[string]any{
+				"name":          item.Name(),
+				"path":          relPath,
+				"identifier":    identifier,
+				"parent_id":     folder.Identifier,
+				"last_modified": metadata["last_modified"].(string),
+			}, "ITEM_FOUND", "None",
+			)
 
 			if info.IsDir() {
 				foldersList = append(foldersList, filesystem.Folder{
 					Name:         item.Name(),
-					Path:         osSvc.relativize(itemPath),
-					Identifier:   identifier,
-					ParentID:     osSvc.relativize(normalizedPath),
+					Path:         relPath,           // Relative path with forward slashes
+					Identifier:   identifier,        // OS-native slashes
+					ParentID:     folder.Identifier, // Use input folder.Identifier
 					LastModified: metadata["last_modified"].(string),
 				})
 			} else {
 				filesList = append(filesList, filesystem.File{
 					Name:         item.Name(),
-					Path:         osSvc.relativize(itemPath),
-					Identifier:   identifier,
-					ParentID:     osSvc.relativize(normalizedPath),
+					Path:         relPath,           // Relative path with forward slashes
+					Identifier:   identifier,        // OS-native slashes
+					ParentID:     folder.Identifier, // Use input folder.Identifier
 					Size:         metadata["size"].(int64),
 					LastModified: metadata["last_modified"].(string),
 				})
@@ -164,10 +180,11 @@ func (osSvc *OSService) GetFileContents(filePath string) (<-chan io.ReadCloser, 
 		osSvc.TotalDiskReads++
 		file, err := os.Open(filePath)
 		if err != nil {
-			logging.GlobalLogger.LogMessage("error", "Failed to open file", map[string]any{
+			logging.GlobalLogger.Log("error", "Services", "OSService", "Failed to open file", map[string]any{
 				"filePath": filePath,
 				"err":      err.Error(),
-			})
+			}, "FAILED_TO_OPEN_FILE", "None",
+			)
 			errChan <- err
 			return
 		}
@@ -187,10 +204,11 @@ func (osSvc *OSService) CreateFolder(folderPath string) <-chan error {
 
 		if _, err := os.Stat(normalizedPath); os.IsNotExist(err) {
 			if mkErr := os.MkdirAll(normalizedPath, os.ModePerm); mkErr != nil {
-				logging.GlobalLogger.LogMessage("error", "Failed to create folder", map[string]any{
+				logging.GlobalLogger.Log("error", "Services", "OSService", "Failed to create folder", map[string]any{
 					"folderPath": folderPath,
 					"err":        mkErr.Error(),
-				})
+				}, "FAILED_TO_CREATE_FOLDER", "None",
+				)
 				result <- mkErr
 				return
 			}
@@ -212,18 +230,20 @@ func (osSvc *OSService) UploadFile(filePath string, reader io.Reader, shouldOver
 		if _, err := os.Stat(filePath); err == nil {
 			overwrite, policyErr := shouldOverWrite()
 			if policyErr != nil {
-				logging.GlobalLogger.LogMessage("error", "Failed to determine overwrite policy", map[string]any{
+				logging.GlobalLogger.Log("error", "Services", "OSService", "Failed to determine overwrite policy", map[string]any{
 					"filePath": filePath,
 					"err":      policyErr.Error(),
-				})
+				}, "FAILED_TO_DETERMINE_OVERWRITE_POLICY", "None",
+				)
 				result <- policyErr
 				return
 			}
 			osSvc.TotalDiskReads++
 			if !overwrite {
-				logging.GlobalLogger.LogMessage("info", "File already exists; overwrite disabled", map[string]any{
+				logging.GlobalLogger.Log("debug", "Services", "OSService", "File already exists; overwrite disabled", map[string]any{
 					"filePath": filePath,
-				})
+				}, "FILE_ALREADY_EXISTS_OVERWRITE_DISABLED", "None",
+				)
 				result <- nil
 				return
 			}
@@ -231,20 +251,22 @@ func (osSvc *OSService) UploadFile(filePath string, reader io.Reader, shouldOver
 
 		file, err := os.Create(filePath)
 		if err != nil {
-			logging.GlobalLogger.LogMessage("error", "Failed to create file", map[string]any{
+			logging.GlobalLogger.Log("error", "Services", "OSService", "Failed to create file", map[string]any{
 				"filePath": filePath,
 				"err":      err.Error(),
-			})
+			}, "FAILED_TO_CREATE_FILE", "None",
+			)
 			result <- err
 			return
 		}
 		defer file.Close()
 
 		if _, copyErr := io.Copy(file, reader); copyErr != nil {
-			logging.GlobalLogger.LogMessage("error", "Failed to write file contents", map[string]any{
+			logging.GlobalLogger.Log("error", "Services", "OSService", "Failed to write file contents", map[string]any{
 				"filePath": filePath,
 				"err":      copyErr.Error(),
-			})
+			}, "FAILED_TO_WRITE_FILE_CONTENTS", "None",
+			)
 			result <- copyErr
 			return
 		}

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/Voltaic314/ByteWave/code/filesystem"
@@ -57,10 +58,11 @@ func NewBaseService(rulesPath string) (*BaseService, error) {
 
 	err := base.LoadMigrationRules()
 	if err != nil {
-		logging.GlobalLogger.LogMessage("error", "Failed to load migration rules", map[string]any{
+		logging.GlobalLogger.Log("error", "System", "BaseService", "Failed to load migration rules", map[string]any{
 			"file": rulesPath,
 			"err":  err.Error(),
-		})
+		}, "FAILED_TO_LOAD_MIGRATION_RULES", "base",
+		)
 		return nil, err
 	}
 
@@ -222,4 +224,16 @@ func (b *BaseService) GetRootPath() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.rootPath
+}
+
+func (b *BaseService) Relativize(path string) string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	normalized := b.NormalizePath(path)
+	root := b.rootPath
+	if strings.HasPrefix(normalized, root) {
+		rel := strings.TrimPrefix(normalized, root)
+		return strings.TrimPrefix(rel, "/")
+	}
+	return normalized // fallback
 }
