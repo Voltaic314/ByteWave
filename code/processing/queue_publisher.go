@@ -260,9 +260,6 @@ func (qp *QueuePublisher) manageQueueCompletion() {
 			qp.advancePhaseWithMutex(snap.queueName)
 		}
 	}
-
-	// Check if destination queue should be created
-	qp.maybeCreateDestinationQueue()
 }
 
 // isQueueReadyToAdvance determines if a queue (src or dst) is ready to advance to the next phase.
@@ -372,34 +369,38 @@ func (qp *QueuePublisher) isTraversalComplete(queueName string, queue *TaskQueue
 	return count == 0 && queriesPerPhase < 2 && currentLevel > 0
 }
 
-// maybeCreateDestinationQueue creates destination queue when source has completed level 1 (srcLevel >= 2)
-func (qp *QueuePublisher) maybeCreateDestinationQueue() {
+// createDestinationQueueNow creates destination queue immediately (called when source advances to level 2)
+func (qp *QueuePublisher) createDestinationQueueNow() {
 	qp.Mutex.Lock()
-	srcLevel, srcExists := qp.QueueLevels["src-traversal"]
-	_, dstExists := qp.QueueLevels["dst-traversal"]
+
+	// Double-check that destination queue doesn't exist (race condition protection)
+	if _, dstExists := qp.QueueLevels["dst-traversal"]; dstExists {
+		qp.Mutex.Unlock()
+		return // Someone else already created it
+	}
+
+	srcLevel := qp.QueueLevels["src-traversal"]
+
+	logging.GlobalLogger.Log(
+		"info", "System", "QP", "Source reached level 2, creating destination queue", map[string]any{
+			"srcLevel":            srcLevel,
+			"trigger":             "event-driven",
+			"dstCanStartAtLevel0": true,
+		}, "CREATE", logging.QueueAcronyms["dst-traversal"],
+	)
+
+	// Set the queue level IMMEDIATELY to prevent race condition
+	qp.QueueLevels["dst-traversal"] = 0
+	qp.ScanModes["dst-traversal"] = firstPass
+	qp.LastPathCursors["dst-traversal"] = ""
+	qp.QueriesPerPhase["dst-traversal"] = 0
+
 	qp.Mutex.Unlock()
 
-	// Dst level 0 requires src to have completed level 1 (N+2 rule: srcLevel >= 2)
-	if (((srcExists && !dstExists) && srcLevel >= 2) || (!srcExists)) && qp.Conductor != nil {
-		logging.GlobalLogger.Log(
-			"info", "System", "QP", "Source completed level 1, creating destination queue", map[string]any{
-				"srcLevel":            srcLevel,
-				"dstCanStartAtLevel0": true,
-			}, "CREATE", logging.QueueAcronyms["dst-traversal"],
-		)
-
-		qp.Conductor.SetupDestinationQueue()
-
-		qp.Mutex.Lock()
-		qp.QueueLevels["dst-traversal"] = 0
-		qp.ScanModes["dst-traversal"] = firstPass
-		qp.LastPathCursors["dst-traversal"] = ""
-		qp.QueriesPerPhase["dst-traversal"] = 0
-		qp.Mutex.Unlock()
-
-		qp.setupQueueSignals("dst-traversal")
-		go qp.PublishTasks("dst-traversal")
-	}
+	// Create queue and workers (outside of mutex to avoid blocking)
+	qp.Conductor.SetupDestinationQueue()
+	qp.setupQueueSignals("dst-traversal")
+	go qp.PublishTasks("dst-traversal")
 }
 
 // PublishDestinationTasks creates destination traversal tasks using efficient 3-query batch approach
@@ -476,7 +477,7 @@ func (qp *QueuePublisher) PublishDestinationTasks(queueName string) {
 // FetchDestinationTasksFromDB efficiently fetches destination tasks using 3-query batch approach with ID offset pagination
 func (qp *QueuePublisher) FetchDestinationTasksFromDB(currentLevel int, lastSeenPath string, queueName string) []Task {
 	logging.GlobalLogger.Log(
-		"debug", "System", "QP", "Fetching destination tasks from DB (efficient)", map[string]any{
+		"debug", "System", "QP", "Fetching destination tasks from DB", map[string]any{
 			"currentLevel": currentLevel,
 			"lastSeenPath": lastSeenPath,
 			"queueName":    queueName,
@@ -669,7 +670,7 @@ func (qp *QueuePublisher) FetchDestinationTasksFromDB(currentLevel int, lastSeen
 	qp.Mutex.Unlock()
 
 	logging.GlobalLogger.Log(
-		"info", "System", "QP", "Created destination tasks efficiently", map[string]any{
+		"info", "System", "QP", "Created destination tasks", map[string]any{
 			"dstFoldersFound": len(dstFolders),
 			"tasksCreated":    len(tasks),
 			"totalQueries":    3, // Efficient: 1 for dst folders + 2 for expected children lookup (path match + children)
@@ -921,6 +922,12 @@ func (qp *QueuePublisher) advancePhaseWithMutex(queueName string) {
 	qp.ScanModes[queueName] = firstPass // Ensure new phase starts with firstPass
 	qp.QueriesPerPhase[queueName] = 0
 	syncedLevel := qp.QueueLevels[queueName]
+
+	// ✅ Event-driven destination queue creation: Create when source advances to level 2
+	_, dstExists := qp.QueueLevels["dst-traversal"]
+	shouldCreateDestQueue := (queueName == "src-traversal" && syncedLevel == 2 &&
+		qp.Conductor != nil && !dstExists)
+
 	qp.Mutex.Unlock()
 
 	logging.GlobalLogger.Log(
@@ -930,6 +937,11 @@ func (qp *QueuePublisher) advancePhaseWithMutex(queueName string) {
 			"level": syncedLevel,
 		}, "PHASE_ADVANCED", logging.QueueAcronyms[queueName],
 	)
+
+	// ✅ Create destination queue exactly when source reaches level 2
+	if shouldCreateDestQueue {
+		qp.createDestinationQueueNow()
+	}
 
 	// Publish tasks for the new phase
 	go qp.PublishTasks(queueName)

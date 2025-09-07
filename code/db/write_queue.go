@@ -4,7 +4,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Voltaic314/ByteWave/code/logging"
 	typesdb "github.com/Voltaic314/ByteWave/code/types/db"
 )
 
@@ -95,10 +94,6 @@ func (wq *WriteQueue) Flush(force ...bool) []typesdb.Batch {
 
 		// CAREFUL. This function LOCKS the mutex.
 		batches := wq.flushLogQueue()
-		logging.GlobalLogger.Log("debug", "System", "WriteQueue", "LogQueue flush result", map[string]any{
-			"table":   wq.tableName,
-			"batches": len(batches),
-		}, "LOGQUEUE_FLUSH_RESULT", wq.tableName)
 
 		// Reset isWriting flag now that flush is complete
 		wq.mu.Lock()
@@ -111,10 +106,6 @@ func (wq *WriteQueue) Flush(force ...bool) []typesdb.Batch {
 
 	// CAREFUL. This function LOCKS the mutex.
 	batches := wq.flushNodeQueue()
-	logging.GlobalLogger.Log("debug", "System", "WriteQueue", "NodeQueue flush result", map[string]any{
-		"table":   wq.tableName,
-		"batches": len(batches),
-	}, "NODEQUEUE_FLUSH_RESULT", wq.tableName)
 
 	// Reset isWriting flag now that flush is complete
 	wq.mu.Lock()
@@ -134,9 +125,6 @@ func (wq *WriteQueue) ShouldFlush(force ...bool) bool {
 
 	// If we're already writing, don't flush
 	if wq.isWriting {
-		logging.GlobalLogger.Log("debug", "System", "WriteQueue", "Flush blocked - already writing", map[string]any{
-			"table": wq.tableName,
-		}, "FLUSH_BLOCKED", wq.tableName)
 		return false
 	}
 
@@ -154,19 +142,7 @@ func (wq *WriteQueue) ShouldFlush(force ...bool) bool {
 	// Flush if: forced, batch size reached, OR time interval passed (and we have operations)
 	ShouldFlush := ShouldForce || wq.readyToWrite || (timeBasedFlush && hasOperations)
 
-	logging.GlobalLogger.Log("debug", "System", "WriteQueue", "Flush decision", map[string]any{
-		"table":       wq.tableName,
-		"shouldFlush": ShouldFlush,
-		"force":       ShouldForce,
-		"ready":       wq.readyToWrite,
-		"timeFlush":   timeBasedFlush,
-		"hasOps":      hasOperations,
-	}, "FLUSH_DECISION", wq.tableName)
-
 	if !ShouldFlush {
-		logging.GlobalLogger.Log("debug", "System", "WriteQueue", "Flush skipped", map[string]any{
-			"table": wq.tableName,
-		}, "FLUSH_SKIPPED", wq.tableName)
 		return false
 	}
 

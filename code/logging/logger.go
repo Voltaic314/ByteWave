@@ -122,8 +122,8 @@ func (l *Logger) Log(level, entity, entityID, message string, details map[string
 	// Queue to DB - Match canonical audit_log schema from tables/audit_log.go
 	if l.logWQ != nil {
 		detailsJSON, _ := json.Marshal(e.Details)
-		params := []any{uuid.New().String(), e.Timestamp, e.Level, e.Entity, e.EntityID, string(detailsJSON), e.Message, e.Action, nil, nil, e.Queue}
-		query := `INSERT INTO audit_log (id, timestamp, level, entity, entity_id, details, message, action, topic, subtopic, queue) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		params := []any{uuid.New().String(), e.Timestamp, e.Level, e.Entity, e.EntityID, string(detailsJSON), e.Message, e.Action, e.Queue}
+		query := `INSERT INTO audit_log (id, timestamp, level, entity, entity_id, details, message, action, queue) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
 		l.enqueueLog(query, params)
 	}
 }
