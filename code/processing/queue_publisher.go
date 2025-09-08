@@ -11,16 +11,6 @@ import (
 	"github.com/Voltaic314/ByteWave/code/signals"
 )
 
-// -----------------------------------------------------------------------------
-// Scan‑mode enum (first pass vs. retry pass)
-// -----------------------------------------------------------------------------
-type scanMode int
-
-const (
-	firstPass scanMode = iota // forward scan with path cursor
-	retryPass                 // second sweep for failed rows
-)
-
 // queueSnapshot holds queue data captured under mutex
 type queueSnapshot struct {
 	queueName       string
@@ -48,8 +38,7 @@ type QueuePublisher struct {
 	LastDBPaths     map[string]string
 	RetryThreshold  int
 	BatchSize       int
-	QueriesPerPhase map[string]int      // queueName -> queryCount
-	ScanModes       map[string]scanMode // queueName -> scanMode
+	QueriesPerPhase map[string]int // queueName -> queryCount
 	// Conductor reference for dynamic queue creation
 	Conductor ConductorInterface
 }
@@ -78,7 +67,6 @@ func NewQueuePublisher(db *db.DB, retryThreshold, batchSize int) *QueuePublisher
 		RetryThreshold:  retryThreshold,
 		BatchSize:       batchSize,
 		QueriesPerPhase: make(map[string]int),
-		ScanModes:       make(map[string]scanMode),
 		Conductor:       nil, // Will be set by Conductor after creation
 	}
 }
@@ -391,7 +379,6 @@ func (qp *QueuePublisher) createDestinationQueueNow() {
 
 	// Set the queue level IMMEDIATELY to prevent race condition
 	qp.QueueLevels["dst-traversal"] = 0
-	qp.ScanModes["dst-traversal"] = firstPass
 	qp.LastPathCursors["dst-traversal"] = ""
 	qp.QueriesPerPhase["dst-traversal"] = 0
 
@@ -403,16 +390,12 @@ func (qp *QueuePublisher) createDestinationQueueNow() {
 	go qp.PublishTasks("dst-traversal")
 }
 
-// PublishDestinationTasks creates destination traversal tasks using efficient 3-query batch approach
+// PublishDestinationTasks creates destination traversal tasks using simplified leasing model
 func (qp *QueuePublisher) PublishDestinationTasks(queueName string) {
 	qp.Mutex.Lock()
 	queue, exists := qp.Queues[queueName]
 	currentLevel := qp.QueueLevels[queueName]
-	mode := qp.ScanModes[queueName]
-	var lastPath string
-	if mode == firstPass {
-		lastPath = qp.LastPathCursors[queueName]
-	}
+	lastPath := qp.LastPathCursors[queueName]
 	qp.Mutex.Unlock()
 
 	if !exists {
@@ -424,14 +407,13 @@ func (qp *QueuePublisher) PublishDestinationTasks(queueName string) {
 		return
 	}
 
-	// Normal batch approach for ALL levels - no special cases needed
+	// Simplified batch approach using TrackedPaths filtering
 	tasks := qp.FetchDestinationTasksFromDB(currentLevel, lastPath, queueName)
 
 	if len(tasks) > 0 {
 		logging.GlobalLogger.Log(
 			"debug", "System", "QP", "Tasks fetched from DB (dst)", map[string]any{
 				"taskCount":    len(tasks),
-				"scanMode":     mode,
 				"level":        currentLevel,
 				"lastSeenPath": lastPath,
 			}, "TASKS_FETCHED", logging.QueueAcronyms[queueName],
@@ -440,41 +422,24 @@ func (qp *QueuePublisher) PublishDestinationTasks(queueName string) {
 		queue.AddTasks(tasks)
 		qp.Mutex.Lock()
 		qp.QueriesPerPhase[queueName]++
-		if mode == firstPass {
-			if lastRaw, ok := qp.LastDBPaths[queueName]; ok && lastRaw != "" {
-				qp.LastPathCursors[queueName] = lastRaw
-			} else {
-				// Fallback to task path if we don't have a recorded raw DB path yet
-				qp.LastPathCursors[queueName] = tasks[len(tasks)-1].GetPath()
-			}
+		if lastRaw, ok := qp.LastDBPaths[queueName]; ok && lastRaw != "" {
+			qp.LastPathCursors[queueName] = lastRaw
+		} else if len(tasks) > 0 {
+			// Fallback to task path if we don't have a recorded raw DB path yet
+			qp.LastPathCursors[queueName] = tasks[len(tasks)-1].GetPath()
 		}
 		qp.Mutex.Unlock()
-
-		// Switch to retry mode if we got a short batch
-		if len(tasks) < qp.BatchSize && mode == firstPass {
-			qp.Mutex.Lock()
-			qp.ScanModes[queueName] = retryPass
-			qp.Mutex.Unlock()
-		}
 	} else {
 		logging.GlobalLogger.Log(
 			"debug", "System", "QP", "No tasks fetched from DB (dst)", map[string]any{
-				"scanMode":     mode,
 				"level":        currentLevel,
 				"lastSeenPath": lastPath,
 			}, "NO_TASKS_FETCHED", logging.QueueAcronyms[queueName],
 		)
-
-		// Switch to retry mode if we found no tasks in first pass
-		if mode == firstPass {
-			qp.Mutex.Lock()
-			qp.ScanModes[queueName] = retryPass
-			qp.Mutex.Unlock()
-		}
 	}
 }
 
-// FetchDestinationTasksFromDB efficiently fetches destination tasks using 3-query batch approach with ID offset pagination
+// FetchDestinationTasksFromDB efficiently fetches destination tasks using simplified leasing model
 func (qp *QueuePublisher) FetchDestinationTasksFromDB(currentLevel int, lastSeenPath string, queueName string) []Task {
 	logging.GlobalLogger.Log(
 		"debug", "System", "QP", "Fetching destination tasks from DB", map[string]any{
@@ -484,62 +449,50 @@ func (qp *QueuePublisher) FetchDestinationTasksFromDB(currentLevel int, lastSeen
 		}, "FETCH_TASKS", logging.QueueAcronyms[queueName],
 	)
 
-	// Same retry/pagination logic as src traversal
+	// QUERY 1: Get dst folders at current level with TrackedPaths filtering
+	query1 := `SELECT path, name, identifier, parent_id, last_modified 
+	          FROM destination_nodes WHERE 
+	          (traversal_status = 'pending' OR (traversal_status = 'failed' AND traversal_attempts < ?)) 
+	          AND level = ? AND type = 'folder'`
+
+	params1 := []any{qp.RetryThreshold, currentLevel}
+
+	// Add cursor-based pagination
+	if lastSeenPath != "" {
+		query1 += ` AND path > ?`
+		params1 = append(params1, lastSeenPath)
+	}
+
+	// Add TrackedPaths filtering to prevent re-processing active tasks
 	qp.Mutex.Lock()
-	scanMode := qp.ScanModes[queueName]
+	queue, exists := qp.Queues[queueName]
 	qp.Mutex.Unlock()
 
-	// QUERY 1: Get dst folders at current level with same pagination logic as src
-	query1 := `SELECT path, name, identifier, parent_id, last_modified 
-	          FROM destination_nodes WHERE `
-
-	var params1 []any
-
-	if scanMode == firstPass {
-		query1 += `(traversal_status = 'pending' OR (traversal_status = 'failed' AND traversal_attempts < ?)) 
-		           AND level = ? AND type = 'folder'`
-		params1 = []any{qp.RetryThreshold, currentLevel}
-
-		if lastSeenPath != "" {
-			query1 += ` AND path > ?`
-			params1 = append(params1, lastSeenPath)
-		}
-	} else { // retryPass
-		query1 += `traversal_status = 'failed' AND traversal_attempts < ? 
-		          AND level = ? AND type = 'folder'`
-		params1 = []any{qp.RetryThreshold, currentLevel}
-
-		// Add NOT IN filtering for retry mode to prevent re-processing active paths
-		qp.Mutex.Lock()
-		queue, exists := qp.Queues[queueName]
-		qp.Mutex.Unlock()
-
-		if exists {
-			trackedPaths := queue.TrackedPaths(true) // Include both queued and in-progress paths
-			if len(trackedPaths) > 0 {
-				placeholders := make([]string, len(trackedPaths))
-				pathList := make([]string, 0, len(trackedPaths))
-				for path := range trackedPaths {
-					pathList = append(pathList, path)
-				}
-
-				for i := range placeholders {
-					placeholders[i] = "?"
-				}
-				query1 += ` AND path NOT IN (` + strings.Join(placeholders, ", ") + `)`
-
-				// Add the tracked paths as parameters
-				for _, path := range pathList {
-					params1 = append(params1, path)
-				}
-
-				logging.GlobalLogger.Log(
-					"debug", "System", "QP", "Retry mode filtering applied (dst)", map[string]any{
-						"queueName":     queueName,
-						"excludedPaths": len(pathList),
-					}, "RETRY_FILTERING", logging.QueueAcronyms[queueName],
-				)
+	if exists {
+		trackedPaths := queue.TrackedPaths(true) // Include both queued and in-progress paths
+		if len(trackedPaths) > 0 {
+			placeholders := make([]string, len(trackedPaths))
+			pathList := make([]string, 0, len(trackedPaths))
+			for path := range trackedPaths {
+				pathList = append(pathList, path)
 			}
+
+			for i := range placeholders {
+				placeholders[i] = "?"
+			}
+			query1 += ` AND path NOT IN (` + strings.Join(placeholders, ", ") + `)`
+
+			// Add the tracked paths as parameters
+			for _, path := range pathList {
+				params1 = append(params1, path)
+			}
+
+			logging.GlobalLogger.Log(
+				"debug", "System", "QP", "TrackedPaths filtering applied (dst)", map[string]any{
+					"queueName":     queueName,
+					"excludedPaths": len(pathList),
+				}, "TRACKED_PATHS_FILTERING", logging.QueueAcronyms[queueName],
+			)
 		}
 	}
 
@@ -549,9 +502,8 @@ func (qp *QueuePublisher) FetchDestinationTasksFromDB(currentLevel int, lastSeen
 	// Debug log the query
 	logging.GlobalLogger.Log(
 		"info", "System", "QP", "Executing dst query", map[string]any{
-			"query":    query1,
-			"params":   params1,
-			"scanMode": scanMode,
+			"query":  query1,
+			"params": params1,
 		}, "EXECUTE_QUERY", logging.QueueAcronyms[queueName],
 	)
 
@@ -632,7 +584,6 @@ func (qp *QueuePublisher) FetchDestinationTasksFromDB(currentLevel int, lastSeen
 				"lastSeenPath": lastSeenPath,
 				"query":        query1,
 				"params":       params1,
-				"scanMode":     scanMode,
 			}, "NO_FOLDERS_FOUND", logging.QueueAcronyms[queueName],
 		)
 		return nil
@@ -850,22 +801,17 @@ func (qp *QueuePublisher) PublishTasks(queueName string) {
 	}
 
 	qp.Mutex.Lock()
-	mode := qp.ScanModes[queueName]
 	currentLevel := qp.QueueLevels[queueName]
-	var lastPath string
-	if mode == firstPass {
-		lastPath = qp.LastPathCursors[queueName]
-	}
+	lastPath := qp.LastPathCursors[queueName]
 	qp.Mutex.Unlock()
 
-	// Normal task fetching from DB for ALL levels - no special cases
+	// Simplified task fetching using TrackedPaths filtering
 	tasks := qp.FetchTasksFromDB(table, queue.Type, currentLevel, lastPath, queueName)
 
 	if len(tasks) > 0 {
 		logging.GlobalLogger.Log(
 			"debug", "System", "QP", "Tasks fetched from DB", map[string]any{
 				"taskCount":    len(tasks),
-				"scanMode":     mode,
 				"level":        currentLevel,
 				"lastSeenPath": lastPath,
 			}, "TASKS_FETCHED_FROM_DB", logging.QueueAcronyms[queueName],
@@ -874,30 +820,20 @@ func (qp *QueuePublisher) PublishTasks(queueName string) {
 		queue.AddTasks(tasks)
 		qp.Mutex.Lock()
 		qp.QueriesPerPhase[queueName]++
-		if mode == firstPass {
-			if lastRaw, ok := qp.LastDBPaths[queueName]; ok && lastRaw != "" {
-				qp.LastPathCursors[queueName] = lastRaw
-			} else {
-				// Use the last task path for cursor progression
-				qp.LastPathCursors[queueName] = tasks[len(tasks)-1].GetPath()
-			}
+		if lastRaw, ok := qp.LastDBPaths[queueName]; ok && lastRaw != "" {
+			qp.LastPathCursors[queueName] = lastRaw
+		} else if len(tasks) > 0 {
+			// Use the last task path for cursor progression
+			qp.LastPathCursors[queueName] = tasks[len(tasks)-1].GetPath()
 		}
 		qp.Mutex.Unlock()
-
-		// Switch to retry mode if we got a short batch
-		if len(tasks) < qp.BatchSize && mode == firstPass {
-			qp.Mutex.Lock()
-			qp.ScanModes[queueName] = retryPass
-			qp.Mutex.Unlock()
-		}
 	} else {
-
-		// Switch to retry mode if we found no tasks in first pass
-		if mode == firstPass {
-			qp.Mutex.Lock()
-			qp.ScanModes[queueName] = retryPass
-			qp.Mutex.Unlock()
-		}
+		logging.GlobalLogger.Log(
+			"debug", "System", "QP", "No tasks fetched from DB", map[string]any{
+				"level":        currentLevel,
+				"lastSeenPath": lastPath,
+			}, "NO_TASKS_FETCHED_FROM_DB", logging.QueueAcronyms[queueName],
+		)
 	}
 }
 
@@ -919,7 +855,6 @@ func (qp *QueuePublisher) advancePhaseWithMutex(queueName string) {
 	queue.Phase++
 	qp.QueueLevels[queueName] = queue.Phase
 	qp.LastPathCursors[queueName] = ""
-	qp.ScanModes[queueName] = firstPass // Ensure new phase starts with firstPass
 	qp.QueriesPerPhase[queueName] = 0
 	syncedLevel := qp.QueueLevels[queueName]
 
@@ -1037,13 +972,7 @@ func (qp *QueuePublisher) FetchTasksFromDB(table string, queueType QueueType, cu
 		}, "FETCH_TASKS_FROM_DB", logging.QueueAcronyms[queueName],
 	)
 
-	// Force flush in retry mode to see latest failure states
-	qp.Mutex.Lock()
-	scanMode := qp.ScanModes[queueName]
-	qp.Mutex.Unlock()
-
-	// DB.Query will automatically flush the table when queried in retry mode
-
+	// Simplified query logic using TrackedPaths filtering
 	statusColumn := "traversal_status"
 	retryColumn := "traversal_attempts"
 
@@ -1056,59 +985,50 @@ func (qp *QueuePublisher) FetchTasksFromDB(table string, queueType QueueType, cu
 	onlyFolders := queueType == TraversalQueueType
 	onlyFiles := queueType == UploadQueueType
 
-	// ✅ SELECT order now matches the DB schema and runTaskQuery's scan order
+	// Simplified query that combines pending and failed (below retry threshold) items
 	query := `SELECT path, name, identifier, parent_id, type, last_modified
-	          FROM ` + table + ` WHERE `
+	          FROM ` + table + ` WHERE 
+	          (` + statusColumn + ` = 'pending' OR (` + statusColumn + ` = 'failed' AND ` + retryColumn + ` < ?))
+	          AND level = ?`
 
-	var params []any
+	params := []any{qp.RetryThreshold, currentLevel}
 
-	if scanMode == firstPass {
-		query += `(` + statusColumn + ` = 'pending'
-		           OR (` + statusColumn + ` = 'failed' AND ` + retryColumn + ` < ?))
-		           AND level = ?`
-		params = []any{qp.RetryThreshold, currentLevel}
+	// Add cursor-based pagination
+	if lastSeenPath != "" {
+		query += ` AND path > ?`
+		params = append(params, lastSeenPath)
+	}
 
-		if lastSeenPath != "" {
-			query += ` AND path > ?`
-			params = append(params, lastSeenPath)
-		}
-	} else { // retryPass
-		query += statusColumn + ` = 'failed'
-		          AND ` + retryColumn + ` < ?
-		          AND level = ?`
-		params = []any{qp.RetryThreshold, currentLevel}
+	// Add TrackedPaths filtering to prevent re-processing active tasks
+	qp.Mutex.Lock()
+	queue, exists := qp.Queues[queueName]
+	qp.Mutex.Unlock()
 
-		// Add NOT IN filtering for retry mode to prevent re-processing active paths
-		qp.Mutex.Lock()
-		queue, exists := qp.Queues[queueName]
-		qp.Mutex.Unlock()
-
-		if exists {
-			trackedPaths := queue.TrackedPaths(true) // Include both queued and in-progress paths
-			if len(trackedPaths) > 0 {
-				placeholders := make([]string, len(trackedPaths))
-				pathList := make([]string, 0, len(trackedPaths))
-				for path := range trackedPaths {
-					pathList = append(pathList, path)
-				}
-
-				for i := range placeholders {
-					placeholders[i] = "?"
-				}
-				query += ` AND path NOT IN (` + strings.Join(placeholders, ", ") + `)`
-
-				// Add the tracked paths as parameters
-				for _, path := range pathList {
-					params = append(params, path)
-				}
-
-				logging.GlobalLogger.Log(
-					"info", "System", "QP", "Retry mode filtering applied", map[string]any{
-						"queueName":     queueName,
-						"excludedPaths": len(pathList),
-					}, "RETRY_MODE_FILTERING_APPLIED", logging.QueueAcronyms[queueName],
-				)
+	if exists {
+		trackedPaths := queue.TrackedPaths(true) // Include both queued and in-progress paths
+		if len(trackedPaths) > 0 {
+			placeholders := make([]string, len(trackedPaths))
+			pathList := make([]string, 0, len(trackedPaths))
+			for path := range trackedPaths {
+				pathList = append(pathList, path)
 			}
+
+			for i := range placeholders {
+				placeholders[i] = "?"
+			}
+			query += ` AND path NOT IN (` + strings.Join(placeholders, ", ") + `)`
+
+			// Add the tracked paths as parameters
+			for _, path := range pathList {
+				params = append(params, path)
+			}
+
+			logging.GlobalLogger.Log(
+				"debug", "System", "QP", "TrackedPaths filtering applied", map[string]any{
+					"queueName":     queueName,
+					"excludedPaths": len(pathList),
+				}, "TRACKED_PATHS_FILTERING_APPLIED", logging.QueueAcronyms[queueName],
+			)
 		}
 	}
 

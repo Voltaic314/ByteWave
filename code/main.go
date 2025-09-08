@@ -56,6 +56,7 @@ func main() {
 	dbPath := filepath.Join(cwd, "tests", "traversal_tests", "test_traversal.db")
 	conductor := processing.NewConductor(
 		dbPath,
+		100,  // running low threshold
 		3,    // retry threshold
 		1000, // batch size
 	)

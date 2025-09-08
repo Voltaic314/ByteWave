@@ -4,7 +4,6 @@ package processing
 import (
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/Voltaic314/ByteWave/code/db"
 	"github.com/Voltaic314/ByteWave/code/filesystem"
@@ -33,69 +32,74 @@ func (tw *TraverserWorker) PathNormalizer(path string) string {
 	return path
 }
 
-// FetchAndProcessTask pulls a task from the queue and executes it.
-func (tw *TraverserWorker) FetchAndProcessTask() {
-	logging.GlobalLogger.Log("info", "System", "Traverser", "Starting task fetch and process loop", map[string]any{
-		"queueType": tw.QueueType,
-	}, "STARTING_TASK_FETCH_AND_PROCESS_LOOP", tw.QueueType,
-	)
-
-	for {
-		tw.Queue.WaitIfPaused()
-
-		task := tw.Queue.PopTask()
-		if task != nil {
-			logging.GlobalLogger.Log("info", "System", "Traverser", "Task acquired, processing", map[string]any{
-				"taskID":    task.GetID(),
-				"queueType": tw.QueueType,
-			}, "TASK_ACQUIRED_PROCESSING", tw.QueueType,
-			)
-
-			tw.State = WorkerActive
-
-			err := tw.ProcessTraversalTask(task)
-			if err != nil {
-				logging.GlobalLogger.Log("error", "System", "Traverser", "Error during traversal task", map[string]any{
-					"taskID": task.GetID(),
-					"error":  err.Error(),
-				}, "ERROR_DURING_TRAVERSAL_TASK", tw.QueueType,
-				)
-			}
-
-			continue
-		}
-
-		tw.State = WorkerIdle
-		time.Sleep(2 * time.Second)
-	}
-}
-
 // ProcessTraversalTask executes a traversal task.
 func (tw *TraverserWorker) ProcessTraversalTask(task Task) error {
 	logging.GlobalLogger.Log("info", "System", "Traverser", "Processing traversal task", map[string]any{
-		"taskID": task.GetID(),
-		"type":   task.GetType(),
+		"taskID":   task.GetID(),
+		"type":     task.GetType(),
+		"attempts": task.GetAttempts(),
 	}, "PROCESSING_TRAVERSAL_TASK", tw.QueueType,
 	)
 
+	var err error
+
 	// Validate path
 	if !tw.pv.IsValidPath(task.GetFolder().Path) {
+		err = fmt.Errorf("invalid path: %s", task.GetFolder().Path)
 		logging.GlobalLogger.Log("error", "System", "Traverser", "Invalid path for traversal", map[string]any{
 			"taskID": task.GetID(),
+			"error":  err.Error(),
 		}, "INVALID_PATH_FOR_TRAVERSAL", tw.QueueType,
 		)
-		tw.LogTraversalFailure(task, "invalid path")
-		return fmt.Errorf("invalid path: %s", task.GetFolder().Path)
+	} else {
+		// Handle different task types using type switching
+		switch concreteTask := task.(type) {
+		case *TraversalSrcTask:
+			err = tw.ProcessSrcTraversal(concreteTask)
+		case *TraversalDstTask:
+			err = tw.ProcessDstTraversal(concreteTask)
+		default:
+			err = fmt.Errorf("unknown task type: %s", task.GetType())
+		}
 	}
 
-	// Handle different task types using type switching
-	switch concreteTask := task.(type) {
-	case *TraversalSrcTask:
-		return tw.ProcessSrcTraversal(concreteTask)
-	case *TraversalDstTask:
-		return tw.ProcessDstTraversal(concreteTask)
-	default:
-		return fmt.Errorf("unknown task type: %s", task.GetType())
+	// Implement leasing model retry logic
+	if err != nil {
+		// Task failed - check if we can retry
+		if task.CanRetry(tw.Queue.RetryThreshold) {
+			// Still has retries left - NACK (unlock and increment attempt counter)
+			logging.GlobalLogger.Log("info", "System", "Traverser", "Task failed but can retry - NACKing", map[string]any{
+				"taskID":      task.GetID(),
+				"error":       err.Error(),
+				"attempts":    task.GetAttempts(),
+				"maxAttempts": tw.Queue.RetryThreshold,
+			}, "TRAVERSER_TASK_NACKED", tw.QueueType,
+			)
+			tw.Queue.NACKTask(task.GetID())
+			return err // Return error but don't write to DB
+		} else {
+			// Max retries reached - write failure to DB and finish task
+			logging.GlobalLogger.Log("error", "System", "Traverser", "Task failed and max retries reached - writing failure and finishing", map[string]any{
+				"taskID":      task.GetID(),
+				"error":       err.Error(),
+				"attempts":    task.GetAttempts(),
+				"maxAttempts": tw.Queue.RetryThreshold,
+			}, "TRAVERSER_TASK_MAX_RETRIES_REACHED", tw.QueueType,
+			)
+			tw.LogTraversalFailure(task, err.Error()) // Write to DB buffer
+			tw.Queue.FinishTask(task.GetID())         // Remove from queue
+			return err
+		}
+	} else {
+		// Task succeeded - ProcessSrcTraversal/ProcessDstTraversal already wrote to DB buffer
+		// Now just finish the task
+		logging.GlobalLogger.Log("info", "System", "Traverser", "Task succeeded - finishing", map[string]any{
+			"taskID":   task.GetID(),
+			"attempts": task.GetAttempts(),
+		}, "TRAVERSER_TASK_SUCCEEDED", tw.QueueType,
+		)
+		tw.Queue.FinishTask(task.GetID()) // Remove from queue
+		return nil
 	}
 }
 

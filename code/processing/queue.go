@@ -44,10 +44,11 @@ type TaskQueue struct {
 	RunningLowTriggered bool           // Prevents duplicate RunningLow signals
 	RunningLowThreshold int            // Threshold for triggering RunningLow signals
 	IdleTriggered       bool           // Prevents duplicate idle signals
+	RetryThreshold      int            // Threshold for retrying tasks
 }
 
 // NewTaskQueue initializes a new queue for traversal or upload.
-func NewTaskQueue(queueType QueueType, phase int, srcOrDst string, paginationSize int, runningLowThreshold int) *TaskQueue {
+func NewTaskQueue(queueType QueueType, phase int, srcOrDst string, paginationSize int, runningLowThreshold int, retryThreshold int) *TaskQueue {
 	queueID := fmt.Sprintf("%s-%s", srcOrDst, queueType)
 	logging.GlobalLogger.Log(
 		"info", "System", "Queue", "Creating new task queue", map[string]any{
@@ -56,6 +57,7 @@ func NewTaskQueue(queueType QueueType, phase int, srcOrDst string, paginationSiz
 			"phase":          phase,
 			"srcOrDst":       srcOrDst,
 			"paginationSize": paginationSize,
+			"retryThreshold": retryThreshold,
 		}, "CREATE_NEW_TASK_QUEUE", "All",
 	)
 
@@ -75,6 +77,7 @@ func NewTaskQueue(queueType QueueType, phase int, srcOrDst string, paginationSiz
 		RunningLowTriggered: false,
 		RunningLowThreshold: runningLowThreshold,
 		IdleTriggered:       false,
+		RetryThreshold:      retryThreshold,
 	}
 	q.cond = sync.NewCond(&q.mu)
 
@@ -182,36 +185,92 @@ func (q *TaskQueue) AddTasks(tasks []Task) {
 	)
 }
 
-// PopTask retrieves the next available task, pausing workers if needed.
-func (q *TaskQueue) PopTask() Task {
+// LeaseTask retrieves and locks the next available task but keeps it in queue.
+// This implements the leasing model for in-memory retry tracking.
+func (q *TaskQueue) LeaseTask() Task {
 	q.Lock()
 	defer q.Unlock()
 
-	// Running‑low trigger removed - QP now handles task publishing proactively
-
-	// Find first unlocked task, remove it from slice, return it
-	for i, task := range q.tasks {
+	// Find first unlocked task, lock it but keep in queue
+	for _, task := range q.tasks {
 		if !task.IsLocked() {
 			task.SetLocked(true)
-			// splice: tasks = tasks[:i] + tasks[i+1:]
-			// Sidenote but this is really weird compared to Python's append syntax lol
-			q.tasks = append(q.tasks[:i], q.tasks[i+1:]...)
-
-			// Add to in-progress list
-			q.inProgressTasks = append(q.inProgressTasks, task)
 
 			logging.GlobalLogger.Log(
-				"info", "System", "Queue", "Task popped and added to in-progress", map[string]any{
-					"queueID": q.QueueID,
-					"taskID":  task.GetID(),
-					"path":    task.GetPath(),
-				}, "TASK_POPPED_AND_ADDED_TO_IN_PROGRESS", q.SrcOrDst,
+				"info", "System", "Queue", "Task leased successfully", map[string]any{
+					"queueID":  q.QueueID,
+					"taskID":   task.GetID(),
+					"path":     task.GetPath(),
+					"attempts": task.GetAttempts(),
+				}, "TASK_LEASED_SUCCESSFULLY", q.SrcOrDst,
 			)
 
 			return task
 		}
 	}
 	return nil
+}
+
+// NACKTask unlocks a task and increments its retry counter.
+// Used when a task fails but can still be retried.
+func (q *TaskQueue) NACKTask(taskID string) {
+	q.Lock()
+	defer q.Unlock()
+
+	for _, task := range q.tasks {
+		if task.GetID() == taskID {
+			task.SetLocked(false)
+			task.IncrementAttempts()
+
+			logging.GlobalLogger.Log(
+				"info", "System", "Queue", "Task NACKed - unlocked and retry counter incremented", map[string]any{
+					"queueID":  q.QueueID,
+					"taskID":   taskID,
+					"path":     task.GetPath(),
+					"attempts": task.GetAttempts(),
+				}, "TASK_NACKED", q.SrcOrDst,
+			)
+			return
+		}
+	}
+
+	logging.GlobalLogger.Log(
+		"warning", "System", "Queue", "NACK failed - task not found", map[string]any{
+			"queueID": q.QueueID,
+			"taskID":  taskID,
+		}, "NACK_TASK_NOT_FOUND", q.SrcOrDst,
+	)
+}
+
+// FinishTask removes a task completely from the queue.
+// Used when a task succeeds or reaches maximum retry attempts.
+func (q *TaskQueue) FinishTask(taskID string) {
+	q.Lock()
+	defer q.Unlock()
+
+	for i, task := range q.tasks {
+		if task.GetID() == taskID {
+			// Remove task from slice
+			q.tasks = append(q.tasks[:i], q.tasks[i+1:]...)
+
+			logging.GlobalLogger.Log(
+				"info", "System", "Queue", "Task finished and removed from queue", map[string]any{
+					"queueID":  q.QueueID,
+					"taskID":   taskID,
+					"path":     task.GetPath(),
+					"attempts": task.GetAttempts(),
+				}, "TASK_FINISHED", q.SrcOrDst,
+			)
+			return
+		}
+	}
+
+	logging.GlobalLogger.Log(
+		"warning", "System", "Queue", "Finish failed - task not found", map[string]any{
+			"queueID": q.QueueID,
+			"taskID":  taskID,
+		}, "FINISH_TASK_NOT_FOUND", q.SrcOrDst,
+	)
 }
 
 // UnlockTask allows reassigning failed/stalled tasks.

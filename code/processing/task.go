@@ -26,6 +26,10 @@ type Task interface {
 	GetParentTaskID() *string
 	IsLocked() bool
 	SetLocked(bool)
+	// In-memory retry tracking methods
+	GetAttempts() int
+	IncrementAttempts()
+	CanRetry(maxAttempts int) bool
 }
 
 // BaseTask contains common fields for all task types
@@ -36,6 +40,7 @@ type BaseTask struct {
 	File         *filesystem.File   // Pointer to File (nullable for traversal tasks)
 	ParentTaskID *string            // Parent task ID (nullable for root tasks)
 	Locked       bool               // Lock state to prevent race conditions
+	AttemptCount int                // In-memory retry counter
 }
 
 // TraversalSrcTask represents a source traversal task
@@ -64,6 +69,19 @@ func (bt *BaseTask) GetParentTaskID() *string      { return bt.ParentTaskID }
 func (bt *BaseTask) IsLocked() bool                { return bt.Locked }
 func (bt *BaseTask) SetLocked(locked bool)         { bt.Locked = locked }
 
+// In-memory retry tracking methods
+func (bt *BaseTask) GetAttempts() int {
+	return bt.AttemptCount
+}
+
+func (bt *BaseTask) IncrementAttempts() {
+	bt.AttemptCount++
+}
+
+func (bt *BaseTask) CanRetry(maxAttempts int) bool {
+	return bt.AttemptCount < maxAttempts
+}
+
 func (bt *BaseTask) GetPath() string {
 	if bt.Folder != nil {
 		return bt.Folder.Path
@@ -84,6 +102,7 @@ func NewSrcTraversalTask(id string, folder *filesystem.Folder, parentTaskID *str
 			File:         nil,
 			ParentTaskID: parentTaskID,
 			Locked:       false,
+			AttemptCount: 0,
 		},
 	}, nil
 }
@@ -114,6 +133,7 @@ func NewUploadTask(id string, file *filesystem.File, folder *filesystem.Folder, 
 			File:         file,
 			ParentTaskID: parentTaskID,
 			Locked:       false,
+			AttemptCount: 0,
 		},
 	}
 
@@ -137,6 +157,7 @@ func NewDstTraversalTask(id string, folder *filesystem.Folder, parentTaskID *str
 			File:         nil,
 			ParentTaskID: parentTaskID,
 			Locked:       false,
+			AttemptCount: 0,
 		},
 		ExpectedSrcChildren: expectedSrcChildren,
 		ExpectedSrcFiles:    expectedSrcFiles,
