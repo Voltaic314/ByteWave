@@ -2,6 +2,8 @@
 package processing
 
 import (
+	"time"
+
 	"github.com/google/uuid"
 
 	"github.com/Voltaic314/ByteWave/code/logging"
@@ -65,39 +67,39 @@ func (wb *WorkerBase) Run(process func(Task) error) {
 
 		// 🔄 NEW: Continuous task processing loop
 		for {
-			task := wb.Queue.PopTask()
+			task := wb.Queue.LeaseTask()
 			if task == nil {
-				// No more tasks available - go idle and wait for next signal
-				logging.GlobalLogger.Log("debug", "System", "Worker", "No more tasks available, worker going idle", map[string]any{
-					"queueID": wb.Queue.QueueID,
-				}, "WORKER_GOING_IDLE", wb.QueueType)
 				wb.State = WorkerIdle
-				return
+				time.Sleep(50 * time.Millisecond)
+				continue
 			}
 
 			// Task found - process it
 			wb.State = WorkerActive
-			logging.GlobalLogger.Log("debug", "System", "Worker", "Worker processing task", map[string]any{
-				"queueID": wb.Queue.QueueID,
-				"taskID":  task.GetID(),
-				"path":    task.GetPath(),
-			}, "WORKER_PROCESSING_TASK", wb.QueueType)
+			logging.GlobalLogger.Log("debug", "System", "Worker", "Worker processing leased task", map[string]any{
+				"queueID":  wb.Queue.QueueID,
+				"taskID":   task.GetID(),
+				"path":     task.GetPath(),
+				"attempts": task.GetAttempts(),
+			}, "WORKER_PROCESSING_LEASED_TASK", wb.QueueType)
 
+			// Let the specific worker implementation handle the retry logic,
+			// DB writes, and task resolution (NACK vs Finish)
 			if err := process(task); err != nil {
-				logging.GlobalLogger.Log("error", "System", "Worker", "Worker task failed", map[string]any{
-					"taskID": task.GetID(),
-					"error":  err.Error(),
-				}, "WORKER_TASK_FAILED", wb.QueueType)
+				logging.GlobalLogger.Log("error", "System", "Worker", "Task processing returned error", map[string]any{
+					"taskID":   task.GetID(),
+					"error":    err.Error(),
+					"attempts": task.GetAttempts(),
+				}, "WORKER_TASK_PROCESSING_ERROR", wb.QueueType)
 			} else {
-				logging.GlobalLogger.Log("info", "System", "Worker", "Worker completed task", map[string]any{
-					"taskID": task.GetID(),
-				}, "WORKER_TASK_COMPLETED", wb.QueueType)
+				logging.GlobalLogger.Log("debug", "System", "Worker", "Task processing completed successfully", map[string]any{
+					"taskID":   task.GetID(),
+					"attempts": task.GetAttempts(),
+				}, "WORKER_TASK_PROCESSING_SUCCESS", wb.QueueType)
 			}
-			wb.Queue.RemoveInProgressTask(task.GetID())
 
-			// ✨ Key improvement: Continue loop to check for more tasks
-			// instead of returning/going idle immediately
-			logging.GlobalLogger.Log("debug", "System", "Worker", "Task completed, checking for more tasks", map[string]any{
+			// ✨ Continue loop to check for more tasks
+			logging.GlobalLogger.Log("debug", "System", "Worker", "Task processed, checking for more tasks", map[string]any{
 				"queueID": wb.Queue.QueueID,
 			}, "WORKER_CHECKING_FOR_MORE_TASKS", wb.QueueType)
 		}

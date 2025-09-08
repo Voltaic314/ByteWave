@@ -11,16 +11,20 @@ import (
 	typesdb "github.com/Voltaic314/ByteWave/code/types/db"
 )
 
+// TODO: This stuff about thresholds should be done on a queue level,
+// not at the conductor level. We should update this when we get into 
+// more dynamic queue setups. For our little tests it's fine though.
 // The Boss 😎 - Responsible for setting up QP, queues, and workers
 type Conductor struct {
 	DB             *db.DB
 	QP             *QueuePublisher
+	runningLowThreshold int
 	retryThreshold int
 	batchSize      int
 }
 
 // NewConductor initializes with DB config, but defers QP setup
-func NewConductor(dbPath string, retryThreshold, batchSize int) *Conductor {
+func NewConductor(dbPath string, runningLowThreshold, retryThreshold, batchSize int) *Conductor {
 	dbInstance, err := db.NewDB(dbPath) // Creates DB connection
 	if err != nil {
 		logging.GlobalLogger.Log("error", "System", "Conductor", "Failed to initialize DB", map[string]any{
@@ -43,7 +47,7 @@ func (c *Conductor) StartTraversal(num_of_workers ...int) {
 
 	// Setup source queue only - destination queue will be created when source reaches level 1
 	srcQueueName := "src-traversal"
-	c.SetupQueue(srcQueueName, TraversalQueueType, 0, "src", 1000)
+	c.SetupQueue(srcQueueName, TraversalQueueType, 0, "src", 1000, c.runningLowThreshold, c.retryThreshold)
 
 	// Create workers FIRST before starting QP to avoid startup race condition
 	var os_svc services.BaseServiceInterface = services.NewOSService()
@@ -79,7 +83,7 @@ func (c *Conductor) SetupDestinationQueue(num_of_workers ...int) {
 	dstQueueName := "dst-traversal"
 
 	// Create destination queue
-	c.SetupQueue(dstQueueName, TraversalQueueType, 0, "dst", 1000)
+	c.SetupQueue(dstQueueName, TraversalQueueType, 0, "dst", 1000, c.runningLowThreshold, c.retryThreshold)
 
 	// Create destination workers
 	var os_svc services.BaseServiceInterface = services.NewOSService()
@@ -155,9 +159,8 @@ func (c *Conductor) monitorQueueCompletion() {
 }
 
 // SetupQueue initializes a queue and registers it with QP
-func (c *Conductor) SetupQueue(name string, queueType QueueType, phase int, srcOrDst string, paginationSize int) {
-	RunningLowThreshold := 100
-	queue := NewTaskQueue(queueType, phase, srcOrDst, paginationSize, RunningLowThreshold)
+func (c *Conductor) SetupQueue(name string, queueType QueueType, phase int, srcOrDst string, paginationSize int, runningLowThreshold int, retryThreshold int) {
+	queue := NewTaskQueue(queueType, phase, srcOrDst, paginationSize, runningLowThreshold, retryThreshold)
 
 	c.QP.Queues[name] = queue
 
@@ -165,7 +168,6 @@ func (c *Conductor) SetupQueue(name string, queueType QueueType, phase int, srcO
 	// Destination queues should start when triggered by source progress
 	if srcOrDst == "src" {
 		c.QP.QueueLevels[name] = phase
-		c.QP.ScanModes[name] = firstPass // Initialize scan mode
 	}
 
 	c.QP.LastPathCursors[name] = "" // Add path-based cursor for this queue
@@ -296,7 +298,6 @@ func (c *Conductor) TeardownQueue(queueName string) {
 	delete(c.QP.Queues, queueName)
 	delete(c.QP.QueueLevels, queueName)
 	delete(c.QP.LastPathCursors, queueName)
-	delete(c.QP.ScanModes, queueName)
 	delete(c.QP.QueriesPerPhase, queueName)
 
 	// 🔓 Unlocking...
