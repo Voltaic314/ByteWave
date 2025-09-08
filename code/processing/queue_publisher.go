@@ -33,9 +33,6 @@ type QueuePublisher struct {
 	QueueLevels     map[string]int
 	Mutex           sync.Mutex
 	Running         bool
-	LastPathCursors map[string]string
-	// LastDBPaths stores the last raw DB path fetched per queue for stable cursoring
-	LastDBPaths     map[string]string
 	RetryThreshold  int
 	BatchSize       int
 	QueriesPerPhase map[string]int // queueName -> queryCount
@@ -62,8 +59,6 @@ func NewQueuePublisher(db *db.DB, retryThreshold, batchSize int) *QueuePublisher
 		Queues:          make(map[string]*TaskQueue),
 		QueueLevels:     make(map[string]int),
 		Running:         true,
-		LastPathCursors: make(map[string]string),
-		LastDBPaths:     make(map[string]string),
 		RetryThreshold:  retryThreshold,
 		BatchSize:       batchSize,
 		QueriesPerPhase: make(map[string]int),
@@ -379,7 +374,6 @@ func (qp *QueuePublisher) createDestinationQueueNow() {
 
 	// Set the queue level IMMEDIATELY to prevent race condition
 	qp.QueueLevels["dst-traversal"] = 0
-	qp.LastPathCursors["dst-traversal"] = ""
 	qp.QueriesPerPhase["dst-traversal"] = 0
 
 	qp.Mutex.Unlock()
@@ -395,7 +389,6 @@ func (qp *QueuePublisher) PublishDestinationTasks(queueName string) {
 	qp.Mutex.Lock()
 	queue, exists := qp.Queues[queueName]
 	currentLevel := qp.QueueLevels[queueName]
-	lastPath := qp.LastPathCursors[queueName]
 	qp.Mutex.Unlock()
 
 	if !exists {
@@ -407,44 +400,50 @@ func (qp *QueuePublisher) PublishDestinationTasks(queueName string) {
 		return
 	}
 
-	// Simplified batch approach using TrackedPaths filtering
-	tasks := qp.FetchDestinationTasksFromDB(currentLevel, lastPath, queueName)
+	// Publish destination tasks one batch at a time, respecting running low threshold
+	for {
+		tasks := qp.FetchDestinationTasksFromDB(currentLevel, queueName)
 
-	if len(tasks) > 0 {
-		logging.GlobalLogger.Log(
-			"debug", "System", "QP", "Tasks fetched from DB (dst)", map[string]any{
-				"taskCount":    len(tasks),
-				"level":        currentLevel,
-				"lastSeenPath": lastPath,
-			}, "TASKS_FETCHED", logging.QueueAcronyms[queueName],
-		)
+		if len(tasks) == 0 {
+			logging.GlobalLogger.Log("debug", "System", "QP", "No more destination tasks at current level", map[string]any{
+				"level": currentLevel,
+				"queue": queueName,
+			}, "NO_MORE_DST_TASKS_AT_LEVEL", logging.QueueAcronyms[queueName])
+			break // No more tasks available at this level
+		}
+
+		logging.GlobalLogger.Log("debug", "System", "QP", "Publishing batch of destination tasks", map[string]any{
+			"taskCount": len(tasks),
+			"level":     currentLevel,
+		}, "PUBLISHING_DST_TASK_BATCH", logging.QueueAcronyms[queueName])
 
 		queue.AddTasks(tasks)
 		qp.Mutex.Lock()
 		qp.QueriesPerPhase[queueName]++
-		if lastRaw, ok := qp.LastDBPaths[queueName]; ok && lastRaw != "" {
-			qp.LastPathCursors[queueName] = lastRaw
-		} else if len(tasks) > 0 {
-			// Fallback to task path if we don't have a recorded raw DB path yet
-			qp.LastPathCursors[queueName] = tasks[len(tasks)-1].GetPath()
-		}
 		qp.Mutex.Unlock()
-	} else {
-		logging.GlobalLogger.Log(
-			"debug", "System", "QP", "No tasks fetched from DB (dst)", map[string]any{
-				"level":        currentLevel,
-				"lastSeenPath": lastPath,
-			}, "NO_TASKS_FETCHED", logging.QueueAcronyms[queueName],
-		)
+
+		// Check if queue is still below running low threshold
+		if queue.TasksRunningLow() {
+			logging.GlobalLogger.Log("debug", "System", "QP", "Destination queue still running low, fetching another batch", map[string]any{
+				"queueSize": queue.QueueSize(),
+				"threshold": queue.RunningLowThreshold,
+			}, "DST_QUEUE_STILL_RUNNING_LOW", logging.QueueAcronyms[queueName])
+			continue // Fetch another batch
+		} else {
+			logging.GlobalLogger.Log("debug", "System", "QP", "Destination queue threshold satisfied, stopping batch publishing", map[string]any{
+				"queueSize": queue.QueueSize(),
+				"threshold": queue.RunningLowThreshold,
+			}, "DST_QUEUE_THRESHOLD_SATISFIED", logging.QueueAcronyms[queueName])
+			break // Queue has enough tasks now
+		}
 	}
 }
 
 // FetchDestinationTasksFromDB efficiently fetches destination tasks using simplified leasing model
-func (qp *QueuePublisher) FetchDestinationTasksFromDB(currentLevel int, lastSeenPath string, queueName string) []Task {
+func (qp *QueuePublisher) FetchDestinationTasksFromDB(currentLevel int, queueName string) []Task {
 	logging.GlobalLogger.Log(
 		"debug", "System", "QP", "Fetching destination tasks from DB", map[string]any{
 			"currentLevel": currentLevel,
-			"lastSeenPath": lastSeenPath,
 			"queueName":    queueName,
 		}, "FETCH_TASKS", logging.QueueAcronyms[queueName],
 	)
@@ -456,12 +455,6 @@ func (qp *QueuePublisher) FetchDestinationTasksFromDB(currentLevel int, lastSeen
 	          AND level = ? AND type = 'folder'`
 
 	params1 := []any{qp.RetryThreshold, currentLevel}
-
-	// Add cursor-based pagination
-	if lastSeenPath != "" {
-		query1 += ` AND path > ?`
-		params1 = append(params1, lastSeenPath)
-	}
 
 	// Add TrackedPaths filtering to prevent re-processing active tasks
 	qp.Mutex.Lock()
@@ -560,11 +553,6 @@ func (qp *QueuePublisher) FetchDestinationTasksFromDB(currentLevel int, lastSeen
 			continue
 		}
 
-		// Record path for stable cursor updates (paths are already in correct relative format)
-		qp.Mutex.Lock()
-		qp.LastDBPaths[queueName] = path
-		qp.Mutex.Unlock()
-
 		folder := &filesystem.Folder{
 			Name:         name,
 			Path:         path,
@@ -581,7 +569,6 @@ func (qp *QueuePublisher) FetchDestinationTasksFromDB(currentLevel int, lastSeen
 		logging.GlobalLogger.Log(
 			"warning", "System", "QP", "No dst folders found despite hasPendingAtLevel returning true", map[string]any{
 				"currentLevel": currentLevel,
-				"lastSeenPath": lastSeenPath,
 				"query":        query1,
 				"params":       params1,
 			}, "NO_FOLDERS_FOUND", logging.QueueAcronyms[queueName],
@@ -802,38 +789,44 @@ func (qp *QueuePublisher) PublishTasks(queueName string) {
 
 	qp.Mutex.Lock()
 	currentLevel := qp.QueueLevels[queueName]
-	lastPath := qp.LastPathCursors[queueName]
 	qp.Mutex.Unlock()
 
-	// Simplified task fetching using TrackedPaths filtering
-	tasks := qp.FetchTasksFromDB(table, queue.Type, currentLevel, lastPath, queueName)
+	// Publish one batch at a time, respecting running low threshold
+	for {
+		tasks := qp.FetchTasksFromDB(table, queue.Type, currentLevel, queueName)
 
-	if len(tasks) > 0 {
-		logging.GlobalLogger.Log(
-			"debug", "System", "QP", "Tasks fetched from DB", map[string]any{
-				"taskCount":    len(tasks),
-				"level":        currentLevel,
-				"lastSeenPath": lastPath,
-			}, "TASKS_FETCHED_FROM_DB", logging.QueueAcronyms[queueName],
-		)
+		if len(tasks) == 0 {
+			logging.GlobalLogger.Log("debug", "System", "QP", "No more tasks at current level", map[string]any{
+				"level": currentLevel,
+				"queue": queueName,
+			}, "NO_MORE_TASKS_AT_LEVEL", logging.QueueAcronyms[queueName])
+			break // No more tasks available at this level
+		}
+
+		logging.GlobalLogger.Log("debug", "System", "QP", "Publishing batch of tasks", map[string]any{
+			"taskCount": len(tasks),
+			"level":     currentLevel,
+		}, "PUBLISHING_TASK_BATCH", logging.QueueAcronyms[queueName])
 
 		queue.AddTasks(tasks)
 		qp.Mutex.Lock()
 		qp.QueriesPerPhase[queueName]++
-		if lastRaw, ok := qp.LastDBPaths[queueName]; ok && lastRaw != "" {
-			qp.LastPathCursors[queueName] = lastRaw
-		} else if len(tasks) > 0 {
-			// Use the last task path for cursor progression
-			qp.LastPathCursors[queueName] = tasks[len(tasks)-1].GetPath()
-		}
 		qp.Mutex.Unlock()
-	} else {
-		logging.GlobalLogger.Log(
-			"debug", "System", "QP", "No tasks fetched from DB", map[string]any{
-				"level":        currentLevel,
-				"lastSeenPath": lastPath,
-			}, "NO_TASKS_FETCHED_FROM_DB", logging.QueueAcronyms[queueName],
-		)
+
+		// Check if queue is still below running low threshold
+		if queue.TasksRunningLow() {
+			logging.GlobalLogger.Log("debug", "System", "QP", "Queue still running low, fetching another batch", map[string]any{
+				"queueSize": queue.QueueSize(),
+				"threshold": queue.RunningLowThreshold,
+			}, "QUEUE_STILL_RUNNING_LOW", logging.QueueAcronyms[queueName])
+			continue // Fetch another batch
+		} else {
+			logging.GlobalLogger.Log("debug", "System", "QP", "Queue threshold satisfied, stopping batch publishing", map[string]any{
+				"queueSize": queue.QueueSize(),
+				"threshold": queue.RunningLowThreshold,
+			}, "QUEUE_THRESHOLD_SATISFIED", logging.QueueAcronyms[queueName])
+			break // Queue has enough tasks now
+		}
 	}
 }
 
@@ -854,7 +847,6 @@ func (qp *QueuePublisher) advancePhaseWithMutex(queueName string) {
 	// Advance the phase
 	queue.Phase++
 	qp.QueueLevels[queueName] = queue.Phase
-	qp.LastPathCursors[queueName] = ""
 	qp.QueriesPerPhase[queueName] = 0
 	syncedLevel := qp.QueueLevels[queueName]
 
@@ -962,13 +954,12 @@ func (qp *QueuePublisher) hasPendingAtLevel(queueName string, level int) bool {
 	return count > 0
 }
 
-func (qp *QueuePublisher) FetchTasksFromDB(table string, queueType QueueType, currentLevel int, lastSeenPath string, queueName string) []Task {
+func (qp *QueuePublisher) FetchTasksFromDB(table string, queueType QueueType, currentLevel int, queueName string) []Task {
 	logging.GlobalLogger.Log(
 		"info", "System", "QP", "Fetching tasks from DB", map[string]any{
 			"table":        table,
 			"queueType":    queueType,
 			"currentLevel": currentLevel,
-			"lastSeenPath": lastSeenPath,
 		}, "FETCH_TASKS_FROM_DB", logging.QueueAcronyms[queueName],
 	)
 
@@ -992,12 +983,6 @@ func (qp *QueuePublisher) FetchTasksFromDB(table string, queueType QueueType, cu
 	          AND level = ?`
 
 	params := []any{qp.RetryThreshold, currentLevel}
-
-	// Add cursor-based pagination
-	if lastSeenPath != "" {
-		query += ` AND path > ?`
-		params = append(params, lastSeenPath)
-	}
 
 	// Add TrackedPaths filtering to prevent re-processing active tasks
 	qp.Mutex.Lock()
@@ -1074,11 +1059,6 @@ func (qp *QueuePublisher) runTaskQuery(table, query string, params []any, curren
 			)
 			continue
 		}
-
-		// Record path for stable cursor updates (paths are already in correct relative format)
-		qp.Mutex.Lock()
-		qp.LastDBPaths[queueName] = path
-		qp.Mutex.Unlock()
 
 		if nodeType == "folder" {
 			folder := &filesystem.Folder{

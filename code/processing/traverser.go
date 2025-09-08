@@ -43,6 +43,9 @@ func (tw *TraverserWorker) ProcessTraversalTask(task Task) error {
 
 	var err error
 
+	var files []filesystem.File
+	var folders []filesystem.Folder
+
 	// Validate path
 	if !tw.pv.IsValidPath(task.GetFolder().Path) {
 		err = fmt.Errorf("invalid path: %s", task.GetFolder().Path)
@@ -52,59 +55,55 @@ func (tw *TraverserWorker) ProcessTraversalTask(task Task) error {
 		}, "INVALID_PATH_FOR_TRAVERSAL", tw.QueueType,
 		)
 	} else {
-		// Handle different task types using type switching
+		// Handle different task types using type switching - collect data without writing
 		switch concreteTask := task.(type) {
 		case *TraversalSrcTask:
-			err = tw.ProcessSrcTraversal(concreteTask)
+			files, folders, err = tw.ProcessSrcTraversal(concreteTask)
 		case *TraversalDstTask:
-			err = tw.ProcessDstTraversal(concreteTask)
+			files, folders, err = tw.ProcessDstTraversal(concreteTask)
 		default:
 			err = fmt.Errorf("unknown task type: %s", task.GetType())
 		}
 	}
 
-	// Implement leasing model retry logic
+	// Simple processing - worker handles retry logic
 	if err != nil {
-		// Task failed - check if we can retry
-		if task.CanRetry(tw.Queue.RetryThreshold) {
-			// Still has retries left - NACK (unlock and increment attempt counter)
-			logging.GlobalLogger.Log("info", "System", "Traverser", "Task failed but can retry - NACKing", map[string]any{
-				"taskID":      task.GetID(),
-				"error":       err.Error(),
-				"attempts":    task.GetAttempts(),
-				"maxAttempts": tw.Queue.RetryThreshold,
-			}, "TRAVERSER_TASK_NACKED", tw.QueueType,
-			)
-			tw.Queue.NACKTask(task.GetID())
-			return err // Return error but don't write to DB
-		} else {
-			// Max retries reached - write failure to DB and finish task
-			logging.GlobalLogger.Log("error", "System", "Traverser", "Task failed and max retries reached - writing failure and finishing", map[string]any{
-				"taskID":      task.GetID(),
-				"error":       err.Error(),
-				"attempts":    task.GetAttempts(),
-				"maxAttempts": tw.Queue.RetryThreshold,
-			}, "TRAVERSER_TASK_MAX_RETRIES_REACHED", tw.QueueType,
-			)
-			tw.LogTraversalFailure(task, err.Error()) // Write to DB buffer
-			tw.Queue.FinishTask(task.GetID())         // Remove from queue
-			return err
-		}
-	} else {
-		// Task succeeded - ProcessSrcTraversal/ProcessDstTraversal already wrote to DB buffer
-		// Now just finish the task
-		logging.GlobalLogger.Log("info", "System", "Traverser", "Task succeeded - finishing", map[string]any{
+		// Task failed - worker will handle retry logic
+		logging.GlobalLogger.Log("error", "System", "Traverser", "Task processing failed", map[string]any{
 			"taskID":   task.GetID(),
+			"error":    err.Error(),
 			"attempts": task.GetAttempts(),
-		}, "TRAVERSER_TASK_SUCCEEDED", tw.QueueType,
-		)
-		tw.Queue.FinishTask(task.GetID()) // Remove from queue
-		return nil
+		}, "TRAVERSER_TASK_PROCESSING_FAILED", tw.QueueType)
+		return err
 	}
+
+	// Task succeeded - write to DB
+	var dbErr error
+	switch concreteTask := task.(type) {
+	case *TraversalSrcTask:
+		dbErr = tw.LogSrcTraversalSuccess(concreteTask, files, folders)
+	case *TraversalDstTask:
+		dbErr = tw.LogDstTraversalSuccess(concreteTask, files, folders)
+	}
+
+	if dbErr != nil {
+		logging.GlobalLogger.Log("error", "System", "Traverser", "Task succeeded but DB write failed", map[string]any{
+			"taskID":   task.GetID(),
+			"error":    dbErr.Error(),
+			"attempts": task.GetAttempts(),
+		}, "TRAVERSER_DB_WRITE_FAILED", tw.QueueType)
+		return dbErr
+	}
+
+	logging.GlobalLogger.Log("info", "System", "Traverser", "Task succeeded and logged to DB", map[string]any{
+		"taskID":   task.GetID(),
+		"attempts": task.GetAttempts(),
+	}, "TRAVERSER_TASK_SUCCEEDED", tw.QueueType)
+	return nil
 }
 
-// ProcessSrcTraversal handles source traversal - discovers and logs all valid items
-func (tw *TraverserWorker) ProcessSrcTraversal(task *TraversalSrcTask) error {
+// ProcessSrcTraversal handles source traversal - discovers and validates all items, returns data without writing
+func (tw *TraverserWorker) ProcessSrcTraversal(task *TraversalSrcTask) ([]filesystem.File, []filesystem.Folder, error) {
 	// List folder contents
 	paginationStream := tw.Queue.GetPaginationChan()
 	foldersChan, filesChan, errChan := tw.Service.GetAllItems(*task.GetFolder(), paginationStream)
@@ -128,8 +127,7 @@ func (tw *TraverserWorker) ProcessSrcTraversal(task *TraversalSrcTask) error {
 			"error":  err.Error(),
 		}, "FAILED_TO_LIST_FOLDER_CONTENTS", tw.QueueType,
 		)
-		tw.LogTraversalFailure(task, err.Error())
-		return err
+		return nil, nil, err
 	}
 
 	var validFolders []filesystem.Folder
@@ -147,12 +145,12 @@ func (tw *TraverserWorker) ProcessSrcTraversal(task *TraversalSrcTask) error {
 		}
 	}
 
-	// Log all discovered items for source traversal
-	return tw.LogSrcTraversalSuccess(task, validFiles, validFolders)
+	// Return validated data without writing to DB
+	return validFiles, validFolders, nil
 }
 
-// ProcessDstTraversal handles destination traversal - compares discovered items against expected source children
-func (tw *TraverserWorker) ProcessDstTraversal(dstTask *TraversalDstTask) error {
+// ProcessDstTraversal handles destination traversal - compares discovered items against expected source children, returns data without writing
+func (tw *TraverserWorker) ProcessDstTraversal(dstTask *TraversalDstTask) ([]filesystem.File, []filesystem.Folder, error) {
 
 	// List folder contents
 	paginationStream := tw.Queue.GetPaginationChan()
@@ -177,8 +175,7 @@ func (tw *TraverserWorker) ProcessDstTraversal(dstTask *TraversalDstTask) error 
 			"error":  err.Error(),
 		}, "FAILED_TO_LIST_FOLDER_CONTENTS", tw.QueueType,
 		)
-		tw.LogTraversalFailure(dstTask, err.Error())
-		return err
+		return nil, nil, err
 	}
 
 	// Create maps for efficient lookup of expected source items
@@ -224,8 +221,8 @@ func (tw *TraverserWorker) ProcessDstTraversal(dstTask *TraversalDstTask) error 
 	}, "DESTINATION_TRAVERSAL_COMPARISON_COMPLETE", tw.QueueType,
 	)
 
-	// Log only the items that are present (expected from source AND found in destination)
-	return tw.LogDstTraversalSuccess(dstTask, presentFiles, presentFolders)
+	// Return filtered data without writing to DB
+	return presentFiles, presentFolders, nil
 }
 
 func (tw *TraverserWorker) LogSrcTraversalSuccess(task Task, files []filesystem.File, folders []filesystem.Folder) error {
@@ -242,7 +239,7 @@ func (tw *TraverserWorker) LogSrcTraversalSuccess(task Task, files []filesystem.
 	// Create inserts for all the files found in the traversal
 	for _, file := range files {
 		path := tw.PathNormalizer(file.Path)
-		tw.DB.QueueWrite(table, `INSERT INTO `+table+` (
+		tw.DB.QueueWrite(table, `INSERT OR IGNORE INTO `+table+` (
 			path, name, identifier, parent_id, type, level, size, last_modified,
 			traversal_status, upload_status, traversal_attempts, upload_attempts, error_ids
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -263,7 +260,7 @@ func (tw *TraverserWorker) LogSrcTraversalSuccess(task Task, files []filesystem.
 	// Create inserts for all the folders found in the traversal
 	for _, folder := range folders {
 		path := tw.PathNormalizer(folder.Path)
-		tw.DB.QueueWrite(table, `INSERT INTO `+table+` (
+		tw.DB.QueueWrite(table, `INSERT OR IGNORE INTO `+table+` (
 			path, name, identifier, parent_id, type, level, size, last_modified,
 			traversal_status, upload_status, traversal_attempts, upload_attempts, error_ids
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -283,13 +280,13 @@ func (tw *TraverserWorker) LogSrcTraversalSuccess(task Task, files []filesystem.
 
 	// Mark the parent folder (this task's folder) as successful
 	updateQuery := `UPDATE ` + table + ` SET traversal_status = 'successful', traversal_attempts = traversal_attempts + 1 WHERE path = ?`
-	updatePath := task.GetFolder().Path // Already relative, matches DB format
+	updatePath := tw.PathNormalizer(task.GetFolder().Path) // Normalize to match INSERT format
 
-	logging.GlobalLogger.Log("debug", "System", "Traverser", "Executing success UPDATE", map[string]any{
+	logging.GlobalLogger.Log("debug", "System", "Traverser", "Queueing success UPDATE", map[string]any{
 		"query": updateQuery,
 		"path":  updatePath,
 		"table": table,
-	}, "EXECUTING_SUCCESS_UPDATE", tw.QueueType,
+	}, "QUEUEING_SUCCESS_UPDATE", tw.QueueType,
 	)
 
 	tw.DB.QueueWriteWithPath(table, updatePath, updateQuery, updatePath)
@@ -324,7 +321,7 @@ func (tw *TraverserWorker) LogDstTraversalSuccess(task Task, files []filesystem.
 
 	// Log all discovered items to destination_nodes table - Match canonical destination_nodes schema
 	for _, file := range files {
-		tw.DB.QueueWrite(table, `INSERT INTO `+table+` (
+		tw.DB.QueueWrite(table, `INSERT OR IGNORE INTO `+table+` (
 			path, name, identifier, parent_id, type, level, size, last_modified,
 			traversal_status, traversal_attempts, error_ids
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -342,7 +339,7 @@ func (tw *TraverserWorker) LogDstTraversalSuccess(task Task, files []filesystem.
 	}
 
 	for _, folder := range folders {
-		tw.DB.QueueWrite(table, `INSERT INTO `+table+` (
+		tw.DB.QueueWrite(table, `INSERT OR IGNORE INTO `+table+` (
 			path, name, identifier, parent_id, type, level, size, last_modified,
 			traversal_status, traversal_attempts, error_ids
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -361,13 +358,13 @@ func (tw *TraverserWorker) LogDstTraversalSuccess(task Task, files []filesystem.
 
 	// Mark the parent folder as successful
 	updateQuery := `UPDATE ` + table + ` SET traversal_status = 'successful', traversal_attempts = traversal_attempts + 1 WHERE path = ?`
-	updatePath := task.GetFolder().Path // Already relative, matches DB format
+	updatePath := tw.PathNormalizer(task.GetFolder().Path) // Normalize to match INSERT format
 
-	logging.GlobalLogger.Log("debug", "System", "Traverser", "Executing destination success UPDATE", map[string]any{
+	logging.GlobalLogger.Log("debug", "System", "Traverser", "Queueing destination success UPDATE", map[string]any{
 		"query": updateQuery,
 		"path":  updatePath,
 		"table": table,
-	}, "EXECUTING_DESTINATION_SUCCESS_UPDATE", tw.QueueType,
+	}, "QUEUEING_DESTINATION_SUCCESS_UPDATE", tw.QueueType,
 	)
 
 	tw.DB.QueueWriteWithPath(table, updatePath, updateQuery, updatePath)
@@ -394,7 +391,7 @@ func (tw *TraverserWorker) LogTraversalFailure(task Task, errorMsg string) {
 		table = "destination_nodes"
 	}
 
-	taskPath := task.GetFolder().Path // Already relative, matches DB format
+	taskPath := tw.PathNormalizer(task.GetFolder().Path) // Normalize to match DB format
 	tw.DB.QueueWriteWithPath(table, taskPath, `UPDATE `+table+` SET traversal_status = 'failed', traversal_attempts = traversal_attempts + 1, last_error = ? WHERE path = ?`, errorMsg, taskPath)
 
 	logging.GlobalLogger.Log("info", "System", "Traverser", "Traversal failure logged to DB", map[string]any{

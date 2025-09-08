@@ -185,105 +185,68 @@ func (q *TaskQueue) AddTasks(tasks []Task) {
 	)
 }
 
-// LeaseTask retrieves and locks the next available task but keeps it in queue.
-// This implements the leasing model for in-memory retry tracking.
-func (q *TaskQueue) LeaseTask() Task {
+// PopTask removes and returns the first task from the queue (FIFO).
+// This implements a simple pop-and-process model for task handling.
+func (q *TaskQueue) PopTask() Task {
 	q.Lock()
 	defer q.Unlock()
 
-	// Find first unlocked task, lock it but keep in queue
-	for _, task := range q.tasks {
-		if !task.IsLocked() {
-			task.SetLocked(true)
-
-			logging.GlobalLogger.Log(
-				"info", "System", "Queue", "Task leased successfully", map[string]any{
-					"queueID":  q.QueueID,
-					"taskID":   task.GetID(),
-					"path":     task.GetPath(),
-					"attempts": task.GetAttempts(),
-				}, "TASK_LEASED_SUCCESSFULLY", q.SrcOrDst,
-			)
-
-			return task
-		}
-	}
-	return nil
-}
-
-// NACKTask unlocks a task and increments its retry counter.
-// Used when a task fails but can still be retried.
-func (q *TaskQueue) NACKTask(taskID string) {
-	q.Lock()
-	defer q.Unlock()
-
-	for _, task := range q.tasks {
-		if task.GetID() == taskID {
-			task.SetLocked(false)
-			task.IncrementAttempts()
-
-			logging.GlobalLogger.Log(
-				"info", "System", "Queue", "Task NACKed - unlocked and retry counter incremented", map[string]any{
-					"queueID":  q.QueueID,
-					"taskID":   taskID,
-					"path":     task.GetPath(),
-					"attempts": task.GetAttempts(),
-				}, "TASK_NACKED", q.SrcOrDst,
-			)
-			return
-		}
-	}
+	totalTasks := len(q.tasks)
 
 	logging.GlobalLogger.Log(
-		"warning", "System", "Queue", "NACK failed - task not found", map[string]any{
-			"queueID": q.QueueID,
-			"taskID":  taskID,
-		}, "NACK_TASK_NOT_FOUND", q.SrcOrDst,
+		"debug", "System", "Queue", "PopTask called - queue state", map[string]any{
+			"queueID":    q.QueueID,
+			"totalTasks": totalTasks,
+		}, "POP_TASK_QUEUE_STATE", q.SrcOrDst,
 	)
-}
 
-// FinishTask removes a task completely from the queue.
-// Used when a task succeeds or reaches maximum retry attempts.
-func (q *TaskQueue) FinishTask(taskID string) {
-	q.Lock()
-	defer q.Unlock()
-
-	for i, task := range q.tasks {
-		if task.GetID() == taskID {
-			// Remove task from slice
-			q.tasks = append(q.tasks[:i], q.tasks[i+1:]...)
-
-			logging.GlobalLogger.Log(
-				"info", "System", "Queue", "Task finished and removed from queue", map[string]any{
-					"queueID":  q.QueueID,
-					"taskID":   taskID,
-					"path":     task.GetPath(),
-					"attempts": task.GetAttempts(),
-				}, "TASK_FINISHED", q.SrcOrDst,
-			)
-			return
-		}
+	if totalTasks == 0 {
+		logging.GlobalLogger.Log(
+			"debug", "System", "Queue", "No tasks available to pop", map[string]any{
+				"queueID": q.QueueID,
+			}, "NO_TASKS_AVAILABLE_TO_POP", q.SrcOrDst,
+		)
+		return nil
 	}
+
+	// Pop first task (FIFO)
+	task := q.tasks[0]
+	q.tasks = q.tasks[1:] // Remove from slice
 
 	logging.GlobalLogger.Log(
-		"warning", "System", "Queue", "Finish failed - task not found", map[string]any{
-			"queueID": q.QueueID,
-			"taskID":  taskID,
-		}, "FINISH_TASK_NOT_FOUND", q.SrcOrDst,
+		"info", "System", "Queue", "Task popped successfully", map[string]any{
+			"queueID":        q.QueueID,
+			"taskID":         task.GetID(),
+			"path":           task.GetPath(),
+			"attempts":       task.GetAttempts(),
+			"remainingTasks": len(q.tasks),
+		}, "TASK_POPPED_SUCCESSFULLY", q.SrcOrDst,
 	)
+
+	return task
 }
 
-// UnlockTask allows reassigning failed/stalled tasks.
-func (q *TaskQueue) UnlockTask(taskID string) {
+// ReAddFailedTask adds a failed task back to the end of the queue for retry.
+func (q *TaskQueue) ReAddFailedTask(task Task) {
 	q.Lock()
-	defer q.Unlock()
+	q.tasks = append(q.tasks, task) // Add to end of queue
+	q.Unlock()
 
-	for _, task := range q.tasks {
-		if task.GetID() == taskID {
-			task.SetLocked(false)
-			return
-		}
-	}
+	logging.GlobalLogger.Log(
+		"info", "System", "Queue", "Failed task re-added to queue for retry", map[string]any{
+			"queueID":  q.QueueID,
+			"taskID":   task.GetID(),
+			"path":     task.GetPath(),
+			"attempts": task.GetAttempts(),
+		}, "FAILED_TASK_RE_ADDED", q.SrcOrDst,
+	)
+
+	// Signal workers that a new task is available
+	taskTopic := "tasks_published:" + q.QueueID
+	signals.GlobalSR.Publish(signals.Signal{
+		Topic:   taskTopic,
+		Payload: len(q.tasks),
+	})
 }
 
 // QueueSize returns the number of tasks in the queue.

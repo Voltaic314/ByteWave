@@ -2,8 +2,6 @@
 package processing
 
 import (
-	"time"
-
 	"github.com/google/uuid"
 
 	"github.com/Voltaic314/ByteWave/code/logging"
@@ -65,40 +63,59 @@ func (wb *WorkerBase) Run(process func(Task) error) {
 			"queueID": wb.Queue.QueueID,
 		}, "WORKER_RECEIVED_TASK_WAKE_UP_SIGNAL", wb.QueueType)
 
-		// 🔄 NEW: Continuous task processing loop
+		// 🔄 Pop and process tasks until queue is empty
 		for {
-			task := wb.Queue.LeaseTask()
+			task := wb.Queue.PopTask()
 			if task == nil {
-				wb.State = WorkerIdle
-				time.Sleep(50 * time.Millisecond)
-				continue
+				logging.GlobalLogger.Log("debug", "System", "Worker", "No tasks available, exiting processing loop", map[string]any{
+					"queueID": wb.Queue.QueueID,
+				}, "NO_TASKS_AVAILABLE_EXITING", wb.QueueType)
+				break // Exit loop - no more tasks
 			}
 
 			// Task found - process it
 			wb.State = WorkerActive
-			logging.GlobalLogger.Log("debug", "System", "Worker", "Worker processing leased task", map[string]any{
+			logging.GlobalLogger.Log("debug", "System", "Worker", "Worker processing popped task", map[string]any{
 				"queueID":  wb.Queue.QueueID,
 				"taskID":   task.GetID(),
 				"path":     task.GetPath(),
 				"attempts": task.GetAttempts(),
-			}, "WORKER_PROCESSING_LEASED_TASK", wb.QueueType)
+			}, "WORKER_PROCESSING_POPPED_TASK", wb.QueueType)
 
-			// Let the specific worker implementation handle the retry logic,
-			// DB writes, and task resolution (NACK vs Finish)
-			if err := process(task); err != nil {
-				logging.GlobalLogger.Log("error", "System", "Worker", "Task processing returned error", map[string]any{
-					"taskID":   task.GetID(),
-					"error":    err.Error(),
-					"attempts": task.GetAttempts(),
-				}, "WORKER_TASK_PROCESSING_ERROR", wb.QueueType)
+			// Process the task
+			err := process(task)
+
+			if err != nil {
+				// Task failed - check if we can retry
+				if task.CanRetry(wb.Queue.RetryThreshold) {
+					// Still has retries left - increment attempts and re-add to queue
+					task.IncrementAttempts()
+					logging.GlobalLogger.Log("info", "System", "Worker", "Task failed but can retry - re-adding to queue", map[string]any{
+						"taskID":      task.GetID(),
+						"error":       err.Error(),
+						"attempts":    task.GetAttempts(),
+						"maxAttempts": wb.Queue.RetryThreshold,
+					}, "TASK_FAILED_CAN_RETRY", wb.QueueType)
+
+					wb.Queue.ReAddFailedTask(task)
+				} else {
+					// Max retries reached - log failure and discard
+					logging.GlobalLogger.Log("error", "System", "Worker", "Task failed and max retries reached - discarding", map[string]any{
+						"taskID":      task.GetID(),
+						"error":       err.Error(),
+						"attempts":    task.GetAttempts(),
+						"maxAttempts": wb.Queue.RetryThreshold,
+					}, "TASK_FAILED_MAX_RETRIES", wb.QueueType)
+				}
 			} else {
+				// Task succeeded
 				logging.GlobalLogger.Log("debug", "System", "Worker", "Task processing completed successfully", map[string]any{
 					"taskID":   task.GetID(),
 					"attempts": task.GetAttempts(),
 				}, "WORKER_TASK_PROCESSING_SUCCESS", wb.QueueType)
 			}
 
-			// ✨ Continue loop to check for more tasks
+			// Continue loop to check for more tasks
 			logging.GlobalLogger.Log("debug", "System", "Worker", "Task processed, checking for more tasks", map[string]any{
 				"queueID": wb.Queue.QueueID,
 			}, "WORKER_CHECKING_FOR_MORE_TASKS", wb.QueueType)

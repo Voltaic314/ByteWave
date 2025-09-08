@@ -170,8 +170,6 @@ func (c *Conductor) SetupQueue(name string, queueType QueueType, phase int, srcO
 		c.QP.QueueLevels[name] = phase
 	}
 
-	c.QP.LastPathCursors[name] = "" // Add path-based cursor for this queue
-
 	var tableName string
 	switch srcOrDst {
 	case "src":
@@ -297,7 +295,6 @@ func (c *Conductor) TeardownQueue(queueName string) {
 	// Okay now delete the stuff! \o/
 	delete(c.QP.Queues, queueName)
 	delete(c.QP.QueueLevels, queueName)
-	delete(c.QP.LastPathCursors, queueName)
 	delete(c.QP.QueriesPerPhase, queueName)
 
 	// 🔓 Unlocking...

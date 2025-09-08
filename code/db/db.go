@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/Voltaic314/ByteWave/code/types/logging"
@@ -178,9 +179,22 @@ func batchExecute(conn *sql.DB, tableQueries map[string][]string, tableParams ma
 	for table, queries := range tableQueries {
 		params := tableParams[table]
 		for i, query := range queries {
-			_, err = tx.Exec(query, params[i]...)
+			result, err := tx.Exec(query, params[i]...)
 			if err != nil {
 				return fmt.Errorf("failed to execute query for table %s: %w", table, err)
+			}
+
+			// Check if UPDATE/DELETE affected any rows
+			trimmedQuery := strings.TrimSpace(strings.ToUpper(query))
+			if strings.HasPrefix(trimmedQuery, "UPDATE") || strings.HasPrefix(trimmedQuery, "DELETE") {
+				rowsAffected, err := result.RowsAffected()
+				if err != nil {
+					fmt.Printf("⚠️  Could not get rows affected for table %s: %v\n", table, err)
+				} else if rowsAffected == 0 {
+					fmt.Printf("⚠️  UPDATE/DELETE affected 0 rows for table %s\n", table)
+					fmt.Printf("   Query: %s\n", query)
+					fmt.Printf("   Params: %v\n", params[i])
+				}
 			}
 		}
 	}
