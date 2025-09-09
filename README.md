@@ -20,7 +20,6 @@ This application allows you to migrate data from one storage service to another 
 * ⏳ **Upload phase** — next major core milestone (starts once traversal is hardened).
 * 🧪 **Early alpha traversal tests** — ongoing.
 * ⏳ **“Prepare the Root” UX/API** — replaces the current hardcoded JSON root setup used in dev/tests.
-* ✅ **PV vs FPV clarified** — PV = user filters (can stop recursion). FPV = compatibility checks/cleaning (never stops traversal; accumulates findings).
 
 > **Website:** planned later. For now, this README and the wiki are the source of truth.
 
