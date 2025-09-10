@@ -78,6 +78,11 @@ func (osSvc *OSService) ConvertFileInfoToMap(info os.FileInfo, path string) map[
 
 // GetAllItems returns channels that asynchronously emit folders, files, and errors found at a path.
 func (osSvc *OSService) GetAllItems(folder filesystem.Folder, _ <-chan int) (<-chan []filesystem.Folder, <-chan []filesystem.File, <-chan error) {
+	// Why tf did I not implement pagination here? We are 
+	// passing in the pagination stream but not using it?
+	// wtf was I smoking? I guess for now it's fine but we will
+	// need to implement this before or during the auto scaler overhaul.
+	// TODO: Implement pagination here.
 	foldersChan := make(chan []filesystem.Folder, 1)
 	filesChan := make(chan []filesystem.File, 1)
 	errChan := make(chan error, 1)

@@ -37,7 +37,6 @@ type TaskQueue struct {
 	mu                  sync.Mutex     // Mutex for concurrent access
 	PaginationSize      int            // Pagination width for folder content listing
 	PaginationChan      chan int       // Channel for live updates
-	GlobalSettings      map[string]any // Stores global settings
 	State               QueueState     // Tracks if the queue is running or paused
 	cond                *sync.Cond     // Queue-specific condition variable
 	SignalTopicBase     string         // e.g. "src-traversal"
@@ -71,7 +70,6 @@ func NewTaskQueue(queueType QueueType, phase int, srcOrDst string, paginationSiz
 		workers:             []*WorkerBase{},
 		PaginationSize:      paginationSize,
 		PaginationChan:      make(chan int, 1),
-		GlobalSettings:      make(map[string]any),
 		State:               QueueRunning,
 		SignalTopicBase:     queueID,
 		RunningLowTriggered: false,
@@ -292,29 +290,6 @@ func (q *TaskQueue) GetPaginationChan() <-chan int {
 	q.Lock()
 	defer q.Unlock()
 	return q.PaginationChan
-}
-
-// SetGlobalSetting updates a global setting dynamically.
-func (q *TaskQueue) SetGlobalSetting(key string, value any) {
-	q.Lock()
-	defer q.Unlock()
-
-	logging.GlobalLogger.Log(
-		"info", "System", "Queue", "Setting global setting", map[string]any{
-			"queueID": q.QueueID,
-			"key":     key,
-		}, "SETTING_GLOBAL_SETTING", q.SrcOrDst,
-	)
-	q.GlobalSettings[key] = value
-}
-
-// GetGlobalSetting retrieves a global setting dynamically.
-func (q *TaskQueue) GetGlobalSetting(key string) (any, bool) {
-	q.Lock()
-	defer q.Unlock()
-
-	value, exists := q.GlobalSettings[key]
-	return value, exists
 }
 
 // AreAllWorkersIdle checks if all workers are idle.
