@@ -1,38 +1,29 @@
 package main
 
 import (
-	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"math/rand"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
-	"github.com/Voltaic314/ByteWave/code/db/tables"
-
+	"github.com/Voltaic314/ByteWave/tests/db"
+	"github.com/Voltaic314/ByteWave/tests/db/tables"
+	typesdb "github.com/Voltaic314/ByteWave/tests/types/db"
+	"github.com/google/uuid"
 	_ "github.com/marcboeker/go-duckdb"
 )
 
-type SeedConfig struct {
-	DBPath        string  `json:"db_path"`
-	SrcPath       string  `json:"src_path"`
-	DstPath       string  `json:"dst_path"`
-	Overwrite     bool    `json:"overwrite"`
-	SchemaDir     string  `json:"schema_dir"`
-	Seed          int64   `json:"seed"`
-	NumFiles      int     `json:"num_files"`
-	MaxDepth      int     `json:"max_depth"`
-	Fanout        int     `json:"fanout"`
-	IncludeDstPct float64 `json:"include_dst_pct"`
-	DstOnlyPct    float64 `json:"dst_only_pct"`
-	LastModified  string  `json:"last_modified"`
+// ParentNode represents a parent node from the Oracle DB for child generation
+type ParentNode struct {
+	ID   string `json:"id"`
+	Path string `json:"path"`
 }
 
+// OracleNode struct removed - using direct DB inserts instead of in-memory accumulation
 func main() {
-	cfgPath := "tests/traversal_tests/config.json"
+	cfgPath := "tests/traversal_tests/mock_fs_config.json"
 	if env := os.Getenv("BW_SEED_CONFIG"); env != "" {
 		cfgPath = env
 	}
@@ -41,499 +32,308 @@ func main() {
 		fatalf("load config: %v", err)
 	}
 
-	// defaults
-	if strings.TrimSpace(cfg.DBPath) == "" {
-		cfg.DBPath = "tests/traversal_tests/test_traversal.db"
-	}
-	if strings.TrimSpace(cfg.SrcPath) == "" {
-		cfg.SrcPath = "tests/traversal_tests/starting_src_folder"
-	}
-	if strings.TrimSpace(cfg.DstPath) == "" {
-		cfg.DstPath = "tests/traversal_tests/starting_dst_folder"
-	}
-	if cfg.NumFiles <= 0 {
-		cfg.NumFiles = 1000
-	}
-	if cfg.MaxDepth <= 0 {
-		cfg.MaxDepth = 4
-	}
-	if cfg.Fanout <= 0 {
-		cfg.Fanout = 5
-	}
-	if cfg.IncludeDstPct < 0 || cfg.IncludeDstPct > 1 {
-		cfg.IncludeDstPct = 0.7
-	}
-	if cfg.DstOnlyPct < 0 || cfg.DstOnlyPct > 1 {
-		cfg.DstOnlyPct = 0.05
-	}
-	if strings.TrimSpace(cfg.LastModified) == "" {
-		cfg.LastModified = "2025-01-01T00:00:00Z"
+	// Validate config
+	if err := validateConfig(cfg); err != nil {
+		fatalf("invalid config: %v", err)
 	}
 
-	absDB, _ := filepath.Abs(cfg.DBPath)
-	absSrc, _ := filepath.Abs(cfg.SrcPath)
-	absDst, _ := filepath.Abs(cfg.DstPath)
-
-	fmt.Printf("📁 DB:  %s\n", absDB)
-	fmt.Printf("📁 SRC: %s\n", absSrc)
-	fmt.Printf("📁 DST: %s\n", absDst)
-
-	if cfg.Overwrite {
-		// Remove DB file and any WAL files
-		if err := os.RemoveAll(absDB); err != nil {
-			fatalf("remove existing DB: %v", err)
-		}
-		if err := os.RemoveAll(absDB + ".wal"); err != nil && !os.IsNotExist(err) {
-			fatalf("remove existing DB WAL: %v", err)
-		}
-	}
-
-	// Clean & (re)create roots on disk so DB and FS are in sync
-	if err := os.RemoveAll(absSrc); err != nil {
-		fatalf("remove src root: %v", err)
-	}
-	if err := os.RemoveAll(absDst); err != nil {
-		fatalf("remove dst root: %v", err)
-	}
-	if err := os.MkdirAll(absSrc, 0o755); err != nil {
-		fatalf("mkdir src: %v", err)
-	}
-	if err := os.MkdirAll(absDst, 0o755); err != nil {
-		fatalf("mkdir dst: %v", err)
-	}
-
-	db, err := sql.Open("duckdb", absDB)
-	if err != nil {
-		fatalf("open duckdb: %v", err)
-	}
-	defer db.Close()
-
-	ctx := context.Background()
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		fatalf("begin tx: %v", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	if err := applyTablesFromLive(ctx, tx); err != nil {
-		fatalf("apply live tables: %v", err)
-	}
-
-	lastMod, err := time.Parse(time.RFC3339, cfg.LastModified)
-	if err != nil {
-		fatalf("parse last_modified: %v", err)
-	}
-
-	// Insert root nodes ONLY - let traversal discover everything else
-	if err := insertSourceRoot(ctx, tx, absSrc, lastMod); err != nil {
-		fatalf("insert src root: %v", err)
-	}
-	if err := insertDestRoot(ctx, tx, absDst, lastMod); err != nil {
-		fatalf("insert dst root: %v", err)
-	}
-
-	// Create expected tables for comparison after traversal
-	if err := createExpectedTables(ctx, tx); err != nil {
-		fatalf("create expected tables: %v", err)
-	}
-
-	// Prepared statements for expected results (what traversal should discover)
-	srcExpectedStmt, err := tx.PrepareContext(ctx, `
-		INSERT INTO source_nodes_expected (
-			path, name, identifier, parent_id, type, level, size,
-			last_modified, traversal_status, upload_status,
-			traversal_attempts, upload_attempts, error_ids
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'successful', 'pending', 1, 0, NULL)
-	`)
-	if err != nil {
-		fatalf("prepare src expected insert: %v", err)
-	}
-	defer srcExpectedStmt.Close()
-
-	dstExpectedStmt, err := tx.PrepareContext(ctx, `
-		INSERT INTO destination_nodes_expected (
-			path, name, identifier, parent_id, type, level, size,
-			last_modified, traversal_status, traversal_attempts, error_ids
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'successful', 1, NULL)
-	`)
-	if err != nil {
-		fatalf("prepare dst expected insert: %v", err)
-	}
-	defer dstExpectedStmt.Close()
-
-	// -------- FILESYSTEM & EXPECTED RESULTS GENERATOR --------
-
-	// RNG
-	seed := cfg.Seed
+	// Set up RNG
+	seed := cfg.Generation.Seed
 	if seed == 0 {
 		seed = time.Now().UnixNano()
 	}
 	rng := rand.New(rand.NewSource(seed))
 	fmt.Printf("🎲 Seed: %d\n", seed)
 
-	// helpers
-	toDBPath := func(rel string) string {
-		rel = filepath.ToSlash(rel)
-		if rel == "" || rel == "." {
-			return "/"
-		}
-		return "/" + strings.TrimPrefix(rel, "/")
+	// Clean up existing Oracle DB
+	oraclePath, _ := filepath.Abs(cfg.Databases.Oracle)
+	if err := os.RemoveAll(oraclePath); err != nil && !os.IsNotExist(err) {
+		fatalf("remove existing oracle db: %v", err)
 	}
-	parentDBPath := func(dbPath string) string {
-		if dbPath == "/" {
-			return ""
-		}
-		dir := filepath.ToSlash(filepath.Dir(strings.TrimPrefix(dbPath, "/")))
-		if dir == "." || dir == "" {
-			return "/"
-		}
-		return "/" + dir
+	if err := os.RemoveAll(oraclePath + ".wal"); err != nil && !os.IsNotExist(err) {
+		fatalf("remove existing oracle wal: %v", err)
 	}
 
-	createdSrcDirs := map[string]bool{"/": true}
-	createdDstDirs := map[string]bool{"/": true}
-
-	ensureSrcDirExpected := func(dbPath, absPath string, level int) error {
-		if createdSrcDirs[dbPath] {
-			return nil
-		}
-		_, err := srcExpectedStmt.ExecContext(ctx,
-			dbPath,
-			filepath.Base(absPath),
-			absPath,
-			parentDBPath(dbPath),
-			"folder",
-			level,
-			0,
-			lastMod,
-		)
-		if err == nil {
-			createdSrcDirs[dbPath] = true
-		}
-		return err
+	// Initialize Oracle DB with write queues
+	oracleDB, err := db.NewDB(oraclePath)
+	if err != nil {
+		fatalf("create oracle db: %v", err)
 	}
-	ensureDstDirExpected := func(dbPath, absPath string, level int) error {
-		if createdDstDirs[dbPath] {
-			return nil
-		}
-		_, err := dstExpectedStmt.ExecContext(ctx,
-			dbPath,
-			filepath.Base(absPath),
-			absPath,
-			parentDBPath(dbPath),
-			"folder",
-			level,
-			0,
-			lastMod,
-		)
-		if err == nil {
-			createdDstDirs[dbPath] = true
-		}
-		return err
+	defer oracleDB.Close()
+
+	// Set up write queues for Oracle tables
+	oracleDB.InitWriteQueue("source_nodes", typesdb.NodeWriteQueue, 1000, 100*time.Millisecond)
+	oracleDB.InitWriteQueue("destination_nodes", typesdb.NodeWriteQueue, 1000, 100*time.Millisecond)
+
+	// Create Oracle tables
+	if err := createOracleTables(oracleDB); err != nil {
+		fatalf("create oracle tables: %v", err)
 	}
 
-	// Phase A — build directory pool up to max_depth
-	type dirNode struct {
-		relPath string
-		level   int
-	}
-	buildDirPool := func() []dirNode {
-		pool := []dirNode{{relPath: "", level: 0}} // root "/"
-		q := []dirNode{{relPath: "", level: 0}}
-
-		for len(q) > 0 {
-			cur := q[0]
-			q = q[1:]
-
-			if cur.level >= cfg.MaxDepth {
-				continue
-			}
-			// Create between 1..Fanout subdirs under this dir
-			numDirs := 1 + rng.Intn(cfg.Fanout)
-			// Optional softening: sometimes reduce directory count
-			if rng.Float64() < 0.30 && numDirs > 1 {
-				numDirs--
-			}
-
-			for d := 0; d < numDirs; d++ {
-				dirName := fmt.Sprintf("dir_%d", len(pool)) // stable-ish name
-				relDir := filepath.Join(cur.relPath, dirName)
-				absDirSrc := filepath.Join(absSrc, relDir)
-				absDirDst := filepath.Join(absDst, relDir)
-
-				// FS
-				if err := os.MkdirAll(absDirSrc, 0o755); err != nil {
-					fatalf("mkdir src subdir: %v", err)
-				}
-				if err := os.MkdirAll(absDirDst, 0o755); err != nil {
-					fatalf("mkdir dst subdir: %v", err)
-				}
-
-				// DB - populate expected tables
-				dbPath := toDBPath(relDir)
-				if err := ensureSrcDirExpected(dbPath, absDirSrc, cur.level+1); err != nil {
-					fatalf("insert src expected dir: %v", err)
-				}
-				if err := ensureDstDirExpected(dbPath, absDirDst, cur.level+1); err != nil {
-					fatalf("insert dst expected dir: %v", err)
-				}
-
-				n := dirNode{relPath: relDir, level: cur.level + 1}
-				pool = append(pool, n)
-				q = append(q, n)
-			}
-		}
-
-		// Guarantee at least one non-root dir if depth > 0
-		if cfg.MaxDepth > 0 && len(pool) == 1 {
-			relDir := "dir_forced_0"
-			absDirSrc := filepath.Join(absSrc, relDir)
-			absDirDst := filepath.Join(absDst, relDir)
-			if err := os.MkdirAll(absDirSrc, 0o755); err != nil {
-				fatalf("mkdir forced src: %v", err)
-			}
-			if err := os.MkdirAll(absDirDst, 0o755); err != nil {
-				fatalf("mkdir forced dst: %v", err)
-			}
-			dbPath := toDBPath(relDir)
-			if err := ensureSrcDirExpected(dbPath, absDirSrc, 1); err != nil {
-				fatalf("insert forced src expected dir: %v", err)
-			}
-			if err := ensureDstDirExpected(dbPath, absDirDst, 1); err != nil {
-				fatalf("insert forced dst expected dir: %v", err)
-			}
-			pool = append(pool, dirNode{relPath: relDir, level: 1})
-		}
-
-		// Optional: shuffle the dir pool for more randomness in placement
-		rng.Shuffle(len(pool), func(i, j int) { pool[i], pool[j] = pool[j], pool[i] })
-
-		return pool
+	// Generate tree structure using sliding window approach
+	fmt.Println("🌳 Generating tree structure...")
+	totalSrcNodes, totalDstNodes, err := generateTreeLevelByLevel(cfg, rng, oracleDB)
+	if err != nil {
+		fatalf("generate tree: %v", err)
 	}
 
-	dirPool := buildDirPool()
+	// Force flush all queues
+	oracleDB.ForceFlushTable("source_nodes")
+	oracleDB.ForceFlushTable("destination_nodes")
 
-	// Phase B — place exactly NumFiles round-robin across dirPool
-	filesMade := 0
-	for filesMade < cfg.NumFiles {
-		d := dirPool[filesMade%len(dirPool)] // round-robin target dir
-
-		fname := fmt.Sprintf("f_%d.txt", filesMade)
-		relFile := filepath.Join(d.relPath, fname)
-
-		// SRC file
-		absFileSrc := filepath.Join(absSrc, relFile)
-		if err := os.MkdirAll(filepath.Dir(absFileSrc), 0o755); err != nil {
-			fatalf("mkdir src parent: %v", err)
-		}
-		if err := os.WriteFile(absFileSrc, []byte("test"), 0o644); err != nil {
-			fatalf("write src file: %v", err)
-		}
-		sinfo, _ := os.Stat(absFileSrc)
-
-		dbPath := toDBPath(relFile)
-		parent := parentDBPath(dbPath)
-
-		// ensure parent dirs (src expected)
-		parentAbsSrc := absSrc
-		if parent != "/" {
-			parentAbsSrc = filepath.Join(absSrc, strings.TrimPrefix(parent, "/"))
-		}
-		if err := ensureSrcDirExpected(parent, parentAbsSrc, d.level); err != nil {
-			fatalf("ensure src expected parent dir: %v", err)
-		}
-
-		// src expected row
-		if _, err := srcExpectedStmt.ExecContext(ctx,
-			dbPath, filepath.Base(absFileSrc), absFileSrc, parent,
-			"file", d.level+1, sinfo.Size(), lastMod,
-		); err != nil {
-			fatalf("insert src expected file: %v", err)
-		}
-
-		// Mirror on DST with probability
-		if rng.Float64() < cfg.IncludeDstPct {
-			absFileDst := filepath.Join(absDst, relFile)
-			if err := os.MkdirAll(filepath.Dir(absFileDst), 0o755); err != nil {
-				fatalf("mkdir dst parent: %v", err)
-			}
-			if err := os.WriteFile(absFileDst, []byte("test"), 0o644); err != nil {
-				fatalf("write dst file: %v", err)
-			}
-			dinfo, _ := os.Stat(absFileDst)
-
-			parentAbsDst := absDst
-			if parent != "/" {
-				parentAbsDst = filepath.Join(absDst, strings.TrimPrefix(parent, "/"))
-			}
-			if err := ensureDstDirExpected(parent, parentAbsDst, d.level); err != nil {
-				fatalf("ensure dst expected parent dir: %v", err)
-			}
-
-			if _, err := dstExpectedStmt.ExecContext(ctx,
-				dbPath, filepath.Base(absFileDst), absFileDst, parent,
-				"file", d.level+1, dinfo.Size(), lastMod,
-			); err != nil {
-				fatalf("insert dst expected file: %v", err)
-			}
-		}
-
-		// occasional dst-only sibling at same dir
-		if rng.Float64() < cfg.DstOnlyPct {
-			onlyName := fmt.Sprintf("dst_only_%d.txt", filesMade)
-			relOnly := filepath.Join(d.relPath, onlyName)
-			absOnlyDst := filepath.Join(absDst, relOnly)
-			if err := os.MkdirAll(filepath.Dir(absOnlyDst), 0o755); err != nil {
-				fatalf("mkdir dst-only parent: %v", err)
-			}
-			if err := os.WriteFile(absOnlyDst, []byte("dst-only"), 0o644); err != nil {
-				fatalf("write dst-only file: %v", err)
-			}
-			oInfo, _ := os.Stat(absOnlyDst)
-			dbOnlyPath := toDBPath(relOnly)
-			onlyParent := parentDBPath(dbOnlyPath)
-			onlyParentAbsDst := absDst
-			if onlyParent != "/" {
-				onlyParentAbsDst = filepath.Join(absDst, strings.TrimPrefix(onlyParent, "/"))
-			}
-			if err := ensureDstDirExpected(onlyParent, onlyParentAbsDst, d.level); err != nil {
-				fatalf("ensure dst expected parent dir (dst-only): %v", err)
-			}
-			if _, err := dstExpectedStmt.ExecContext(ctx,
-				dbOnlyPath, filepath.Base(absOnlyDst), absOnlyDst, onlyParent,
-				"file", d.level+1, oInfo.Size(), lastMod,
-			); err != nil {
-				fatalf("insert dst expected-only file: %v", err)
-			}
-		}
-
-		filesMade++
-	}
-
-	// -------------------------------------
-
-	if err := tx.Commit(); err != nil {
-		fatalf("commit: %v", err)
-	}
-
-	fmt.Printf("✅ Generated exactly %d files (≤ depth %d) and populated expected results.\n", cfg.NumFiles, cfg.MaxDepth)
-	fmt.Println("   Tables: source_nodes (root only), destination_nodes (root only), *_expected (full data), audit_log, *_errors")
+	fmt.Printf("✅ Generated %d src nodes and %d dst nodes successfully!\n", totalSrcNodes, totalDstNodes)
 }
 
-// createExpectedTables creates the *_expected tables to compare traversal results against
-func createExpectedTables(ctx context.Context, tx *sql.Tx) error {
-	// Create source_nodes_expected table
-	srcExpectedDDL := `CREATE TABLE IF NOT EXISTS source_nodes_expected (
-		path VARCHAR PRIMARY KEY,
-		name VARCHAR NOT NULL,
-		identifier VARCHAR NOT NULL,
-		parent_id VARCHAR,
-		type VARCHAR NOT NULL,
-		level INTEGER NOT NULL,
-		size BIGINT NOT NULL,
-		last_modified TIMESTAMP NOT NULL,
-		traversal_status VARCHAR NOT NULL DEFAULT 'pending',
-		upload_status VARCHAR NOT NULL DEFAULT 'pending',
-		traversal_attempts INTEGER NOT NULL DEFAULT 0,
-		upload_attempts INTEGER NOT NULL DEFAULT 0,
-		error_ids VARCHAR,
-		last_error VARCHAR
-	)`
-	if _, err := tx.ExecContext(ctx, srcExpectedDDL); err != nil {
-		return fmt.Errorf("creating source_nodes_expected: %w", err)
-	}
-	fmt.Println("📜 Created table: source_nodes_expected")
-
-	// Create destination_nodes_expected table
-	dstExpectedDDL := `CREATE TABLE IF NOT EXISTS destination_nodes_expected (
-		path VARCHAR PRIMARY KEY,
-		name VARCHAR NOT NULL,
-		identifier VARCHAR NOT NULL,
-		parent_id VARCHAR,
-		type VARCHAR NOT NULL,
-		level INTEGER NOT NULL,
-		size BIGINT NOT NULL,
-		last_modified TIMESTAMP NOT NULL,
-		traversal_status VARCHAR NOT NULL DEFAULT 'pending',
-		traversal_attempts INTEGER NOT NULL DEFAULT 0,
-		error_ids VARCHAR,
-		last_error VARCHAR
-	)`
-	if _, err := tx.ExecContext(ctx, dstExpectedDDL); err != nil {
-		return fmt.Errorf("creating destination_nodes_expected: %w", err)
-	}
-	fmt.Println("📜 Created table: destination_nodes_expected")
-
-	return nil
-}
-
-// ---------- helpers ----------
-
-func loadConfig(path string) (*SeedConfig, error) {
+func loadConfig(path string) (*tables.OracleTestConfig, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	var cfg SeedConfig
+	var cfg tables.OracleTestConfig
 	if err := json.Unmarshal(b, &cfg); err != nil {
 		return nil, err
 	}
 	return &cfg, nil
 }
 
+func validateConfig(cfg *tables.OracleTestConfig) error {
+	if cfg.Generation.MinChildFolders < 0 || cfg.Generation.MaxChildFolders < cfg.Generation.MinChildFolders {
+		return fmt.Errorf("invalid child folder range: min=%d, max=%d", cfg.Generation.MinChildFolders, cfg.Generation.MaxChildFolders)
+	}
+	if cfg.Generation.MinChildFiles < 0 || cfg.Generation.MaxChildFiles < cfg.Generation.MinChildFiles {
+		return fmt.Errorf("invalid child file range: min=%d, max=%d", cfg.Generation.MinChildFiles, cfg.Generation.MaxChildFiles)
+	}
+	if cfg.Generation.MinDepth < 1 || cfg.Generation.MaxDepth < cfg.Generation.MinDepth {
+		return fmt.Errorf("invalid depth range: min=%d, max=%d", cfg.Generation.MinDepth, cfg.Generation.MaxDepth)
+	}
+	if cfg.Generation.DstProb < 0.0 || cfg.Generation.DstProb > 1.0 {
+		return fmt.Errorf("invalid dst_prob: %f (must be 0.0-1.0)", cfg.Generation.DstProb)
+	}
+	return nil
+}
+
+func createOracleTables(oracleDB *db.DB) error {
+	// Use existing table definitions
+	tables := []interface {
+		Name() string
+		Schema() string
+	}{
+		tables.OracleSrcNodesTable{},
+		tables.OracleDstNodesTable{},
+	}
+
+	for _, table := range tables {
+		ddl := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (%s)", table.Name(), table.Schema())
+		if err := oracleDB.Write(ddl); err != nil {
+			return fmt.Errorf("creating table %q: %w", table.Name(), err)
+		}
+		fmt.Printf("📜 Created Oracle table: %s\n", table.Name())
+	}
+
+	return nil
+}
+
+func generateTreeLevelByLevel(cfg *tables.OracleTestConfig, rng *rand.Rand, oracleDB *db.DB) (int64, int64, error) {
+	// Generate random depth within range
+	depth := cfg.Generation.MinDepth + rng.Intn(cfg.Generation.MaxDepth-cfg.Generation.MinDepth+1)
+	fmt.Printf("🎯 Target depth: %d\n", depth)
+
+	var totalSrcNodes, totalDstNodes int64
+
+	// Generate root node (always exists in both src and dst)
+	rootSrcID := generateUUID()
+	rootDstID := generateUUID()
+
+	// Insert root nodes immediately
+	if err := insertRootNodes(oracleDB, rootSrcID, rootDstID); err != nil {
+		return 0, 0, fmt.Errorf("insert root nodes: %w", err)
+	}
+	totalSrcNodes++
+	totalDstNodes++
+
+	// Process each level by querying the database
+	currentLevel := 1
+	for currentLevel <= depth {
+		fmt.Printf("📁 Processing level %d...\n", currentLevel)
+
+		// Query database for nodes that need children at this level
+		srcCount, dstCount, err := generateChildrenForLevelFromDB(cfg, rng, oracleDB, currentLevel)
+		if err != nil {
+			return 0, 0, fmt.Errorf("generate children for level %d: %w", currentLevel, err)
+		}
+
+		if srcCount == 0 {
+			fmt.Printf("📁 No more nodes to process at level %d, stopping\n", currentLevel)
+			break
+		}
+
+		totalSrcNodes += srcCount
+		totalDstNodes += dstCount
+		currentLevel++
+	}
+
+	return totalSrcNodes, totalDstNodes, nil
+}
+
+func insertRootNodes(oracleDB *db.DB, rootSrcID, rootDstID string) error {
+	// Root path is always "/"
+	rootPath := "/"
+
+	// Insert src root node
+	srcQuery := `INSERT INTO source_nodes (id, parent_id, name, path, type, size, level, checked) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+	oracleDB.QueueWrite("source_nodes", srcQuery, rootSrcID, "", "root", rootPath, "folder", 0, 0, false)
+
+	// Insert dst root node
+	dstQuery := `INSERT INTO destination_nodes (id, parent_id, name, path, type, size, level, checked) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+	oracleDB.QueueWrite("destination_nodes", dstQuery, rootDstID, "", "root", rootPath, "folder", 0, 0, false)
+
+	return nil
+}
+
+func generateChildrenForLevelFromDB(cfg *tables.OracleTestConfig, rng *rand.Rand, oracleDB *db.DB, level int) (int64, int64, error) {
+	var totalSrcCount, totalDstCount int64
+	const batchSize = 1000 // Process 1000 parents at a time
+	var lastSeenRowID int64 = 0
+
+	// Force flush before querying to ensure we have the latest data
+	oracleDB.ForceFlushTable("source_nodes")
+	oracleDB.ForceFlushTable("destination_nodes")
+
+	for {
+		// Query for folder nodes at the current level that need children
+		// Use rowid-based pagination for O(1) performance (rowid is monotonic)
+		query := `SELECT s.rowid, s.id, s.path FROM source_nodes s
+			WHERE s.level = ? AND s.type = 'folder' AND s.rowid > ? 
+			ORDER BY s.rowid LIMIT ?`
+
+		rows, err := oracleDB.Query("source_nodes", query, level-1, lastSeenRowID, batchSize)
+		if err != nil {
+			return 0, 0, fmt.Errorf("query parents for level %d: %w", level, err)
+		}
+
+		var parents []ParentNode
+		var maxRowID int64 = lastSeenRowID
+		for rows.Next() {
+			var rowID int64
+			var ID, parentPath string
+			if err := rows.Scan(&rowID, &ID, &parentPath); err != nil {
+				rows.Close()
+				return 0, 0, fmt.Errorf("scan parent row: %w", err)
+			}
+			parents = append(parents, ParentNode{ID: ID, Path: parentPath})
+			if rowID > maxRowID {
+				maxRowID = rowID
+			}
+		}
+		rows.Close()
+
+		if len(parents) == 0 {
+			// No more parents to process
+			break
+		}
+
+		// Update lastSeenRowID for pagination
+		lastSeenRowID = maxRowID
+
+		// Generate children for this batch of parents
+		srcCount, dstCount, err := generateChildrenForBatch(cfg, rng, oracleDB, parents, level)
+		if err != nil {
+			return 0, 0, fmt.Errorf("generate children for batch: %w", err)
+		}
+
+		totalSrcCount += srcCount
+		totalDstCount += dstCount
+
+		fmt.Printf("📁 Processed %d parents at level %d, generated %d src + %d dst children\n",
+			len(parents), level, srcCount, dstCount)
+
+		// If we got fewer results than batch size, we've reached the end
+		if len(parents) < batchSize {
+			break
+		}
+	}
+
+	return totalSrcCount, totalDstCount, nil
+}
+
+func generateChildrenForBatch(cfg *tables.OracleTestConfig, rng *rand.Rand, oracleDB *db.DB, parents []ParentNode, level int) (int64, int64, error) {
+	var srcCount, dstCount int64
+
+	// Process each parent in this batch
+	for _, parent := range parents {
+		// Generate random number of folders for this parent
+		numFolders := cfg.Generation.MinChildFolders + rng.Intn(cfg.Generation.MaxChildFolders-cfg.Generation.MinChildFolders+1)
+		for i := 0; i < numFolders; i++ {
+			srcID := generateUUID()
+			folderName := fmt.Sprintf("folder_%d", i)
+			folderPath := buildPath(parent.Path, folderName)
+
+			// Check if this folder should exist in dst
+			shouldExistInDst := rng.Float64() < cfg.Generation.DstProb
+			var dstID string
+			if shouldExistInDst {
+				dstID = generateUUID()
+			}
+
+			// Always insert src folder
+			srcQuery := `INSERT INTO source_nodes (id, parent_id, name, path, type, size, level, checked) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+			oracleDB.QueueWrite("source_nodes", srcQuery, srcID, parent.ID, folderName, folderPath, "folder", 0, level, false)
+			srcCount++
+
+			// Only insert dst folder if it should exist
+			if shouldExistInDst {
+				dstQuery := `INSERT INTO destination_nodes (id, parent_id, name, path, type, size, level, checked) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+				oracleDB.QueueWrite("destination_nodes", dstQuery, dstID, parent.ID, folderName, folderPath, "folder", 0, level, false)
+				dstCount++
+			}
+		}
+
+		// Generate random number of files for this parent
+		numFiles := cfg.Generation.MinChildFiles + rng.Intn(cfg.Generation.MaxChildFiles-cfg.Generation.MinChildFiles+1)
+		for i := 0; i < numFiles; i++ {
+			srcID := generateUUID()
+			fileName := fmt.Sprintf("file_%d.txt", i)
+			filePath := buildPath(parent.Path, fileName)
+
+			// Check if this file should exist in dst
+			shouldExistInDst := rng.Float64() < cfg.Generation.DstProb
+			var dstID string
+			if shouldExistInDst {
+				dstID = generateUUID()
+			}
+
+			// Always insert src file
+			srcQuery := `INSERT INTO source_nodes (id, parent_id, name, path, type, size, level, checked) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+			fileSize := int64(100 + rng.Intn(900)) // Random size 100-999 bytes
+			oracleDB.QueueWrite("source_nodes", srcQuery, srcID, parent.ID, fileName, filePath, "file", fileSize, level, false)
+			srcCount++
+
+			// Only insert dst file if it should exist
+			if shouldExistInDst {
+				dstQuery := `INSERT INTO destination_nodes (id, parent_id, name, path, type, size, level, checked) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+				oracleDB.QueueWrite("destination_nodes", dstQuery, dstID, parent.ID, fileName, filePath, "file", fileSize, level, false)
+				dstCount++
+			}
+		}
+	}
+
+	return srcCount, dstCount, nil
+}
+
+func generateUUID() string {
+	return uuid.New().String()
+}
+
+// buildPath constructs the full path for a node based on its parent's path and name
+func buildPath(parentPath, name string) string {
+	if parentPath == "" {
+		// Root node
+		return "/"
+	}
+	return parentPath + "/" + name
+}
+
 func fatalf(f string, a ...any) {
 	fmt.Printf("❌ "+f+"\n", a...)
 	os.Exit(1)
 }
-
-func applyTablesFromLive(ctx context.Context, tx *sql.Tx) error {
-	tbls := []interface {
-		Name() string
-		Schema() string
-	}{
-		tables.AuditLogTable{},
-		tables.SourceNodesTable{},
-		tables.DestinationNodesTable{},
-	}
-	for _, t := range tbls {
-		ddl := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (%s)", t.Name(), t.Schema())
-		if _, err := tx.ExecContext(ctx, ddl); err != nil {
-			return fmt.Errorf("creating table %q: %w", t.Name(), err)
-		}
-		fmt.Printf("📜 Ensured table: %s\n", t.Name())
-	}
-	// TEMP until you add these to the tables package:
-	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS src_nodes_errors (id VARCHAR PRIMARY KEY)`); err != nil {
-		return fmt.Errorf("creating src_nodes_errors: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS dst_nodes_errors (id VARCHAR PRIMARY KEY)`); err != nil {
-		return fmt.Errorf("creating dst_nodes_errors: %w", err)
-	}
-	fmt.Println("📜 Ensured tables: src_nodes_errors, dst_nodes_errors")
-	return nil
-}
-
-func insertSourceRoot(ctx context.Context, tx *sql.Tx, absSrc string, lastMod time.Time) error {
-	stmt := `
-INSERT INTO source_nodes (
-    path, name, identifier, parent_id, type, level, size,
-    last_modified, traversal_status, upload_status,
-    traversal_attempts, upload_attempts, error_ids
-) VALUES ('/', ?, ?, '', 'folder', 0, 0, ?, 'pending', 'pending', 0, 0, NULL)
-`
-	_, err := tx.ExecContext(ctx, stmt, filepath.Base(absSrc), absSrc, lastMod)
-	return err
-}
-
-func insertDestRoot(ctx context.Context, tx *sql.Tx, absDst string, lastMod time.Time) error {
-	stmt := `
-INSERT INTO destination_nodes (
-    path, name, identifier, parent_id, type, level, size,
-    last_modified, traversal_status, traversal_attempts, error_ids
-) VALUES ('/', ?, ?, '', 'folder', 0, 0, ?, 'pending', 0, NULL)
-`
-	_, err := tx.ExecContext(ctx, stmt, filepath.Base(absDst), absDst, lastMod)
-	return err
-}
-
-// ---------- end helpers ----------

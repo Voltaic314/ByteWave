@@ -32,8 +32,8 @@ try {
 
 # 1) Clean up any existing test artifacts 
 Write-Host "[ByteWave] Cleaning up previous test artifacts..."
-$dbPath = "tests\traversal_tests\test_traversal.db"
-$walPath = "tests\traversal_tests\test_traversal.db.wal"
+$dbPath = "tests\traversal_tests\bytewave.db"
+$walPath = "tests\traversal_tests\bytewave.db.wal"
 if (Test-Path $dbPath) {
     Remove-Item $dbPath -Force
     Write-Host "[ByteWave] Removed existing DB file"

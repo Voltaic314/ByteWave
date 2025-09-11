@@ -6,7 +6,7 @@ from datetime import datetime
 
 # Paths - dynamically built from current working directory
 base_dir = os.getcwd()
-db_path = os.path.join(base_dir, "tests", "traversal_tests", "test_traversal.db")
+db_path = os.path.join(base_dir, "tests", "traversal_tests", "bytewave.db")
 
 # Source and destination folder paths (relative to base_dir)
 src_folder_rel_path = os.path.join("tests", "traversal_tests", "starting_src_folder")

@@ -53,7 +53,7 @@ func main() {
 	time.Sleep(3 * time.Second)
 
 	// Start the Conductor — now self-contained (handles its own DB + logger)
-	dbPath := filepath.Join(cwd, "tests", "traversal_tests", "test_traversal.db")
+	dbPath := filepath.Join(cwd, "tests", "traversal_tests", "bytewave.db")
 	conductor := processing.NewConductor(
 		dbPath,
 		100,  // running low threshold
